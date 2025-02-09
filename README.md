@@ -19,11 +19,15 @@ $module load nvidia/cuda11/cuda/11.8.0
 $module load nvidia/cuda11/cudnn/8.7.0.84
 $python run.py --configure-env nav2 --exp-data-dir ExperimentalData
 ```
-  
 
-### Delete lines regarding env.seed to avoid errors.
+## Branches
+- Debashis: ``git checkout develop-debashis``
+- Risal: ``git checkout develop-risal``
 
-### You may need to run the training inside job. Head node might give errors.
+## Additional Notes
+Delete lines regarding env.seed to avoid errors.
+
+You may need to run the training inside job. Head node might give errors.
 
 ## Acknowledgements
 - AdvExRL (https://github.com/asifurrahman1/AdvEx-RL.git):
