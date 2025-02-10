@@ -40,11 +40,12 @@ def compute_critic_loss(agent, states, actions, next_states, rewards, cont_flags
         critic_loss = ((qf1_loss + qf2_loss) / 2.0).item()
     return critic_loss
 
-def compute_policy_loss(agent, states, policy_sample_fn):
-    pi, log_pi, _,_ = policy_sample_fn(states)
-    qf1_pi, qf2_pi = agent.critic(states, pi)
+def compute_policy_loss(agent, state, action):
+    _, _, mean, stddev = agent.policy.sample(state)    # agent's actual policy distribution
+    action_log_prob = agent.policy.compute_log_prob(action, mean, stddev) # applied action's log probability
+    qf1_pi, qf2_pi = agent.critic(state, action)
     min_qf_pi = torch.min(qf1_pi, qf2_pi)
-    policy_loss = ((agent.alpha * log_pi) - min_qf_pi).mean() 
+    policy_loss = ((agent.alpha * action_log_prob) - min_qf_pi).mean() 
     return policy_loss.item()
 
 
@@ -56,6 +57,27 @@ def random_policy_sample_fn(env):
     pi = env.action_space.sample()
     log_pi = -num_dimensions * np.log(high - low)   # k * log(1/(r-l))
     return torchify(pi), torchify(log_pi), None, None
+
+
+# source: https://arxiv.org/pdf/2306.05873
+def fo_inrd(agent, state, action, epsilon=0.01):
+    # Sample a small random perturbation
+    perturbation = torch.randn_like(state) * epsilon
+    
+    # Perturb the state
+    perturbed_state = state + perturbation
+    
+    # Compute the cost for the original state
+    cost_original = compute_policy_loss(agent, state, action)
+    
+    # Compute the cost for the perturbed state
+    cost_perturbed = compute_policy_loss(agent, perturbed_state, action)
+    
+    # Compute the difference in cost
+    delta_cost = cost_perturbed - cost_original
+    
+    return delta_cost
+
 
 def run_eval_episode(env, 
                     expert_agent, 
@@ -139,8 +161,8 @@ def run(env_name=None, eval_epi_no=100, exp_data_dir=''):
   if not os.path.exists(exp_data_dir):
     os.makedirs(exp_data_dir)
   eval_epi_no = eval_epi_no
-  atk_rate = [0.0, 0.25, 0.50, 0.75, 1]
-#   atk_rate = [0.0]
+#   atk_rate = [0.0, 0.25, 0.5, 0.75]
+  atk_rate = [0.0]
   
   if env_name == "maze":
       from .env.maze import MazeNavigation
@@ -220,6 +242,9 @@ def run(env_name=None, eval_epi_no=100, exp_data_dir=''):
     policy_loss_li = []
     policy_loss_random = []
     policy_loss_adv = []
+    fo_inrd_li = []
+    fo_inrd_adv = []
+    fo_inrd_random = []
     for i in range(0, states.shape[0]):
         critic_loss = compute_critic_loss(expert_agent, states[i].unsqueeze(0), actions[i].unsqueeze(0), next_states[i].unsqueeze(0),
                                         rewards[i].unsqueeze(0), cont_flags[i].unsqueeze(0))
@@ -230,26 +255,36 @@ def run(env_name=None, eval_epi_no=100, exp_data_dir=''):
         critic_loss_adv.append(compute_critic_loss(expert_agent, states[i].unsqueeze(0), actions_adv[i].unsqueeze(0), next_states[i].unsqueeze(0),
                                         rewards[i].unsqueeze(0), cont_flags[i].unsqueeze(0)))
         
-        policy_loss_li.append(compute_policy_loss(expert_agent, states[i].unsqueeze(0), expert_agent.policy.sample))
-        policy_loss_random.append(compute_policy_loss(expert_agent, states[i].unsqueeze(0), lambda s: random_policy_sample_fn(env)))
-        policy_loss_adv.append(compute_policy_loss(expert_agent, states[i].unsqueeze(0), adv_agent.policy.sample))
+        policy_loss_li.append(compute_policy_loss(expert_agent, states[i].unsqueeze(0), actions[i].unsqueeze(0)))
+        policy_loss_random.append(compute_policy_loss(expert_agent, states[i].unsqueeze(0), actions_random[i].unsqueeze(0)))
+        policy_loss_adv.append(compute_policy_loss(expert_agent, states[i].unsqueeze(0), actions_adv[i].unsqueeze(0)))
+
+        fo_inrd_li.append(fo_inrd(expert_agent, states[i].unsqueeze(0), actions[i].unsqueeze(0)))
+        fo_inrd_adv.append(fo_inrd(expert_agent, states[i].unsqueeze(0), actions_adv[i].unsqueeze(0)))
+        fo_inrd_random.append(fo_inrd(expert_agent, states[i].unsqueeze(0), actions_random[i].unsqueeze(0)))
 
     # Plot Episode Data
 
     # plt.plot(np.arange(0, states.shape[0], 1), critic_loss_li, label='Task Policy')
     # plt.plot(np.arange(0, states.shape[0], 1), critic_loss_adv, label='Adversary Policy')
     # plt.plot(np.arange(0, states.shape[0], 1), critic_loss_random, label='Random Policy')
-    plt.plot(np.arange(0, states.shape[0], 1), critic_loss_li, label='Attack Rate: {}'.format(atk_rate))
-    # print(">> ", np.array(critic_loss_li) - np.array(critic_loss_adv))
+    # plt.plot(np.arange(0, states.shape[0], 1), critic_loss_li, label='Attack Rate: {}'.format(atk_rate))
     # plt.plot(np.arange(0, states.shape[0], 1), policy_loss_li, label='Attack Rate: {}'.format(atk_rate))
 
     # plt.plot(np.arange(0, states.shape[0], 1), policy_loss_li, label='Task Action')
     # plt.plot(np.arange(0, states.shape[0], 1), policy_loss_adv, label='Adversary Action')
     # plt.plot(np.arange(0, states.shape[0], 1), policy_loss_random, label='Random Action')
 
+    # plt.plot(np.arange(0, states.shape[0], 1), fo_inrd_li, label='Attack Rate: {}'.format(atk_rate))
+    plt.plot(np.arange(0, states.shape[0], 1), fo_inrd_li, label='Task Action')
+    plt.plot(np.arange(0, states.shape[0], 1), fo_inrd_random, label='Random Action')
+    plt.plot(np.arange(0, states.shape[0], 1), fo_inrd_adv, label='Adversary Action')
+
   plt.xlabel('Steps')
-  plt.ylabel('Loss')
-  plt.title('Critic Loss Comparison ({})'.format(env_name))
+#   plt.ylabel('Loss')
+  plt.ylabel('delta_loss')
+  plt.yscale('log')
+  plt.title('FO-INRD Comparison - Same States, Different Actions ({})'.format(env_name))
   plt.legend()
-  plt.savefig(os.path.join(exp_data_dir, 'critic_loss_comparison_{}.png'.format(env_name)), dpi=300, format='png',bbox_inches='tight')
+  plt.savefig(os.path.join(exp_data_dir, 'fo_inrd_comparison_task_rnd_adv_{}.png'.format(env_name)), dpi=300, format='png',bbox_inches='tight')
   plt.close(fig)  # Close the figure to free memory

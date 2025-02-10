@@ -238,6 +238,21 @@ class GaussianPolicy(nn.Module):
         
         mean = torch.tanh(mean) * self.action_scale + self.action_bias
         return action, log_prob, mean, std
+    
+    # compute log probability of an action
+    def compute_log_prob(self, action, mean, std):
+        # Step 1: Inverse transformations
+        mean = torch.atanh(((mean-self.action_bias)/self.action_scale).clamp(-(1-epsilon),1-epsilon))
+        y_t = (action - self.action_bias) / self.action_scale
+        x_t = torch.atanh(y_t.clamp(-(1-epsilon), 1-epsilon))  # Clamping to prevent NaN
+
+        # Step 2: Compute log probability of x_t under Normal(mean, std)
+        normal = Normal(mean, std)
+        log_prob = normal.log_prob(x_t)
+        
+        # Step 3: Apply correction to log_prob
+        log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + epsilon)
+        return log_prob
 
     def to(self, device):
         self.action_scale = self.action_scale.to(device)
