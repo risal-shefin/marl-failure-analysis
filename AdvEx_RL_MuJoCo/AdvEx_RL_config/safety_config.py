@@ -54,7 +54,7 @@ def parse_nav1():
     # parser.add_argument('--adv_hidden_size', type=int, default=512, help='hidden size (default: 256)')
     #=========================================================================================================
     parser.add_argument('--hidden_size', type=int, default=512, help='hidden size (default: 256)')
-    parser.add_argument('--saved_model_path', default='/AdvEx_RL_MuJoCo/AdvEx_RL_Trained_Models_New/Safety_policy/Aug-04-2022_02_02_AM_SafetyAgent_nav1/Recovery_model/Interval/1060_Interval_Recovery_Model_safety_1.0/recovery_policy', help='exterior log directory')
+    parser.add_argument('--saved_model_path', default='/AdvEx_RL_MuJoCo/AdvEx_RL_Trained_Models_New/Safety_policy/Aug-04-2022_02_02_AM_SafetyAgent_nav1/Recovery_model/Best/Aug-04-2022_Best_Recovery_Model_safety_ratio1.0/recovery_policy', help='exterior log directory')
     #=========================================================================================================
     parser.add_argument('--gamma',type=float,default=0.99,help='discount factor for reward (default: 0.99)')
     parser.add_argument( '--tau',type=float,default=0.0005, help='target smoothing coefficient(τ) (default: 0.005)')
