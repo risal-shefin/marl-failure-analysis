@@ -230,6 +230,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     total_iters = cfg.algo.total_steps // policy_steps_per_iter if not cfg.dry_run else 1
     if cfg.checkpoint.resume_from:
         cfg.algo.per_rank_batch_size = state["batch_size"] // fabric.world_size
+    best_ep_reward = -np.inf
 
     # Warning for log and checkpoint every
     if cfg.metric.log_level > 0 and cfg.metric.log_every % policy_steps_per_iter != 0:
@@ -265,6 +266,8 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
 
     for iter_num in range(start_iter, total_iters + 1):
         with torch.inference_mode():
+            cur_ep_reward_sum = 0
+            cur_ep_count = 0
             for _ in range(0, cfg.algo.rollout_steps):
                 policy_step += cfg.env.num_envs * world_size
 
@@ -329,16 +332,18 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     step_data[k] = _obs[np.newaxis]
                     next_obs[k] = _obs
 
-                if cfg.metric.log_level > 0 and "final_info" in info:
-                    for i, agent_ep_info in enumerate(info["final_info"]):
-                        if agent_ep_info is not None:
-                            ep_rew = agent_ep_info["episode"]["r"]
-                            ep_len = agent_ep_info["episode"]["l"]
+                for i, agent_ep_info in enumerate(info.get("final_info", [])):
+                    if agent_ep_info is not None:
+                        ep_rew = agent_ep_info["episode"]["r"]
+                        ep_len = agent_ep_info["episode"]["l"]
+                        if cfg.metric.log_level > 0:
                             if aggregator and "Rewards/rew_avg" in aggregator:
                                 aggregator.update("Rewards/rew_avg", ep_rew)
                             if aggregator and "Game/ep_len_avg" in aggregator:
                                 aggregator.update("Game/ep_len_avg", ep_len)
-                            fabric.print(f"Rank-0: policy_step={policy_step}, reward_env_{i}={ep_rew[-1]}")
+                        fabric.print(f"Rank-0: policy_step={policy_step}, reward_env_{i}={ep_rew[-1]}")
+                        cur_ep_reward_sum += ep_rew[-1]
+                        cur_ep_count += 1
 
         # Transform the data into PyTorch Tensors
         local_data = rb.to_tensor(dtype=None, device=device, from_numpy=cfg.buffer.from_numpy)
@@ -425,10 +430,14 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             )
 
         # Checkpoint model
+        cur_ep_reward_mean = cur_ep_reward_sum / max(cur_ep_count, 1)
         if (cfg.checkpoint.every > 0 and policy_step - last_checkpoint >= cfg.checkpoint.every) or (
             iter_num == total_iters and cfg.checkpoint.save_last
-        ):
+        ) or cur_ep_reward_mean >= best_ep_reward:
             last_checkpoint = policy_step
+            if cur_ep_reward_mean >= best_ep_reward:
+                fabric.print(f"Updated Best Reward: checkpoint/ckpt_{policy_step}_{fabric.global_rank}.ckpt, Reward: {cur_ep_reward_mean}")
+                best_ep_reward = cur_ep_reward_mean
             state = {
                 "agent": agent.state_dict(),
                 "optimizer": optimizer.state_dict(),

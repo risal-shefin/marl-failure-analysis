@@ -40,9 +40,11 @@ $pip install .[atari,dev,mujoco]
 ```
 
 ## SheepRL Example Run:
+To run a [PPO](https://openai.com/index/openai-baselines-ppo/) agent on [RiverRaid](https://ale.farama.org/environments/riverraid/) environment:
 ```sh
 python sheeprl.py exp=ppo env=atari env.id=RiverraidNoFrameskip-v4 algo.cnn_keys.encoder=[rgb] fabric.accelerator=gpu fabric.strategy=ddp fabric.devices=1 algo.mlp_keys.encoder=[]
 ```
+How to docs: https://github.com/Eclectic-Sheep/sheeprl/tree/main/howto
 
 ## Acknowledgements
 - AdvExRL (https://github.com/asifurrahman1/AdvEx-RL.git)
