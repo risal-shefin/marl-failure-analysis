@@ -175,3 +175,161 @@ pyrightconfig.json
 *.tar.gz
 
 # End of https://www.toptal.com/developers/gitignore/api/python
+
+
+# SheepRL gitignore starts
+sheeprl/__pycache__/
+sheeprl/*.py[cod]
+sheeprl/*$py.class
+
+# C extensions
+sheeprl/*.so
+
+# Distribution / packaging
+sheeprl/.Python
+sheeprl/build/
+sheeprl/develop-eggs/
+sheeprl/dist/
+sheeprl/downloads/
+sheeprl/eggs/
+sheeprl/.eggs/
+sheeprl/lib/
+sheeprl/lib64/
+sheeprl/parts/
+sheeprl/sdist/
+sheeprl/var/
+sheeprl/wheels/
+sheeprl/share/python-wheels/
+sheeprl/*.egg-info/
+sheeprl/.installed.cfg
+sheeprl/*.egg
+sheeprl/MANIFEST
+
+# PyInstaller
+sheeprl/*.manifest
+sheeprl/*.spec
+
+# Installer logs
+sheeprl/pip-log.txt
+sheeprl/pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+sheeprl/htmlcov/
+sheeprl/.tox/
+sheeprl/.nox/
+sheeprl/.coverage
+sheeprl/.coverage.*
+sheeprl/.cache
+sheeprl/nosetests.xml
+sheeprl/coverage.xml
+sheeprl/*.cover
+sheeprl/*.py,cover
+sheeprl/.hypothesis/
+sheeprl/.pytest_cache/
+sheeprl/cover/
+
+# Translations
+sheeprl/*.mo
+sheeprl/*.pot
+
+# Django stuff:
+sheeprl/*.log
+sheeprl/local_settings.py
+sheeprl/db.sqlite3
+sheeprl/db.sqlite3-journal
+
+# Flask stuff:
+sheeprl/instance/
+sheeprl/.webassets-cache
+
+# Scrapy stuff:
+sheeprl/.scrapy
+
+# Sphinx documentation
+sheeprl/docs/_build/
+
+# PyBuilder
+sheeprl/.pybuilder/
+sheeprl/target/
+
+# Jupyter Notebook
+sheeprl/.ipynb_checkpoints
+
+# IPython
+sheeprl/profile_default/
+sheeprl/ipython_config.py
+
+# pyenv
+sheeprl/.python-version
+
+# pipenv
+sheeprl/Pipfile.lock
+
+# poetry
+sheeprl/poetry.lock
+
+# pdm
+sheeprl/pdm.lock
+sheeprl/.pdm.toml
+
+# PEP 582
+sheeprl/__pypackages__/
+
+# Celery stuff
+sheeprl/celerybeat-schedule
+sheeprl/celerybeat.pid
+
+# SageMath parsed files
+sheeprl/*.sage.py
+
+# Environments
+sheeprl/.env
+sheeprl/.venv
+sheeprl/env/
+sheeprl/venv/
+sheeprl/ENV/
+sheeprl/env.bak/
+sheeprl/venv.bak/
+
+# Spyder project settings
+sheeprl/.spyderproject
+sheeprl/.spyproject
+
+# Rope project settings
+sheeprl/.ropeproject
+
+# mkdocs documentation
+sheeprl/site
+
+# mypy
+sheeprl/.mypy_cache/
+sheeprl/.dmypy.json
+sheeprl/dmypy.json
+
+# Pyre type checker
+sheeprl/.pyre/
+
+# pytype static type analyzer
+sheeprl/.pytype/
+
+# Cython debug symbols
+sheeprl/cython_debug/
+
+# PyCharm
+sheeprl/.idea/
+
+sheeprl/.vscode
+sheeprl/logs
+sheeprl/poetry.lock
+sheeprl/private_notebooks
+sheeprl/pytest_*
+!sheeprl/sheeprl/configs/env
+sheeprl/.diambra*
+sheeprl/.hydra
+sheeprl/.pypirc
+sheeprl/mlruns
+sheeprl/mlartifacts
+sheeprl/examples/models
+sheeprl/session_*
+sheeprl/bin/
+# SheepRL gitignore ends
