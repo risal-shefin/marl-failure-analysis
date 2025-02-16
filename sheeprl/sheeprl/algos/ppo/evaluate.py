@@ -10,6 +10,7 @@ from sheeprl.algos.ppo.utils import test
 from sheeprl.utils.env import make_env
 from sheeprl.utils.logger import get_log_dir, get_logger
 from sheeprl.utils.registry import register_evaluation
+from sheeprl.algos.ppo.exp_adversary_loss import exp_loss_run
 
 
 @register_evaluation(algorithms="ppo")
@@ -49,9 +50,10 @@ def evaluate_ppo(fabric: Fabric, cfg: Dict[str, Any], state: Dict[str, Any]):
         else (env.action_space.nvec.tolist() if is_multidiscrete else [env.action_space.n])
     )
     # Create the actor and critic models
-    _, agent = build_agent(fabric, actions_dim, is_continuous, cfg, observation_space, state["agent"])
+    _, player = build_agent(fabric, actions_dim, is_continuous, cfg, observation_space, state["agent"])
     del _
-    test(agent, fabric, cfg, log_dir)
+    test(player, fabric, cfg, log_dir)
+    exp_loss_run(player, fabric, cfg, log_dir)
 
 
 # This is just for showcase
