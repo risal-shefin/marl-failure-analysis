@@ -1,0 +1,11 @@
+- exp=ppo
+- env=atari
+- env.id=BoxingNoFrameskip-v4
+- algo.cnn_keys.encoder=[rgb]
+- checkpoint.every=100000
+- checkpoint.keep_last=null
+- fabric.accelerator=gpu
+- fabric.strategy=ddp
+- fabric.devices=1
+- algo.mlp_keys.encoder=[]
+- algo.total_steps=10000000
