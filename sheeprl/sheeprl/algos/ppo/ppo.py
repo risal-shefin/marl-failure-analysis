@@ -25,6 +25,7 @@ from sheeprl.utils.metric import MetricAggregator
 from sheeprl.utils.registry import register_algorithm
 from sheeprl.utils.timer import timer
 from sheeprl.utils.utils import gae, normalize_tensor, polynomial_decay, save_configs
+from sheeprl.algos.ppo.exp_adversary_loss import get_episode_data
 
 
 def train(
@@ -430,10 +431,12 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             )
 
         # Checkpoint model
-        cur_ep_reward_mean = cur_ep_reward_sum / max(cur_ep_count, 1)
+        # cur_ep_reward_mean = cur_ep_reward_sum / max(cur_ep_count, 1)
+        cur_ep_reward_mean = get_episode_data(player, fabric, cfg, log_dir)['sum_reward']
+        player.train() # Switch back to training mode
         if (cfg.checkpoint.every > 0 and policy_step - last_checkpoint >= cfg.checkpoint.every) or (
             iter_num == total_iters and cfg.checkpoint.save_last
-        ) or cur_ep_reward_mean >= best_ep_reward:
+        ) or cur_ep_reward_mean > best_ep_reward:
             last_checkpoint = policy_step
             if cur_ep_reward_mean >= best_ep_reward:
                 fabric.print(f"Updated Best Reward: checkpoint/ckpt_{policy_step}_{fabric.global_rank}.ckpt, Reward: {cur_ep_reward_mean}")

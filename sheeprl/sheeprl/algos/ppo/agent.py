@@ -268,8 +268,8 @@ class PPOPlayer(nn.Module):
         ).sum(-1, keepdim=False)
         return tanh_actions, log_prob.unsqueeze(dim=-1)
 
-    def forward(self, obs: Dict[str, Tensor]) -> Tuple[Sequence[Tensor], Tensor, Tensor]:
-        feat = self.feature_extractor(obs)
+    def forward(self, obs: Dict[str, Tensor] | Tensor) -> Tuple[Sequence[Tensor], Tensor, Tensor]:
+        feat = self.feature_extractor(obs) if isinstance(obs, dict) else obs
         values = self.critic(feat)
         actor_out: List[Tensor] = self.actor(feat)
         if self.actor.is_continuous:
@@ -292,12 +292,12 @@ class PPOPlayer(nn.Module):
                 values,
             )
 
-    def get_values(self, obs: Dict[str, Tensor]) -> Tensor:
-        feat = self.feature_extractor(obs)
+    def get_values(self, obs: Dict[str, Tensor] | Tensor) -> Tensor:
+        feat = self.feature_extractor(obs) if isinstance(obs, dict) else obs
         return self.critic(feat)
 
-    def get_actions(self, obs: Dict[str, Tensor], greedy: bool = False) -> Sequence[Tensor]:
-        feat = self.feature_extractor(obs)
+    def get_actions(self, obs: Dict[str, Tensor] | Tensor, greedy: bool = False) -> Sequence[Tensor]:
+        feat = self.feature_extractor(obs) if isinstance(obs, dict) else obs
         actor_out: List[Tensor] = self.actor(feat)
         if self.actor.is_continuous:
             mean, log_std = torch.chunk(actor_out[0], chunks=2, dim=-1)

@@ -42,8 +42,11 @@ $pip install .[atari,dev,mujoco]
 ## SheepRL Example Run:
 To run a [PPO](https://openai.com/index/openai-baselines-ppo/) agent on [RiverRaid](https://ale.farama.org/environments/riverraid/) environment:
 ```sh
+# Training command:
 $python sheeprl.py exp=ppo env=atari env.id=RiverraidNoFrameskip-v4 algo.cnn_keys.encoder=[rgb] fabric.accelerator=gpu fabric.strategy=ddp fabric.devices=1 algo.mlp_keys.encoder=[]
-$python sheeprl_eval.py checkpoint_path=logs/runs/ppo/RiverraidNoFrameskip-v4/2025-02-15_21-51-00_ppo_RiverraidNoFrameskip-v4_42/version_0/checkpoint/ckpt_6166016_0.ckpt fabric.accelerator=cpu env.capture_video=True
+# Evaluation command
+$python sheeprl_eval.py checkpoint_path=logs/runs/ppo/RiverraidNoFrameskip-v4/2025-02-15_21-51-00_ppo_RiverraidNoFrameskip-v4_42/version_0/checkpoint/ckpt_6166016_0.ckpt fabric.accelerator=cpu env.capture_video=True seed=42'
+# to evaluate with gradient tracking, append "disable_grads=False" to the evaluation command
 ```
 How to docs: https://github.com/Eclectic-Sheep/sheeprl/tree/main/howto
 
