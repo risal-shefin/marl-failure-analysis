@@ -44,49 +44,19 @@ def normalize_obs(
     return {k: obs[k] / 255 - 0.5 if k in cnn_keys else obs[k] for k in obs_keys}
 
 
-def perturb_obs_fgsm(agent: PPOPlayer, env, obs: Dict[str, Tensor] | Tensor, fabric: Fabric, cfg: Dict[str, any], epsilon: float
-) -> Tensor:
+def perturb_obs_fgsm(agent: PPOPlayer, env, torch_obs: Dict[str, Tensor], fabric: Fabric, cfg: Dict[str, any], epsilon: float
+) -> Dict[str, Tensor]:
     """ Compute perturbed obs using FGSM attack """
     
-    obs_feat = agent.feature_extractor(obs).detach().requires_grad_(True) if isinstance(obs, dict) else obs.detach().requires_grad_(True)
+    torch_obs = {k: v for k, v in torch_obs.items()}    # copy
+    for key in cfg.algo.cnn_keys.encoder:
+        if key not in torch_obs:
+            continue
+        torch_obs[key] = torch_obs[key].detach().requires_grad_(True)
 
     saved_env_state = env.unwrapped.clone_state() # Save the Current State Before Rollout
-    _, logprob, value = agent(obs_feat)
-    action = agent.get_actions(obs_feat, greedy=True)
-    if agent.actor.is_continuous:
-        action = torch.cat(action, dim=-1)
-    else:
-        action = torch.cat([act.argmax(dim=-1) for act in action], dim=-1)
-    next_obs, reward, done, truncated, _ = env.step(action)
-    next_value = agent.get_values(prepare_obs(fabric, next_obs, cnn_keys=cfg.algo.cnn_keys.encoder))
-    _, advantages = gae(torch.tensor([reward]), value.unsqueeze(0), torch.tensor([done]), next_value.unsqueeze(0),
-            1, cfg.algo.gamma, cfg.algo.gae_lambda)
-    env.unwrapped.restore_state(saved_env_state)  # Restore the Environment Back to the Saved State
-
-    pg_loss = policy_loss(logprob, logprob, advantages, cfg.algo.clip_coef, reduction="none")
-    # The gradient in terms of loss
-    grad_J = torch.autograd.grad(pg_loss, obs_feat, create_graph=True)[0]
-    
-    # Compute η_i (adversarial perturbation direction)
-    eta_i = epsilon * grad_J.sign() / torch.max(grad_J.norm(p=2), torch.tensor(1.0))
-    # Perturbed state
-    return obs_feat + eta_i
-
-def perturb_obs_random_noise(agent: PPOPlayer, obs: Dict[str, Tensor] | Tensor, epsilon: float
-) -> Tensor:
-    obs_feat = agent.feature_extractor(obs).detach() if isinstance(obs, dict) else obs.detach()
-    noise = torch.randn_like(obs_feat) * epsilon
-    return obs_feat + noise
-
-def so_inrd(agent: PPOPlayer, env, obs: Dict[str, Tensor] | Tensor, fabric: Fabric, cfg: Dict[str, any], epsilon: float
-) -> Tensor:
-    """ Compute gradient of J with respect to s """
-
-    obs_feat = agent.feature_extractor(obs).detach().requires_grad_(True) if isinstance(obs, dict) else obs.detach().requires_grad_(True)
-
-    saved_env_state = env.unwrapped.clone_state() # Save the Current State Before Rollout
-    _, logprob, value = agent(obs_feat)
-    action = agent.get_actions(obs_feat, greedy=True)
+    _, logprob, value = agent(torch_obs)
+    action = agent.get_actions(torch_obs, greedy=True)
     if agent.actor.is_continuous:
         action = torch.cat(action, dim=-1)
     else:
@@ -99,18 +69,74 @@ def so_inrd(agent: PPOPlayer, env, obs: Dict[str, Tensor] | Tensor, fabric: Fabr
     env.unwrapped.restore_state(saved_env_state)  # Restore the Environment Back to the Saved State
 
     pg_loss = policy_loss(logprob, logprob, advantages, cfg.algo.clip_coef, reduction="none")
-    # The gradient in terms of loss
-    grad_J = torch.autograd.grad(pg_loss, obs_feat, create_graph=True)[0]
+
+    perturbed_obs = {k: v for k, v in torch_obs.items()} # copy
+    for key in cfg.algo.cnn_keys.encoder:
+        if key not in torch_obs:
+            continue
+
+        # The gradient in terms of loss
+        grad_J = torch.autograd.grad(pg_loss, torch_obs[key], create_graph=True)[0]
+        # Compute η_i (adversarial perturbation direction)
+        eta_i = epsilon * grad_J.sign() / torch.max(grad_J.norm(p=2), torch.tensor(1.0))
+
+        # Perturbed state
+        perturbed_obs[key] = torch_obs[key] + eta_i
+
+    return perturbed_obs
+
+def perturb_obs_random_noise(torch_obs: Dict[str, Tensor], cfg: Dict[str, any], epsilon: float
+) -> Dict[str, Tensor]:
+    torch_obs = {k: v for k, v in torch_obs.items()}    # copy
+    for key in cfg.algo.cnn_keys.encoder:
+        if key in torch_obs:
+            noise = torch.randn_like(torch_obs[key]) * epsilon
+            torch_obs[key] = torch_obs[key] + noise
+    return torch_obs
+
+def so_inrd(agent: PPOPlayer, env, torch_obs: Dict[str, Tensor], fabric: Fabric, cfg: Dict[str, any], epsilon: float
+) -> Tensor:
+    """ Compute gradient of J with respect to s """
+    torch_obs = {k: v for k, v in torch_obs.items()}    # copy
+    for key in cfg.algo.cnn_keys.encoder:
+        if key not in torch_obs:
+            continue
+        torch_obs[key] = torch_obs[key].detach().requires_grad_(True)
+
+    saved_env_state = env.unwrapped.clone_state() # Save the Current State Before Rollout
+    _, logprob, value = agent(torch_obs)
+    action = agent.get_actions(torch_obs, greedy=True)
+    if agent.actor.is_continuous:
+        action = torch.cat(action, dim=-1)
+    else:
+        action = torch.cat([act.argmax(dim=-1) for act in action], dim=-1)
+    next_obs, reward, done, truncated, _ = env.step(action)
+    next_obs = prepare_obs(fabric, next_obs, cnn_keys=cfg.algo.cnn_keys.encoder)
+    next_value = agent.get_values(next_obs)
+    _, advantages = gae(torch.tensor([reward]), value.unsqueeze(0), torch.tensor([done]), next_value.unsqueeze(0),
+            1, cfg.algo.gamma, cfg.algo.gae_lambda)
+    env.unwrapped.restore_state(saved_env_state)  # Restore the Environment Back to the Saved State
+
+    pg_loss = policy_loss(logprob, logprob, advantages, cfg.algo.clip_coef, reduction="none")
+
+    perturbed_obs = {k: v for k, v in torch_obs.items()}    # copy
+    J_tilde_li = list()
+    for key in cfg.algo.cnn_keys.encoder:
+        if key not in torch_obs:
+            continue
+
+        # The gradient in terms of loss
+        grad_J = torch.autograd.grad(pg_loss, torch_obs[key], create_graph=True)[0]
+        # Compute η_i (adversarial perturbation direction)
+        eta_i = epsilon * grad_J.sign() / torch.max(grad_J.norm(p=2), torch.tensor(1.0))
+        # Compute J tilde
+        J_tilde_li.append(pg_loss + torch.dot(grad_J.flatten(), eta_i.flatten()))
     
-    # Compute η_i (adversarial perturbation direction)
-    eta_i = epsilon * grad_J.sign() / torch.max(grad_J.norm(p=2), torch.tensor(1.0))
-    
-    # Compute J tilde
-    J_tilde = pg_loss + torch.dot(grad_J.flatten(), eta_i.flatten())
-    
-    # Perturbed state and corresponding loss
-    perturbed_obs_feat = obs_feat + eta_i
-    p_value = agent.get_values(perturbed_obs_feat)
+        # Perturbed state
+        perturbed_obs[key] = torch_obs[key] + eta_i
+
+    J_tilde = torch.tensor(J_tilde_li).mean()
+    p_value = agent.get_values(perturbed_obs)
     _, p_advantages = gae(torch.tensor([reward]), p_value.unsqueeze(0), torch.tensor([done]), next_value.unsqueeze(0),
             1, cfg.algo.gamma, cfg.algo.gae_lambda)
     perturbed_policy_loss = policy_loss(logprob, logprob, p_advantages, cfg.algo.clip_coef, reduction="none")
@@ -141,11 +167,9 @@ def get_episode_data(agent: PPOPlayer, fabric: Fabric, cfg: Dict[str, Any], log_
         
         is_attacked = False
         if do_attack and agent.get_values(torch_obs) > 0.7:
-        # if do_attack and np.random.random() < 0.75:
-            obs_fgsm_feat = perturb_obs_fgsm(agent, env, torch_obs, fabric, cfg, so_eps)
-            torch_obs = obs_fgsm_feat
-            # obs_rnd_feat = perturb_obs_random_noise(agent, torch_obs, so_eps)
-            # torch_obs = obs_rnd_feat
+        # if do_attack and np.random.random() < 0.5:
+            torch_obs = perturb_obs_fgsm(agent, env, torch_obs, fabric, cfg, so_eps)
+            # torch_obs = perturb_obs_random_noise(torch_obs, cfg, so_eps)
             is_attacked = True
 
         _, logprob, value = agent(torch_obs)
@@ -217,7 +241,7 @@ def plot(episode_data, episode_data_attacked, log_dir: str):
     # plt.axvline(x=index, color='r', linestyle='--', label=f'Attacked Step')
     plt.xlabel("Steps")
     plt.ylabel("SO INRD L value")
-    plt.title("Env: Boxing, FGSM Attack: When Value(s) > 0.7")
+    plt.title("Env: Boxing, FGSM Attack When V(s) > 0.7")
     plt.legend()
     plt.savefig(os.path.join(log_dir, 'so_inrd_comparison.png'), dpi=300, format='png',bbox_inches='tight')
     plt.close(fig)
