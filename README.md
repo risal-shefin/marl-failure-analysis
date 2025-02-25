@@ -50,6 +50,14 @@ $python sheeprl_eval.py checkpoint_path=logs/runs/ppo/RiverraidNoFrameskip-v4/20
 ```
 How to docs: https://github.com/Eclectic-Sheep/sheeprl/tree/main/howto
 
+# Stable Baseline
+```sh
+git clone https://github.com/DLR-RM/stable-baselines3
+cd stable-baselines3
+pip install -e .[extra]
+```
+
 ## Acknowledgements
 - AdvExRL (https://github.com/asifurrahman1/AdvEx-RL.git)
 - SheepRL (https://github.com/Eclectic-Sheep/sheeprl)
+- Stable Baselines 3 (https://github.com/DLR-RM/stable-baselines3)
