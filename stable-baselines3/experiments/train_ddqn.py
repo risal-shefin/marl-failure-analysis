@@ -3,6 +3,7 @@ import os
 from datetime import datetime
 import argparse
 import matplotlib.pyplot as plt
+import weakref
 
 from stable_baselines3.dqn.ddqn import DoubleDQN
 from stable_baselines3.common.evaluation import evaluate_policy
@@ -30,7 +31,7 @@ def main(args):
     )
 
     # Create the callback: check every 1000 steps
-    callback = SaveOnBestTrainingRewardCallback(check_freq=1000, log_dir=log_dir)
+    callback = SaveOnBestTrainingRewardCallback(check_freq=1000, log_dir=log_dir, model_loader_fn=weakref.ref(double_dqn_model))
 
     # Train the agent and display a progress bar
     double_dqn_model.learn(total_timesteps=args.train_timesteps, progress_bar=True, callback=callback, tb_log_name="DDQN")
