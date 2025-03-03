@@ -43,11 +43,11 @@ def perturb_obs_fgsm(agent: DoubleDQN, env, obs, epsilon):
     obs_tensor = agent.policy.obs_to_tensor(obs)[0]
     obs_tensor = obs_tensor.float().requires_grad_(True) # Clone the obs tensor and set requires_grad=True
 
-    saved_env_state = env.unwrapped.clone_state() # Save the Current State Before Rollout
+    saved_env_state = env.unwrapped.clone_state(include_rng=True) # Save the Current State Before Rollout
     action, _ = agent.predict(obs, deterministic=True)
     next_obs, reward, terminated, truncated, _ = env.step(action)
     next_obs_tensor = agent.policy.obs_to_tensor(next_obs)[0]
-    env.unwrapped.restore_state(saved_env_state)  # Restore the Environment Back to the Saved State
+    env.unwrapped.restore_full_state(saved_env_state)  # Restore the Environment Back to the Saved State
 
     loss = compute_loss(agent, obs_tensor, torch.tensor(action).unsqueeze(0), torch.tensor(reward).unsqueeze(0), 
                         next_obs_tensor, torch.tensor(int(terminated or truncated)).unsqueeze(0))
@@ -68,28 +68,21 @@ def perturb_obs_random_noise(obs, epsilon):
     perturbed_obs = obs + noise.detach().numpy()
     return perturbed_obs
 
-def so_inrd(agent: DoubleDQN, env, obs, epsilon):
+def so_inrd(agent: DoubleDQN, obs, action, reward, next_obs, done, epsilon):
     """ Second Order Identification of Non-Robust Directions (SO-INRD) """
     obs_tensor = agent.policy.obs_to_tensor(obs)[0]
     obs_tensor = obs_tensor.float().requires_grad_(True) # Clone the obs tensor and set requires_grad=True
 
-    saved_env_state = env.unwrapped.clone_state() # Save the Current State Before Rollout
-    action, _ = agent.predict(obs, deterministic=True)
-    next_obs, reward, terminated, truncated, _ = env.step(action)
     next_obs_tensor = agent.policy.obs_to_tensor(next_obs)[0]
-    env.unwrapped.restore_state(saved_env_state)  # Restore the Environment Back to the Saved State
 
     loss = compute_loss(agent, obs_tensor, torch.tensor(action).unsqueeze(0), torch.tensor(reward).unsqueeze(0), 
-                        next_obs_tensor, torch.tensor(int(terminated or truncated)).unsqueeze(0))
+                        next_obs_tensor, torch.tensor(int(done)).unsqueeze(0))
     # return loss
     # The gradient with respect to obs
     grad_J = torch.autograd.grad(loss, obs_tensor)[0]
     
     # Compute η_i (adversarial perturbation direction)
-    if grad_J.norm(p=2) < 1e-8:
-        eta_i = torch.zeros_like(grad_J)
-    else:
-        eta_i = epsilon * grad_J.sign() / grad_J.norm(p=2)
+    eta_i = epsilon * grad_J.sign() / torch.max(grad_J.norm(p=2), torch.tensor(1.0))
 
     # Compute J tilde
     J_tilde = loss + torch.dot(grad_J.flatten(), eta_i.flatten())
@@ -97,7 +90,7 @@ def so_inrd(agent: DoubleDQN, env, obs, epsilon):
     # Perturbed state
     perturbed_obs_tensor = obs_tensor + eta_i
     perturbed_loss = compute_loss(agent, perturbed_obs_tensor, torch.tensor(action).unsqueeze(0), torch.tensor(reward).unsqueeze(0), 
-                        next_obs_tensor, torch.tensor(int(terminated or truncated)).unsqueeze(0))
+                        next_obs_tensor, torch.tensor(int(done)).unsqueeze(0))
 
     # Compute L
     L = perturbed_loss - J_tilde
@@ -114,14 +107,14 @@ def get_episode_data(model_dir, env_id, do_attack: bool):
     episode_data = {'states': [], 'actions': [], 'rewards': [], 'dones': [], 
                     'next_states': [], 'so_inrd_l': [], 'attack_flag': []}
 
-    perutrb_eps = 0.1
+    perutrb_eps = 10.0
     step_counter = 0
     while not done:
         step_counter += 1
         
         is_attacked = False
         # if do_attack and agent.get_values(torch_obs) > 0.7:
-        if do_attack and step_counter > 500 and np.random.rand() < 0.5:
+        if do_attack and step_counter > 500 and np.random.rand() < 1.0:
             obs = perturb_obs_fgsm(agent, env, obs, perutrb_eps)
             # obs = perturb_obs_random_noise(obs, perutrb_eps)
             is_attacked = True
@@ -137,7 +130,7 @@ def get_episode_data(model_dir, env_id, do_attack: bool):
         episode_data['rewards'].append(reward)
         episode_data['dones'].append(done)
         episode_data['next_states'].append(next_obs)
-        episode_data['so_inrd_l'].append(so_inrd(agent, env, obs, perutrb_eps).item())
+        episode_data['so_inrd_l'].append(so_inrd(agent, obs, action, reward, next_obs, done, perutrb_eps).item())
         episode_data['attack_flag'].append(is_attacked)
 
         obs = next_obs  # Set the next state as the current state
@@ -164,10 +157,10 @@ def plot(episode_data, episode_data_attacked, log_dir: str):
     # plt.axvline(x=index, color='r', linestyle='--', label=f'Attacked Step')
     plt.xlabel("Steps")
     plt.ylabel("SO INRD L Value")
-    plt.yscale('log')
-    plt.title("Env: Boxing, FGSM Attack 50% After 500 Steps")
+    # plt.yscale('log')
+    plt.title("Env: Boxing, FGSM Attack 100% After 500 Steps")
     plt.legend()
-    plt.savefig(os.path.join(log_dir, 'so_inrd_fgsm_0.5_500_eps_0.1.png'), dpi=300, format='png',bbox_inches='tight')
+    plt.savefig(os.path.join(log_dir, 'so_inrd_fgsm_1.0_500_eps_10.0.png'), dpi=300, format='png',bbox_inches='tight')
     plt.close(fig)
 
 
