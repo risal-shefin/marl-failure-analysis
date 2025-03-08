@@ -64,9 +64,14 @@ def perturb_obs_fgsm(agent: DoubleDQN, env, obs, epsilon):
     return perturbed_obs
 
 def perturb_obs_random_noise(obs, epsilon):
-    noise = torch.randn_like(torch.tensor(obs).float()) * epsilon
-    perturbed_obs = obs + noise.detach().numpy()
-    return perturbed_obs
+    # Normalize to [0,1]
+    obs = obs / 255.0
+    # Add Gaussian noise with mean=0, std=0.1
+    noise = np.random.randn(*obs.shape) * epsilon
+    # Add noise & Clip values to valid range [0,1]
+    perturbed_obs = np.clip(obs + noise, 0, 1)
+    # Rescale back to [0,255] and convert to NumPy uint8
+    return (perturbed_obs * 255.0).astype(np.uint8)
 
 def so_inrd(agent: DoubleDQN, obs, action, reward, next_obs, done, epsilon):
     """ Second Order Identification of Non-Robust Directions (SO-INRD) """

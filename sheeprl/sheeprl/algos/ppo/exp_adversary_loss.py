@@ -78,7 +78,7 @@ def perturb_obs_fgsm(agent: PPOPlayer, env, torch_obs: Dict[str, Tensor], fabric
         # The gradient in terms of loss
         grad_J = torch.autograd.grad(pg_loss, torch_obs[key], create_graph=True)[0]
         # Compute η_i (adversarial perturbation direction)
-        eta_i = epsilon * grad_J.sign() / torch.max(grad_J.norm(p=2), torch.tensor(1.0))
+        eta_i = epsilon * grad_J.sign()
 
         # Perturbed state
         perturbed_obs[key] = torch_obs[key] + eta_i

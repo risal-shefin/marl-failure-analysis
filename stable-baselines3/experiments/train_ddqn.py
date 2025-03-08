@@ -21,17 +21,27 @@ def main(args):
     env = gym.make(args.env_id, render_mode="rgb_array")
     env = Monitor(env, log_dir)
 
+    # double_dqn_model = DoubleDQN(
+    #     "CnnPolicy",
+    #     env,
+    #     verbose=1,
+    #     buffer_size=args.buffer_size,
+    #     policy_kwargs=dict(net_arch=[256, 256, 256]),
+    #     seed=42,
+    # )
+
     double_dqn_model = DoubleDQN(
         "CnnPolicy",
         env,
         verbose=1,
         buffer_size=args.buffer_size,
-        policy_kwargs=dict(net_arch=[256, 256, 256]),
         seed=42,
+        optimize_memory_usage=True,
+        replay_buffer_kwargs={'handle_timeout_termination': False}, # no neeed to handle timeout for episodic envs
     )
 
     # Create the callback: check every 1000 steps
-    callback = SaveOnBestTrainingRewardCallback(check_freq=1000, log_dir=log_dir, model_loader_fn=weakref.ref(double_dqn_model))
+    callback = SaveOnBestTrainingRewardCallback(check_freq=1000, log_dir=log_dir, model_fn=weakref.ref(double_dqn_model))
 
     # Train the agent and display a progress bar
     double_dqn_model.learn(total_timesteps=args.train_timesteps, progress_bar=True, callback=callback, tb_log_name="DDQN")
@@ -41,7 +51,7 @@ def main(args):
 
     # plot train rewards
     plot_results([log_dir], args.train_timesteps, results_plotter.X_TIMESTEPS, f"DDQN {args.env_id}")
-    plt.savefig(os.path.join(log_dir, f"DDQN_{args.env_id}_train_rewards.png"), dpi=300, format='png',bbox_inches='tight')
+    plt.savefig(os.path.join(log_dir, f"DDQN_train_rewards.png"), dpi=300, format='png',bbox_inches='tight')
 
     # Evaluate the agent
     mean_reward, std_reward = evaluate_policy(double_dqn_model, double_dqn_model.get_env(), n_eval_episodes=10)

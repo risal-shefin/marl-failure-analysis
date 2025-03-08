@@ -35,15 +35,15 @@ class SaveOnBestTrainingRewardCallback(BaseCallback):
         model = self.model_fn()
         mean_reward, std_reward = evaluate_policy(model, model.get_env(), n_eval_episodes=5) 
         if self.verbose >= 1:
-            print(f"Num timesteps: {self.num_timesteps}")
-            print(f"Best mean reward: {self.best_mean_reward:.2f} - Last mean reward per episode: {mean_reward:.2f}")
+            print(f"Num timesteps: {self.num_timesteps}", flush=True)
+            print(f"Best mean reward: {self.best_mean_reward:.2f} - Last mean reward per episode: {mean_reward:.2f}", flush=True)
         
         # New best model, you could save the agent here
         if mean_reward > self.best_mean_reward:
             self.best_mean_reward = mean_reward
             # Example for saving best model
             if self.verbose >= 1:
-                print(f"Saving new best model to {self.save_path}, with mean training reward={mean_reward}")
+                print(f"Saving new best model to {self.save_path}, with mean training reward={mean_reward}", flush=True)
             self.model.save(self.save_path) 
 
         return True
