@@ -11,13 +11,13 @@ from datetime import datetime
 import os
 import argparse
 
-def compute_cross_entropy_loss(agent, obs_list, actions):
-    loss = torch.tensor(0.0)
-    for i in range(len(obs_list)):  
-        q_values = agent.q_net(agent.policy.obs_to_tensor(obs_list[i])[0])[0]
+def compute_cross_entropy_loss(agent, obs_tensors, actions):
+    loss = 0.0
+    for i, obs_tensor in enumerate(obs_tensors):  
+        q_values = agent.q_net(obs_tensor)[0]
         action = actions[i]
         policy_probs = torch.softmax(q_values, dim=-1)  # Convert Q-values to probabilities
-        loss += torch.log(policy_probs[action])  # Cross-entropy loss
+        loss += -torch.log(policy_probs[action])  # Cross-entropy loss
     return loss
 
 def compute_loss(agent, obs, action, reward, next_obs, done, step_size):
@@ -50,6 +50,7 @@ def compute_loss(agent, obs, action, reward, next_obs, done, step_size):
 
     return loss
 
+# NEEDS FIXES
 def perturb_obs_fgsm(agent: DoubleDQN, env, obs, epsilon):
     """ Compute perturbed obs using FGSM attack """
     obs_tensor = agent.policy.obs_to_tensor(obs)[0]
@@ -80,6 +81,7 @@ def perturb_obs_fgsm(agent: DoubleDQN, env, obs, epsilon):
     perturbed_obs = obs + eta_i.permute(0, 2, 3, 1).squeeze(0).detach().numpy()
     return perturbed_obs
 
+
 def perturb_obs_random_noise(obs, epsilon):
     # Normalize to [0,1]
     obs = obs / 255.0
@@ -90,50 +92,55 @@ def perturb_obs_random_noise(obs, epsilon):
     # Rescale back to [0,255] and convert to NumPy uint8
     return (perturbed_obs * 255.0).astype(np.uint8)
 
+
 def so_inrd(agent: DoubleDQN, episode_data, loss_window_size, epsilon):
     """ Second Order Identification of Non-Robust Directions (SO-INRD) """
-    history_length = len(episode_data['states'])
-    history_start_idx = max(0, history_length - loss_window_size)
-    obs = episode_data['states'][history_start_idx]
+    history_start_idx = max(0, len(episode_data['states']) - loss_window_size)
+    obs_list = episode_data['states'][history_start_idx:]
+    L = 0.0
 
-    obs_tensor = agent.policy.obs_to_tensor(obs)[0]
-    obs_tensor = obs_tensor.float().requires_grad_(True) # Clone the obs tensor and set requires_grad=True
+    for i, obs in enumerate(obs_list):
+        obs_tensor = agent.policy.obs_to_tensor(obs)[0]
+        obs_tensor = obs_tensor.float().requires_grad_(True) # Clone the obs tensor and set requires_grad=True
+        action = episode_data['actions'][history_start_idx+i]
 
-    last_obs = episode_data['next_states'][-1]
-    last_obs_tensor = agent.policy.obs_to_tensor(last_obs)[0]
+        # last_obs = episode_data['next_states'][-1]
+        # last_obs_tensor = agent.policy.obs_to_tensor(last_obs)[0]
 
-    action = episode_data['actions'][history_start_idx]
-    subtraj_reward = sum(episode_data['rewards'][history_start_idx:])
-    last_done = int(episode_data['dones'][-1])
+        # subtraj_reward = sum(episode_data['rewards'][history_start_idx:])
+        # last_done = int(episode_data['dones'][-1])
 
-    # n-step td error
-    # loss = compute_loss(agent, obs_tensor, torch.tensor(action).unsqueeze(0), torch.tensor(subtraj_reward).unsqueeze(0),
-    #                     last_obs_tensor, torch.tensor(last_done).unsqueeze(0), loss_window_size)
+        # n-step td error
+        # loss = compute_loss(agent, obs_tensor, torch.tensor(action).unsqueeze(0), torch.tensor(subtraj_reward).unsqueeze(0),
+        #                     last_obs_tensor, torch.tensor(last_done).unsqueeze(0), loss_window_size)
 
-    # q_values = agent.q_net(obs_tensor)
-    # target_probs = F.one_hot(torch.tensor(action), num_classes=q_values.shape[-1]).float()
-    # loss = compute_loss(agent, obs_tensor, target_probs)
-    loss = compute_cross_entropy_loss(agent, episode_data['states'][history_start_idx:], episode_data['actions'][history_start_idx:])
-    return loss
+        # q_values = agent.q_net(obs_tensor)
+        # target_probs = F.one_hot(torch.tensor(action), num_classes=q_values.shape[-1]).float()
+        # loss = compute_loss(agent, obs_tensor, target_probs)
+        loss = compute_cross_entropy_loss(agent, obs_tensor.unsqueeze(0), [action])
+        
+        # return loss
 
-    # The gradient with respect to obs
-    grad_J = torch.autograd.grad(loss, obs_tensor)[0]
-    # print(" >>", grad_J.norm(p=2))
-    
-    # Compute η_i (adversarial perturbation direction)
-    eta_i = epsilon * grad_J.sign() / torch.max(grad_J.norm(p=2), torch.tensor(1.0))
+        # The gradient with respect to obs
+        grad_J = torch.autograd.grad(loss, obs_tensor)[0]
+        # print(" >>", grad_J.norm(p=2))
+        
+        # Compute η_i (adversarial perturbation direction)
+        eta_i = epsilon * grad_J.sign() / torch.max(grad_J.norm(p=2), torch.tensor(1e-6))
 
-    # Compute J tilde
-    J_tilde = loss + torch.dot(grad_J.flatten(), eta_i.flatten())
+        # Compute J tilde
+        J_tilde = loss + torch.dot(grad_J.flatten(), eta_i.flatten())
 
-    # Perturbed state
-    perturbed_obs_tensor = obs_tensor + eta_i
-    perturbed_loss = compute_loss(agent, perturbed_obs_tensor, torch.tensor(action).unsqueeze(0), torch.tensor(reward).unsqueeze(0), 
-                        next_obs_tensor, torch.tensor(int(done)).unsqueeze(0))
-    # perturbed_loss = compute_loss(agent, perturbed_obs_tensor, target_probs)
+        # Perturbed state
+        perturbed_obs = obs / 255.0 + eta_i.permute(0, 2, 3, 1).squeeze(0).detach().numpy()    # converts to [0,1] scale
+        perturbed_obs = np.clip(perturbed_obs, 0, 1)
+        perturbed_obs = (perturbed_obs * 255.0).astype(np.uint8)    # rescale back to [0,255]
+        perturbed_obs_tensor = agent.policy.obs_to_tensor(obs)[0]
+        perturbed_loss = compute_cross_entropy_loss(agent, perturbed_obs_tensor.unsqueeze(0), [action])
+        # perturbed_loss = compute_loss(agent, perturbed_obs_tensor, target_probs)
 
-    # Compute L
-    L = perturbed_loss - J_tilde
+        # Compute L
+        L += perturbed_loss - J_tilde
     return L
 
 
@@ -159,7 +166,7 @@ def get_episode_data(model_dir, env_id, do_attack: bool, log_dir: str):
         original_q_values = agent.q_net(agent.policy.obs_to_tensor(obs)[0])
         original_act_prob =  torch.softmax(original_q_values, dim=-1)[0][original_action]
         # if do_attack and agent.get_values(torch_obs) > 0.7:
-        if do_attack and step_counter > 200 and np.random.rand() < 1.0:
+        if do_attack and step_counter > 200 and np.random.rand() < 0.5:
             # obs = perturb_obs_fgsm(agent, env, obs, perutrb_eps)
             obs = perturb_obs_random_noise(obs, perutrb_eps)
             is_attacked = True
@@ -213,11 +220,12 @@ def plot(episode_data, episode_data_attacked, log_dir: str):
     # plt.axvline(x=index, color='r', linestyle='--', label=f'Attacked Step')
     plt.xlabel("Steps")
     # plt.ylabel("Q(s1,a1) - (r_1+..+r_{k-1} + Q(s_k,a_k))")
-    plt.ylabel("log(p(a1))+log(p(a2))+...+log(p(ak))")
+    # plt.ylabel("log(p(a1))+log(p(a2))+...+log(p(ak))")
+    plt.ylabel('SO INRD L Value')
     # plt.yscale('log')
-    plt.title("Env: Boxing, Noise Attack 100% After 200 Steps")
+    plt.title("Env: Boxing, Noise Attack 50% After 200 Steps")
     plt.legend()
-    plt.savefig(os.path.join(log_dir, 'so_inrd_fgsm_1.0_200_eps_10.0.png'), dpi=300, format='png',bbox_inches='tight')
+    plt.savefig(os.path.join(log_dir, 'so_inrd_random_noise_0.5_200_eps_0.1.png'), dpi=300, format='png',bbox_inches='tight')
     plt.close(fig)
 
 
