@@ -11,14 +11,12 @@ from datetime import datetime
 import os
 import argparse
 
-def compute_cross_entropy_loss(agent, obs_tensors, actions):
-    loss = 0.0
-    for i, obs_tensor in enumerate(obs_tensors):  
-        q_values = agent.q_net(obs_tensor)[0]
-        action = actions[i]
-        policy_probs = torch.softmax(q_values, dim=-1)  # Convert Q-values to probabilities
-        loss += -torch.log(policy_probs[action])  # Cross-entropy loss
-    return loss
+
+def compute_log_prob_action(agent, obs_tensor, action):
+    q_values = agent.q_net(obs_tensor)[0]
+    policy_probs = torch.softmax(q_values, dim=-1)  # Convert Q-values to probabilities
+    return -torch.log(policy_probs[action])
+
 
 def compute_loss(agent, obs, action, reward, next_obs, done, step_size):
     with torch.no_grad():
@@ -50,35 +48,24 @@ def compute_loss(agent, obs, action, reward, next_obs, done, step_size):
 
     return loss
 
-# NEEDS FIXES
-def perturb_obs_fgsm(agent: DoubleDQN, env, obs, epsilon):
+
+def perturb_obs_fgsm(agent: DoubleDQN, obs, epsilon):
     """ Compute perturbed obs using FGSM attack """
+    action, _ = agent.predict(obs, deterministic=True)
     obs_tensor = agent.policy.obs_to_tensor(obs)[0]
     obs_tensor = obs_tensor.float().requires_grad_(True) # Clone the obs tensor and set requires_grad=True
 
-    saved_env_state = env.unwrapped.clone_state(include_rng=True) # Save the Current State Before Rollout
-    action, _ = agent.predict(obs, deterministic=True)
-    next_obs, reward, terminated, truncated, _ = env.step(action)
-    next_obs_tensor = agent.policy.obs_to_tensor(next_obs)[0]
-    env.unwrapped.restore_state(saved_env_state)  # Restore the Environment Back to the Saved State
-
-    loss = compute_loss(agent, obs_tensor, torch.tensor(action).unsqueeze(0), torch.tensor(reward).unsqueeze(0), 
-                        next_obs_tensor, torch.tensor(int(terminated or truncated)).unsqueeze(0))
-
-    # action, _ = agent.predict(obs, deterministic=True)
-    # q_values = agent.q_net(obs_tensor)
-    # target_probs = F.one_hot(torch.tensor(action), num_classes=q_values.shape[-1]).float()
-    # loss = compute_loss(agent, obs_tensor, target_probs)
-
-    # The gradient with respect to obs
+    loss = compute_log_prob_action(agent, obs_tensor, action)
     grad_J = torch.autograd.grad(loss, obs_tensor)[0]
-
+    
     # Compute η_i (adversarial perturbation direction)
     eta_i = epsilon * grad_J.sign()
 
     # Perturbed state
     # eta_i's shape (1, 3, 210, 160) to (210, 160, 3)
-    perturbed_obs = obs + eta_i.permute(0, 2, 3, 1).squeeze(0).detach().numpy()
+    perturbed_obs = obs / 255.0 + eta_i.permute(0, 2, 3, 1).squeeze(0).detach().numpy() # converts to [0,1] scale
+    perturbed_obs = np.clip(perturbed_obs, 0, 1)
+    perturbed_obs = (perturbed_obs * 255.0).astype(np.uint8)    # rescale back to [0,255]
     return perturbed_obs
 
 
@@ -93,54 +80,33 @@ def perturb_obs_random_noise(obs, epsilon):
     return (perturbed_obs * 255.0).astype(np.uint8)
 
 
-def so_inrd(agent: DoubleDQN, episode_data, loss_window_size, epsilon):
+def so_inrd(agent: DoubleDQN, obs, action, epsilon):
     """ Second Order Identification of Non-Robust Directions (SO-INRD) """
-    history_start_idx = max(0, len(episode_data['states']) - loss_window_size)
-    obs_list = episode_data['states'][history_start_idx:]
-    L = 0.0
+    obs_tensor = agent.policy.obs_to_tensor(obs)[0]
+    obs_tensor = obs_tensor.float().requires_grad_(True) # Clone the obs tensor and set requires_grad=True
+    loss = compute_log_prob_action(agent, obs_tensor, action)
+    
+    # return loss
 
-    for i, obs in enumerate(obs_list):
-        obs_tensor = agent.policy.obs_to_tensor(obs)[0]
-        obs_tensor = obs_tensor.float().requires_grad_(True) # Clone the obs tensor and set requires_grad=True
-        action = episode_data['actions'][history_start_idx+i]
+    # The gradient with respect to obs
+    grad_J = torch.autograd.grad(loss, obs_tensor)[0]
+    
+    # Compute η_i (adversarial perturbation direction)
+    eta_i = epsilon * grad_J.sign() / torch.max(grad_J.norm(p=2), torch.tensor(1e-6))
 
-        # last_obs = episode_data['next_states'][-1]
-        # last_obs_tensor = agent.policy.obs_to_tensor(last_obs)[0]
+    # Compute J tilde
+    J_tilde = loss + torch.dot(grad_J.flatten(), eta_i.flatten())
 
-        # subtraj_reward = sum(episode_data['rewards'][history_start_idx:])
-        # last_done = int(episode_data['dones'][-1])
+    # Perturbed state
+    perturbed_obs = obs / 255.0 + eta_i.permute(0, 2, 3, 1).squeeze(0).detach().numpy()    # converts to [0,1] scale
+    perturbed_obs = np.clip(perturbed_obs, 0, 1)
+    perturbed_obs = (perturbed_obs * 255.0).astype(np.uint8)    # rescale back to [0,255]
+    perturbed_obs_tensor = agent.policy.obs_to_tensor(obs)[0]
+    perturbed_loss = compute_log_prob_action(agent, perturbed_obs_tensor, action)
+    # perturbed_loss = compute_loss(agent, perturbed_obs_tensor, target_probs)
 
-        # n-step td error
-        # loss = compute_loss(agent, obs_tensor, torch.tensor(action).unsqueeze(0), torch.tensor(subtraj_reward).unsqueeze(0),
-        #                     last_obs_tensor, torch.tensor(last_done).unsqueeze(0), loss_window_size)
-
-        # q_values = agent.q_net(obs_tensor)
-        # target_probs = F.one_hot(torch.tensor(action), num_classes=q_values.shape[-1]).float()
-        # loss = compute_loss(agent, obs_tensor, target_probs)
-        loss = compute_cross_entropy_loss(agent, obs_tensor.unsqueeze(0), [action])
-        
-        # return loss
-
-        # The gradient with respect to obs
-        grad_J = torch.autograd.grad(loss, obs_tensor)[0]
-        # print(" >>", grad_J.norm(p=2))
-        
-        # Compute η_i (adversarial perturbation direction)
-        eta_i = epsilon * grad_J.sign() / torch.max(grad_J.norm(p=2), torch.tensor(1e-6))
-
-        # Compute J tilde
-        J_tilde = loss + torch.dot(grad_J.flatten(), eta_i.flatten())
-
-        # Perturbed state
-        perturbed_obs = obs / 255.0 + eta_i.permute(0, 2, 3, 1).squeeze(0).detach().numpy()    # converts to [0,1] scale
-        perturbed_obs = np.clip(perturbed_obs, 0, 1)
-        perturbed_obs = (perturbed_obs * 255.0).astype(np.uint8)    # rescale back to [0,255]
-        perturbed_obs_tensor = agent.policy.obs_to_tensor(obs)[0]
-        perturbed_loss = compute_cross_entropy_loss(agent, perturbed_obs_tensor.unsqueeze(0), [action])
-        # perturbed_loss = compute_loss(agent, perturbed_obs_tensor, target_probs)
-
-        # Compute L
-        L += perturbed_loss - J_tilde
+    # Compute L
+    L = perturbed_loss - J_tilde
     return L
 
 
@@ -150,7 +116,7 @@ def get_episode_data(model_dir, env_id, do_attack: bool, log_dir: str):
     agent = DoubleDQN.load(model_dir, env=env)
     done = False
     cumulative_rew = 0
-    loss_window_size = 10
+    so_inrd_vals = deque(maxlen=10) # maintain a window of k. we are considering a subtrajectory of the last k states.
 
     episode_data = {'states': [], 'actions': [], 'rewards': [], 'dones': [], 
                     'next_states': [], 'so_inrd_l': [], 'attack_flag': []}
@@ -161,26 +127,14 @@ def get_episode_data(model_dir, env_id, do_attack: bool, log_dir: str):
         step_counter += 1
         
         is_attacked = False
-        original_obs = obs
-        original_action, _ = agent.predict(obs, deterministic=True)
-        original_q_values = agent.q_net(agent.policy.obs_to_tensor(obs)[0])
-        original_act_prob =  torch.softmax(original_q_values, dim=-1)[0][original_action]
         # if do_attack and agent.get_values(torch_obs) > 0.7:
         if do_attack and step_counter > 200 and np.random.rand() < 0.5:
-            # obs = perturb_obs_fgsm(agent, env, obs, perutrb_eps)
+            # obs_bk = obs
+            # obs = perturb_obs_fgsm(agent, obs, perutrb_eps)
             obs = perturb_obs_random_noise(obs, perutrb_eps)
+            # from experiments.utils import plot_two_frames
+            # plot_two_frames(obs_bk, obs, os.path.join(log_dir, f'fgsm_attack_{step_counter}.png'))
             is_attacked = True
-
-            atk_action, _ = agent.predict(obs, deterministic=True)
-            atk_q_values = agent.q_net(agent.policy.obs_to_tensor(obs)[0])
-            atk_act_prob =  torch.softmax(atk_q_values, dim=-1)[0][original_action]
-            if original_action != atk_action and False:
-                from experiments.utils import plot_two_frames
-                # plot_two_frames(original_obs, obs, os.path.join(log_dir, f'fgsm_attack_{step_counter}.png'))
-                print(f"\n-----Original Action: {original_action}, Perturbed Obs Action: {atk_action}")
-                print(f"Original Q-Values: {original_q_values}")
-                print(f"Perturbed Obs Q-Values: {atk_q_values}")
-                print(f"Original Action Prob: {original_act_prob}, Original Action Prob in Perturbed Obs: {atk_act_prob}, Perturbed Obs Action Prob: {torch.softmax(atk_q_values, dim=-1)[0][atk_action]}")
 
         action, _ = agent.predict(obs, deterministic=True)
         # Single environment step
@@ -194,7 +148,9 @@ def get_episode_data(model_dir, env_id, do_attack: bool, log_dir: str):
         episode_data['dones'].append(done)
         episode_data['next_states'].append(next_obs)
         episode_data['attack_flag'].append(is_attacked)
-        episode_data['so_inrd_l'].append(so_inrd(agent, episode_data, loss_window_size, perutrb_eps).item())
+        so_inrd_val = so_inrd(agent, obs, action, perutrb_eps).item()
+        so_inrd_vals.append(so_inrd_val)
+        episode_data['so_inrd_l'].append(sum(so_inrd_vals))
 
         obs = next_obs  # Set the next state as the current state
     
@@ -223,7 +179,7 @@ def plot(episode_data, episode_data_attacked, log_dir: str):
     # plt.ylabel("log(p(a1))+log(p(a2))+...+log(p(ak))")
     plt.ylabel('SO INRD L Value')
     # plt.yscale('log')
-    plt.title("Env: Boxing, Noise Attack 50% After 200 Steps")
+    plt.title("Env: Boxing, FGSM Attack 50% After 200 Steps")
     plt.legend()
     plt.savefig(os.path.join(log_dir, 'so_inrd_random_noise_0.5_200_eps_0.1.png'), dpi=300, format='png',bbox_inches='tight')
     plt.close(fig)
