@@ -1,6 +1,7 @@
 from collections import deque
 import warnings
 import gymnasium as gym
+import ale_py
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -128,7 +129,9 @@ def get_episode_data(model_dir, env_id, do_attack: bool, log_dir: str):
         
         is_attacked = False
         # if do_attack and agent.get_values(torch_obs) > 0.7:
-        if do_attack and step_counter > 200 and np.random.rand() < 0.5:
+        max_q_val = torch.max(agent.q_net(agent.policy.obs_to_tensor(obs)[0])).item()
+        # if do_attack and step_counter > 200 and np.random.rand() < 0.5:
+        if do_attack and step_counter > 200 and max_q_val > 16:
             # obs_bk = obs
             # obs = perturb_obs_fgsm(agent, obs, perutrb_eps)
             obs = perturb_obs_random_noise(obs, perutrb_eps)
@@ -179,13 +182,14 @@ def plot(episode_data, episode_data_attacked, log_dir: str):
     # plt.ylabel("log(p(a1))+log(p(a2))+...+log(p(ak))")
     plt.ylabel('SO INRD L Value')
     # plt.yscale('log')
-    plt.title("Env: Boxing, FGSM Attack 50% After 200 Steps")
+    plt.title("Env: Boxing, Random Noise Attack (if Q(s)>16). Attack starts After 200 Steps")
     plt.legend()
-    plt.savefig(os.path.join(log_dir, 'so_inrd_random_noise_0.5_200_eps_0.1.png'), dpi=300, format='png',bbox_inches='tight')
+    plt.savefig(os.path.join(log_dir, 'so_inrd_random_noise_q>16_200_eps_0.1.png'), dpi=300, format='png',bbox_inches='tight')
     plt.close(fig)
 
 
 def main(args):
+    gym.register_envs(ale_py)
     cur_dir = os.getcwd()
     log_dir = os.path.join(cur_dir, "logs", args.env_id, "exp_loss_" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
     os.makedirs(log_dir, exist_ok=True)
@@ -197,7 +201,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DDQN Testing Arguments")
-    parser.add_argument("--env_id", type=str, required=True, help="Name of the Gymnasium environment (e.g., ALE/Boxing-v5)")
+    parser.add_argument("--env_id", type=str, required=True, help="Name of the Gymnasium environment (e.g., BoxingDeterministic-v4)")
     parser.add_argument("--model_dir", type=str, required=True, help="model.zip directory")
     args = parser.parse_args()
     main(args)
