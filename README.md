@@ -31,6 +31,13 @@ Delete lines regarding env.seed to avoid errors.
 
 You may need to run the training inside job. Head node might give errors.
 
+# AgileRL
+```sh
+git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
+pip install -e .
+```
+I've implemented sample train and test script in AgileRL folder.
+
 # SheepRL Setup:
 Follow the upper **Environment Setup** section at first. After that,
 ```sh
