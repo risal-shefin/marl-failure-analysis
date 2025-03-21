@@ -1,114 +1,163 @@
 import numpy as np
 import torch
-from pettingzoo.mpe import simple_speaker_listener_v4
-from tqdm import trange
+import argparse
+import datetime
+import os
+import pettingzoo.mpe as mpe
+import agilerl.algorithms as algorithms
 
+from tqdm import tqdm, trange
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 from agilerl.utils.algo_utils import obs_channels_to_first
+from agilerl.utils.utils import create_population
 from agilerl.algorithms.maddpg import MADDPG
-from tqdm import tqdm
+from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
+from agilerl.training.train_multi_agent import train_multi_agent
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-num_envs = 8
-env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
-env = AsyncPettingZooVecEnv([lambda: env for _ in range(num_envs)])
-env.reset()
 
-# Configure the multi-agent algo input arguments
-observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
-action_spaces = [env.single_action_space(agent) for agent in env.agents]
+def main(args):
+    # Create log directory: logs/{env}/{timestamp}
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    logdir = os.path.join(os.getcwd(), "logs", f"{args.env_id}_{args.algo_name}", timestamp)
+    os.makedirs(logdir, exist_ok=True)
+    checkpoint_path = os.path.join(logdir, "checkpoint.pt")
 
-channels_last = False  # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-n_agents = env.num_agents
-agent_ids = [agent_id for agent_id in env.agents]
-field_names = ["state", "action", "reward", "next_state", "done"]
-memory = MultiAgentReplayBuffer(
-    memory_size=1_000_000,
-    field_names=field_names,
-    agent_ids=agent_ids,
-    device=device,
-)
+    num_envs = 8
+    # Dynamically import the environment from pettingzoo.mpe
+    try:
+        env_func = getattr(mpe, args.env_id)
+    except AttributeError:
+        raise ValueError(f"Environment {args.env_id} not found in pettingzoo.mpe")
+    env = env_func.parallel_env(continuous_actions=False)
+    env = AsyncPettingZooVecEnv([lambda: env for _ in range(num_envs)])
 
-agent = MADDPG(
-    observation_spaces=observation_spaces,
-    action_spaces=action_spaces,
-    agent_ids=agent_ids,
-    vect_noise_dim=num_envs,
-    device=device,
-)
+    # Configure the multi-agent algo input arguments
+    observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
+    action_spaces = [env.single_action_space(agent) for agent in env.agents]
 
-# Define training loop parameters
-max_steps = int(5e7)  # Max steps
-total_steps = 0
-progress_bar = tqdm(total=max_steps, desc="Training Progress")
-initial_step = agent.steps[-1]
-best_score = -np.inf
-while agent.steps[-1] < max_steps:
-    state, info  = env.reset() # Reset environment at start of episode
-    scores = np.zeros(num_envs)
-    completed_episode_scores = []
-    if channels_last:
-        state = {agent_id: obs_channels_to_first(s) for agent_id, s in state.items()}
+    agent_ids = env.agents
+    n_agents = env.num_agents
+    # Replay Buffer
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    memory = MultiAgentReplayBuffer(
+        memory_size=1_000_000,
+        field_names=field_names,
+        agent_ids=agent_ids,
+        device=device,
+    )
 
-    steps = 0
-    for _ in range(1000):
-
-        # Get next action from agent
-        cont_actions, discrete_action = agent.get_action(
-            obs=state,
-            training=True,
-            infos=info,
+    if args.algo_name == 'MADDPG':
+        agent = MADDPG(
+            observation_spaces=observation_spaces,
+            action_spaces=action_spaces,
+            agent_ids=agent_ids,
+            vect_noise_dim=num_envs,
+            device=device,
         )
-        if agent.discrete_actions:
-            action = discrete_action
-        else:
-            action = cont_actions
+    else:
+        raise ValueError(f"Algorithm {args.algo_name} is not implemented in this train script")
 
-        # Act in environment
-        next_state, reward, termination, truncation, info = env.step(action)
+    # Define training loop parameters
+    max_steps = args.train_steps  # Max steps
+    evo_steps = 10000
+    learning_delay = 1000  # Steps before starting learning
+    total_steps = 0
+    progress_bar = tqdm(total=max_steps, desc="Training Progress")
+    last_step_count = agent.steps[-1]
+    best_score = -np.inf
 
-        scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
-        total_steps += num_envs
-        steps += num_envs
+    while agent.steps[-1] < max_steps:
+        state, info  = env.reset() # Reset environment at start of episode
+        scores = np.zeros(num_envs)
+        completed_episode_scores = []
 
-        # Save experiences to replay buffer
-        if channels_last:
-            next_state = {
-                agent_id: obs_channels_to_first(ns)
-                for agent_id, ns in next_state.items()
-            }
-        done = termination or truncation
-        memory.save_to_memory(state, cont_actions, reward, next_state, done, is_vectorised=True)
+        steps = 0
+        for idx_step in range(evo_steps // num_envs):
+            # Get next action from agent
+            cont_actions, discrete_action = agent.get_action(
+                obs=state,
+                training=True,
+                infos=info,
+            )
+            action = discrete_action if agent.discrete_actions else cont_actions
 
-        # Learn according to learning frequency
-        if len(memory) >= agent.batch_size:
-            for _ in range(num_envs // agent.learn_step):
-                experiences = memory.sample(agent.batch_size) # Sample replay buffer
-                agent.learn(experiences) # Learn according to agent's RL algorithm
+            # Act in environment
+            next_state, reward, termination, truncation, info = env.step(action)
 
-        # Update the state
-        state = next_state
+            scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
+            total_steps += num_envs
+            steps += num_envs
 
-        # Calculate scores and reset noise for finished episodes
-        reset_noise_indices = []
-        term_array = np.array(list(termination.values())).transpose()
-        trunc_array = np.array(list(truncation.values())).transpose()
-        for idx, (d, t) in enumerate(zip(term_array, trunc_array)):
-            if np.any(d) or np.any(t):
-                completed_episode_scores.append(scores[idx])
-                agent.scores.append(scores[idx])
-                scores[idx] = 0
-                reset_noise_indices.append(idx)
-        agent.reset_action_noise(reset_noise_indices)
+            # Save experiences to replay buffer
+            done = termination or truncation
+            memory.save_to_memory(state, cont_actions, reward, next_state, done, is_vectorised=True)
 
-    mean_episode_score = np.mean(completed_episode_scores)
-    print(f"Mean score: {mean_episode_score}", flush=True)
-    agent.steps[-1] += steps
-    progress_bar.update(agent.steps[-1] - initial_step)
-    initial_step = agent.steps[-1]
-    if mean_episode_score > best_score:
-        best_score = mean_episode_score
-        agent.save_checkpoint('./simple_speaker_listener_v4_checkpoint.pt')
-        print(f"Saved checkpoint with score: {best_score}", flush=True)
-progress_bar.close()
+            # Learn according to learning frequency
+            # Handle learn steps > num_envs
+            if agent.learn_step > num_envs:
+                learn_step = agent.learn_step // num_envs
+                if (
+                    idx_step % learn_step == 0
+                    and len(memory) >= agent.batch_size
+                    and memory.counter > learning_delay
+                ):
+                    # Sample replay buffer
+                    experiences = memory.sample(agent.batch_size)
+                    # Learn according to agent's RL algorithm
+                    agent.learn(experiences)
+            # Handle num_envs > learn step; learn multiple times per step in env
+            elif (
+                len(memory) >= agent.batch_size and memory.counter > learning_delay
+            ):
+                for _ in range(num_envs // agent.learn_step):
+                    # Sample replay buffer
+                    experiences = memory.sample(agent.batch_size)
+                    # Learn according to agent's RL algorithm
+                    agent.learn(experiences)
+
+            # Update the state
+            state = next_state
+
+            # Calculate scores and reset noise for finished episodes
+            reset_noise_indices = []
+            term_array = np.array(list(termination.values())).transpose()
+            trunc_array = np.array(list(truncation.values())).transpose()
+            for idx, (d, t) in enumerate(zip(term_array, trunc_array)):
+                if np.any(d) or np.any(t):
+                    completed_episode_scores.append(scores[idx])
+                    agent.scores.append(scores[idx])
+                    scores[idx] = 0
+                    reset_noise_indices.append(idx)
+            agent.reset_action_noise(reset_noise_indices)
+
+        agent.steps[-1] += steps
+        progress_bar.update(agent.steps[-1] - last_step_count)
+        last_step_count = agent.steps[-1]
+
+        # Episodic Score Summary
+        mean_episode_score = np.mean(completed_episode_scores)
+        print(f"Mean score: {mean_episode_score}", flush=True)
+
+        # Save best agent's checkpoint
+        if mean_episode_score >= best_score:
+            best_score = mean_episode_score
+            agent.save_checkpoint(checkpoint_path)
+            print(f"Saved checkpoint with score: {best_score}", flush=True)
+
+    progress_bar.close()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train an RL agent on a PettingZoo MPE environment")
+    parser.add_argument("--env_id", type=str,
+                        help="Name of the environment from pettingzoo.mpe (for ex: simple_speaker_listener_v4)")
+    parser.add_argument("--algo_name", type=str, default='MADDPG',
+                        help="Algorithm Name")
+    parser.add_argument("--train_steps", type=int, default=10_000_000,
+                        help="Total Train Steps")
+    args = parser.parse_args()
+    main(args)
