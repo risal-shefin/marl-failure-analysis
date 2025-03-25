@@ -5,6 +5,7 @@ import datetime
 import os
 import pettingzoo.mpe as mpe
 import agilerl.algorithms as algorithms
+import gymnasium as gym
 
 from tqdm import tqdm, trange
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
@@ -18,6 +19,32 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_multi_agent import train_multi_agent
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def has_image_observations(observation_spaces):
+    for obs_space in observation_spaces:
+        # Check if space is Box type (which images would be)
+        if isinstance(obs_space, gym.spaces.Box):
+            # Check if shape has 3 dimensions (typical for images: H,W,C)
+            if len(obs_space.shape) == 3:
+                return True
+    return False
+
+NET_IMG_CONFIG = {
+    "encoder_config": {
+      'hidden_size': [128, 128],  # Encoder Network head hidden size
+      'channel_size': [32, 32], # CNN channel size (for image observations)
+      'kernel_size': [8, 4],   # CNN kernel size   (for image observations)
+      'stride_size': [4, 2],   # CNN stride size   (for image observations)
+    },
+    "head_config": {'hidden_size': [128, 128]}  # Network head hidden size
+}
+
+NET_MLP_CONFIG = {
+    "encoder_config": {
+      'hidden_size': [128, 128],  # Encoder Network head hidden size
+    },
+    "head_config": {'hidden_size': [128, 128]}  # Network head hidden size
+}
 
 def main(args):
     # Create log directory: logs/{env}/{timestamp}
@@ -38,6 +65,7 @@ def main(args):
     # Configure the multi-agent algo input arguments
     observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
     action_spaces = [env.single_action_space(agent) for agent in env.agents]
+    net_config = NET_IMG_CONFIG if has_image_observations(observation_spaces) else NET_MLP_CONFIG
 
     agent_ids = env.agents
     n_agents = env.num_agents
@@ -57,6 +85,7 @@ def main(args):
             agent_ids=agent_ids,
             vect_noise_dim=num_envs,
             device=device,
+            net_config=net_config
         )
     else:
         raise ValueError(f"Algorithm {args.algo_name} is not implemented in this train script")

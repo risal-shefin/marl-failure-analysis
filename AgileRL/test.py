@@ -10,9 +10,29 @@ from datetime import datetime
 import os
 import pettingzoo.mpe as mpe
 import matplotlib.pyplot as plt
+import random
+import imageio
+from PIL import Image, ImageDraw
 
 # Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Define function to return image
+def _label_with_episode_number(frame, episode_num):
+    im = Image.fromarray(frame)
+
+    drawer = ImageDraw.Draw(im)
+
+    if np.mean(frame) < 128:
+        text_color = (255, 255, 255)
+    else:
+        text_color = (0, 0, 0)
+    drawer.text(
+        (im.size[0] / 20, im.size[1] / 18), f"Episode: {episode_num+1}", fill=text_color
+    )
+
+    return im
+
 
 # Define a perturbation function to add Gaussian noise to a specific agent's observation.
 def perturb_obs_random_noise(obs, perturb_agent, noise_std=0.1):
@@ -94,7 +114,7 @@ def compute_so_inrd(agent: MADDPG, agent_id, agent_index, obs, actions, actions_
     return L.item()
 
 
-def get_episode_data(env, agent, do_attack: bool, attacked_agent_id: str):
+def get_episode_data(env, agent, do_attack: bool, attacked_agent_id: str, logdir: str):
 
     # Run one episode and perturb the observation of the "adversary" agent
     done = {agent_id: False for agent_id in env.agents}
@@ -109,9 +129,11 @@ def get_episode_data(env, agent, do_attack: bool, attacked_agent_id: str):
         so_inrd_vals[agent_id] = deque(maxlen=5) # maintain a window of k. we are considering a subtrajectory of the last k states.
 
     iter_count = 0
+    frames = []  # List to collect frames
+
     while not all(done.values()):
-        if do_attack and iter_count > 5 and np.random.rand() < 0.5:
-            state = perturb_obs_random_noise(state, attacked_agent_id, noise_std=perturb_eps)
+        # if do_attack and iter_count > 5 and np.random.rand() < 1.0:
+        #     state = perturb_obs_random_noise(state, attacked_agent_id, noise_std=perturb_eps)
         
         # Get actions from the agent (in evaluation mode, training=False)
         cont_actions, discrete_action = agent.get_action(
@@ -119,8 +141,14 @@ def get_episode_data(env, agent, do_attack: bool, attacked_agent_id: str):
             training=False,
             infos=info
         )
+        if do_attack and iter_count > 5 and np.random.rand() < 0.5:
+            discrete_action[attacked_agent_id] = env.action_space(attacked_agent_id).sample()
         # Choose discreate action if available
         action = discrete_action if agent.discrete_actions else cont_actions
+
+        # Save the frame for this step and append to frames list
+        frame = env.render()[0]
+        frames.append(_label_with_episode_number(frame, 0))
 
         next_state, reward, termination, truncation, info = env.step(action)
         
@@ -139,6 +167,9 @@ def get_episode_data(env, agent, do_attack: bool, attacked_agent_id: str):
         iter_count += 1
 
     print("Episode finished. Rewards:", episode_reward)
+    imageio.mimwrite(
+        os.path.join(logdir, f"episode_vid_attack_{do_attack}.gif"), frames, duration=10
+    )
     return episode_data
 
 
@@ -175,7 +206,7 @@ def plot(episode_data_unattacked, episode_data_attacked, attacked_agent_id, log_
         # Add labels and title for each subplot
         axes[i].set_xlabel('Step')
         axes[i].set_ylabel('SO-INRD L Value')
-        axes[i].set_title(f'Current Agent: {agent_id}')
+        axes[i].set_title(f'Agent: {agent_id}')
         axes[i].legend()
         axes[i].grid(True)
     
@@ -202,8 +233,11 @@ def main(args):
         env_func = getattr(mpe, args.env_id)
     except AttributeError:
         raise ValueError(f"Environment {args.env_id} not found in pettingzoo.mpe")
-    env = env_func.parallel_env(continuous_actions=False)
+    env = env_func.parallel_env(continuous_actions=False, render_mode='rgb_array')
     env = AsyncPettingZooVecEnv([lambda: env for _ in range(num_envs)])
+
+    log_dir = os.path.join(os.getcwd(), "logs", f"{args.env_id}_{args.algo_name}", "exp_loss_" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+    os.makedirs(log_dir, exist_ok=True)     # Create the log directory if it doesn't exist
 
     # Print all available discrete actions for each agent
     for agent_id in env.agents:
@@ -222,30 +256,21 @@ def main(args):
 
     # Create the MADDPG agent
     if args.algo_name == 'MADDPG':
-        agent = MADDPG(
-            observation_spaces=observation_spaces,
-            action_spaces=action_spaces,
-            agent_ids=agent_ids,
-            vect_noise_dim=num_envs,
-            device=device,
-        )
+        agent = MADDPG.load(args.model_dir, device=device)
+        print("\n--Loaded MADDPG agent from", args.model_dir)
     else:
         raise ValueError(f"Algorithm {args.algo_name} is not implemented in this test script")
 
-    # Load the trained checkpoint (.pt extension is acceptable by torch)
-    agent.load_checkpoint(args.model_dir)
+    episode_data_unattacked = get_episode_data(env, agent, False, None, log_dir)
 
-    episode_data_unattacked = get_episode_data(env, agent, False, None)
-
-    # Agent Ids of simple_speaker_listener_v4 env: ["listener_0", "speaker_0"]
-    attacked_agent_id = "speaker_0"
-    episode_data_attacked = get_episode_data(env, agent, True, attacked_agent_id)
+    # Agent Ids of simple_speaker_listener_v4 env: [listener_0, speaker_0]
+    # Agent Ids of simple_speaker_listener_v4 env: [agent_0, agent_1, agent_2]
+    attacked_agent_id = "agent_0"
+    episode_data_attacked = get_episode_data(env, agent, True, attacked_agent_id, log_dir)
 
     env.close()
 
     # Plot the SO-INRD values for all agents
-    log_dir = os.path.join(os.getcwd(), "logs", f"{args.env_id}_{args.algo_name}", "exp_loss_" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
-    os.makedirs(log_dir, exist_ok=True)     # Create the log directory if it doesn't exist
     plot(episode_data_unattacked, episode_data_attacked, attacked_agent_id, log_dir)
 
 

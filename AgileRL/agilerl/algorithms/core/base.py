@@ -852,7 +852,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         )
 
         # Reconstruct evolvable modules in algorithm
-        print("Checkpoint: ", checkpoint)
+        # print("Checkpoint: ", checkpoint)
         network_info: Optional[Dict[str, Dict[str, Any]]] = checkpoint.get(
             "network_info"
         )
