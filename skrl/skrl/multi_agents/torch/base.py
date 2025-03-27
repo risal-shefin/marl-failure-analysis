@@ -492,6 +492,7 @@ class MultiAgent:
         if timestep > 1 and self.checkpoint_interval > 0 and not timestep % self.checkpoint_interval:
             # update best models
             reward = np.mean(self.tracking_data.get("Reward / Total reward (mean)", -(2**31)))
+            print(f"Timsetep: {timestep}, Reward: {reward}", flush=True)
             if reward > self.checkpoint_best_modules["reward"]:
                 self.checkpoint_best_modules["timestep"] = timestep
                 self.checkpoint_best_modules["reward"] = reward
@@ -502,8 +503,10 @@ class MultiAgent:
                     }
                     for uid in self.possible_agents
                 }
+                print(f"Updating best model at timestep {timestep} with reward {reward}", flush=True)
             # write checkpoints
             self.write_checkpoint(timestep, timesteps)
+            print(f"Writing checkpoint at timestep {timestep}", flush=True)
 
         # write to tensorboard
         if timestep > 1 and self.write_interval > 0 and not timestep % self.write_interval:
