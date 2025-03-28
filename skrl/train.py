@@ -8,6 +8,8 @@ import pettingzoo.mpe as mpe
 import torch
 import torch.nn as nn
 import argparse
+import gymnasium
+import numpy as np
 
 
 # define the model
@@ -57,7 +59,9 @@ def main(args):
     # wrap the environment
     env = wrap_env(env)  # or 'env = wrap_env(env, wrapper="pettingzoo")'
 
+    # Agent configs
     cfg_agent = {}
+    agent_kwargs = {}
     agent_class: IPPO | MAPPO = None
     if args.algo_name == 'IPPO':
         cfg_agent = IPPO_DEFAULT_CONFIG.copy()
@@ -65,6 +69,18 @@ def main(args):
     elif args.algo_name == 'MAPPO':
         cfg_agent = MAPPO_DEFAULT_CONFIG.copy()
         agent_class = MAPPO
+
+        shared_observation_spaces_low = []
+        shared_observation_spaces_high = []
+        for agent_name in env.possible_agents:
+            shared_observation_spaces_low.append(env.observation_spaces[agent_name].low)
+            shared_observation_spaces_high.append(env.observation_spaces[agent_name].high)
+        shared_observation_space = gymnasium.spaces.Box(
+            low=np.concatenate(shared_observation_spaces_low),
+            high=np.concatenate(shared_observation_spaces_high),
+            dtype=np.float32
+        )
+        agent_kwargs.update({"shared_observation_spaces": {agent_name: shared_observation_space for agent_name in env.possible_agents}})
     else:
         raise ValueError(f"Algorithm {args.algo_name} is not supported")
     
@@ -82,16 +98,21 @@ def main(args):
         }
     })
 
-    # instantiate the agent's models
+    # instantiate the agent's models and memories
     models = {}
     memories = {}
     for agent_name in env.possible_agents:
         models[agent_name] = {}
+
         models[agent_name]["policy"] = PolicyCategorical(
             observation_space=env.observation_space(agent_name), 
             action_space=env.action_space(agent_name), 
             device=env.device)
-        models[agent_name]["value"] = ValueDeterministic(observation_space=env.observation_space(agent_name), 
+        
+        value_obs_space = env.observation_space(agent_name)
+        if args.algo_name == 'MAPPO':
+            value_obs_space = shared_observation_space
+        models[agent_name]["value"] = ValueDeterministic(observation_space=value_obs_space, 
             action_space=env.action_space(agent_name), 
             device=env.device)
         
@@ -106,8 +127,8 @@ def main(args):
                 cfg=cfg_agent,
                 observation_spaces=env.observation_spaces,
                 action_spaces=env.action_spaces,
-                device=env.device)
-
+                device=env.device,
+                **agent_kwargs)
 
 
     # create a sequential trainer
