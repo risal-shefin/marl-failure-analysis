@@ -503,10 +503,12 @@ class MultiAgent:
                     }
                     for uid in self.possible_agents
                 }
-                print(f"Updating best model at timestep {timestep} with reward {reward}", flush=True)
+                print(f"Updating best model at timestep {timestep} with reward {reward} at directory: {self.experiment_dir}", flush=True)
+                self.write_checkpoint(timestep, timesteps) # save checkpoint only for the best model
+            
             # write checkpoints
-            self.write_checkpoint(timestep, timesteps)
-            print(f"Writing checkpoint at timestep {timestep}", flush=True)
+            # self.write_checkpoint(timestep, timesteps)
+            # print(f"Writing checkpoint at timestep {timestep}", flush=True)
 
         # write to tensorboard
         if timestep > 1 and self.write_interval > 0 and not timestep % self.write_interval:
