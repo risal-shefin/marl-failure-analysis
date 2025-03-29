@@ -72,13 +72,13 @@ class PettingZooWrapper(MultiAgentEnvWrapper):
             tensorize_space(next(iter(self.state_spaces.values())), self._env.state(), device=self.device)
         )
 
-    def reset(self) -> Tuple[Mapping[str, torch.Tensor], Mapping[str, Any]]:
+    def reset(self, seed=None) -> Tuple[Mapping[str, torch.Tensor], Mapping[str, Any]]:
         """Reset the environment
 
         :return: Observation, info
         :rtype: tuple of dictionaries of torch.Tensor and any other info
         """
-        outputs = self._env.reset()
+        outputs = self._env.reset(seed=seed) if seed else self._env.reset()
         if isinstance(outputs, collections.abc.Mapping):
             observations = outputs
             infos = {uid: {} for uid in self.possible_agents}
