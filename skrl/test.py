@@ -1,3 +1,4 @@
+from collections import deque
 from skrl.multi_agents.torch.ippo import IPPO, IPPO_DEFAULT_CONFIG
 from skrl.multi_agents.torch.mappo import MAPPO, MAPPO_DEFAULT_CONFIG
 from skrl.trainers.torch import SequentialTrainer
@@ -15,44 +16,120 @@ import os
 from train import PolicyCategorical, ValueDeterministic
 import imageio
 from PIL import Image, ImageDraw
+from torch.distributions import Categorical
+import matplotlib.pyplot as plt
+from skrl.utils import set_seed
 
-# Define function to return image
-def _label_with_episode_number(frame, episode_num):
-    im = Image.fromarray(frame)
 
-    drawer = ImageDraw.Draw(im)
+def plot(episode_data_unattacked, episode_data_attacked, attacked_agent_id, log_dir: str):    
+    # Get the agent IDs from the first dictionary
+    agent_ids = list(episode_data_unattacked.keys())
+    num_agents = len(agent_ids)
+    
+    # Calculate grid dimensions
+    rows = int(np.ceil(np.sqrt(num_agents)))
+    cols = int(np.ceil(num_agents / rows))
+    
+    # Create a single figure with subplots for all agents
+    fig, axes = plt.subplots(rows, cols, figsize=(15, 10))
+    fig.suptitle(f'SO-INRD Values for All Agents, Attacked Agent: {attacked_agent_id}, Attack Mode: Random Attack after Step 5 at 50% Rate', fontsize=16)
+    
+    # Make axes iterable even for a single subplot
+    if num_agents == 1:
+        axes = np.array([axes])
+    
+    # Flatten axes array for easy iteration
+    axes = axes.flatten()
+    
+    # Plot data for each agent in its own subplot
+    for i, agent_id in enumerate(agent_ids):
+        # Extract the so_inrd_l values for both unattacked and attacked scenarios
+        unattacked_values = episode_data_unattacked[agent_id]['so_inrd_l']
+        attacked_values = episode_data_attacked[agent_id]['so_inrd_l']
+        
+        # Plot the values
+        axes[i].plot(range(len(unattacked_values)), unattacked_values, label='Unattacked', color='blue')
+        axes[i].plot(range(len(attacked_values)), attacked_values, label='Attacked', color='red')
+        
+        # Add labels and title for each subplot
+        axes[i].set_xlabel('Step')
+        axes[i].set_ylabel('SO-INRD L Value')
+        axes[i].set_title(f'Agent: {agent_id}')
+        axes[i].legend()
+        axes[i].grid(True)
+    
+    # Hide any unused subplots
+    for j in range(i + 1, len(axes)):
+        axes[j].set_visible(False)
+    
+    # Adjust layout
+    plt.tight_layout(rect=[0, 0, 1, 0.95])  # Leave space for suptitle
+    
+    # Save the figure with all subplots
+    plot_path = os.path.join(log_dir, 'so_inrd_all_agents_eps_0.1.png')
+    plt.savefig(plot_path, dpi=300)
+    plt.close()
+    
+    print(f"Plot for all agents saved to {plot_path}")
 
-    if np.mean(frame) < 128:
-        text_color = (255, 255, 255)
-    else:
-        text_color = (0, 0, 0)
-    drawer.text(
-        (im.size[0] // 20, im.size[1] // 18), f"Episode: {episode_num+1}", fill=0
-    )
 
-    return im
+def perturb_random_noise(states, perturb_agent_id, noise_std=0.1):
+    perturbed_states = states.copy()
+    perturbed_states[perturb_agent_id] = states[perturb_agent_id] + noise_std * torch.randn_like(states[perturb_agent_id])
+    return perturbed_states
+
+def compute_so_inrd(agent: IPPO | MAPPO, agent_id, states, epsilon):
+    policy_model = agent.models[agent_id]["policy"]
+
+    states[agent_id] = states[agent_id].detach().clone().requires_grad_(True)
+    actions, log_prob, _ = agent.act(states, 0, 0)
+    loss = log_prob[agent_id]
+    
+    # Compute the gradient of q_value with respect to stacked_states using autograd.grad
+    grad_J = torch.autograd.grad(loss, states[agent_id], create_graph=False)[0]
+
+    # Compute η_i (adversarial perturbation direction)
+    eta_i = epsilon * grad_J.sign() / torch.max(grad_J.norm(p=2), torch.tensor(1e-6))
+
+    # Compute J tilde
+    J_tilde = loss + torch.dot(grad_J.flatten(), eta_i.flatten())
+
+    # Perturbed state towards adversarial direction
+    perturbed_state = states[agent_id] + eta_i
+    p_net_output, _ = policy_model.compute({"states": agent._state_preprocessor[agent_id](perturbed_state)}, role="policy")
+    dist = Categorical(logits=p_net_output) if policy_model._c_unnormalized_log_prob else Categorical(probs=p_net_output)
+    perturbed_loss = dist.log_prob(actions[agent_id])
+    
+    # Compute L
+    L = perturbed_loss - J_tilde
+    return L.item()
+
 
 def get_episode_data(env, agent: IPPO | MAPPO, do_attack: bool, attacked_agent_id: str, logdir: str):
 
     # Run one episode and perturb the observation of the "adversary" agent
+    state, info = env.reset(seed=42)
     done = {agent_id: False for agent_id in env.agents}
     episode_reward = {agent_id: 0.0 for agent_id in env.agents}
-    state, info = env.reset()
     so_inrd_vals = dict()
     episode_data = dict()
-    perturb_eps = 0.1
+    perturb_eps = 0.001
 
     iter_count = 0
     frames = []  # List to collect frames
 
+    for agent_id in env.agents:
+        episode_data[agent_id] = {'so_inrd_l': []}
+        so_inrd_vals[agent_id] = deque(maxlen=5) # maintain a window of k. we are considering a subtrajectory of the last k states.
+
     while not all(done.values()):
         # if do_attack and iter_count > 5 and np.random.rand() < 1.0:
-        #     state = perturb_obs_random_noise(state, attacked_agent_id, noise_std=perturb_eps)
+        #     state = perturb_random_noise(state, attacked_agent_id, noise_std=perturb_eps)
         
         # Get actions from the agent (in evaluation mode, training=False)
         actions, log_prob, _ = agent.act(state, 0, 0)
         if do_attack and iter_count > 5 and np.random.rand() < 0.5:
-            actions[attacked_agent_id] = env.action_space(attacked_agent_id).sample()
+            actions[attacked_agent_id] = torch.tensor([[env.action_space(attacked_agent_id).sample()]])
 
         # Save the frame for this step and append to frames list
         frame = env.render()
@@ -62,6 +139,11 @@ def get_episode_data(env, agent: IPPO | MAPPO, do_attack: bool, attacked_agent_i
         
         # Check for terminal condition per agent
         done = {agent_id: termination[agent_id] or truncation[agent_id] for agent_id in env.agents}
+
+        for idx, agent_id in enumerate(env.agents):
+            so_inrd_l = compute_so_inrd(agent, agent_id, state, perturb_eps)
+            so_inrd_vals[agent_id].append(so_inrd_l)
+            episode_data[agent_id]['so_inrd_l'].append(sum(so_inrd_vals[agent_id]))
         
         for agent_id in env.agents:
             episode_reward[agent_id] += reward[agent_id]
@@ -77,6 +159,7 @@ def get_episode_data(env, agent: IPPO | MAPPO, do_attack: bool, attacked_agent_i
 
 
 def main(args):
+    set_seed(42, deterministic=True)
     # Dynamically import the environment from pettingzoo.mpe
     try:
         env_func = getattr(mpe, args.env_id)
@@ -153,7 +236,7 @@ def main(args):
 
     # instantiate the agent
     # (assuming a defined environment <env> and memories <memories>)
-    agent = agent_class(possible_agents=env.possible_agents,
+    agent: IPPO | MAPPO = agent_class(possible_agents=env.possible_agents,
                 models=models,
                 memories=memories,  # only required during training
                 cfg=cfg_agent,
@@ -164,7 +247,14 @@ def main(args):
 
     agent.load(args.model_dir) # Load the model from the specified directory
 
-    get_episode_data(env, agent, False, None, log_dir)
+    episode_data_unattacked = get_episode_data(env, agent, False, None, log_dir)
+    attacked_agent_id = "agent_0"
+    episode_data_attacked = get_episode_data(env, agent, True, attacked_agent_id, log_dir)
+
+    env.close()
+
+    # Plot the SO-INRD values for all agents
+    plot(episode_data_unattacked, episode_data_attacked, attacked_agent_id, log_dir)
 
 
 if __name__ == "__main__":
