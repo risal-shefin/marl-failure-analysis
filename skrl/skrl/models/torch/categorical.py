@@ -97,6 +97,8 @@ class CategoricalMixin:
 
         # actions and log of the probability density function
         actions = self._c_distribution.sample()
+        if getattr(self, 'eval_mode', False):
+            actions = self._c_distribution.mode     # mode of the distribution for deterministic behavior
         log_prob = self._c_distribution.log_prob(inputs.get("taken_actions", actions).view(-1))
 
         outputs["net_output"] = net_output

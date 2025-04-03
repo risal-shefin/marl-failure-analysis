@@ -15,9 +15,10 @@ import numpy as np
 # define the model
 # CategoricalMixin for Discrete Actions
 class PolicyCategorical(CategoricalMixin, Model):
-    def __init__(self, observation_space, action_space, device, unnormalized_log_prob=True):
+    def __init__(self, observation_space, action_space, device, unnormalized_log_prob=True, eval_mode=False):
         Model.__init__(self, observation_space, action_space, device)
         CategoricalMixin.__init__(self, unnormalized_log_prob)
+        self.eval_mode = eval_mode
 
         self.net = nn.Sequential(
             nn.Linear(self.num_observations, 64),

@@ -78,15 +78,28 @@ def perturb_random_noise(states, perturb_agent_id, noise_std=0.1):
     perturbed_states[perturb_agent_id] = states[perturb_agent_id] + noise_std * torch.randn_like(states[perturb_agent_id])
     return perturbed_states
 
-def compute_so_inrd(agent: IPPO | MAPPO, agent_id, states, epsilon):
+def compute_log_prob(agent: IPPO | MAPPO, agent_id, state, action):
     policy_model = agent.models[agent_id]["policy"]
+    net_output, _ = policy_model.compute({"states": agent._state_preprocessor[agent_id](state)}, role="policy")
 
-    states[agent_id] = states[agent_id].detach().clone().requires_grad_(True)
-    actions, log_prob, _ = agent.act(states, 0, 0)
-    loss = log_prob[agent_id]
+    # In some cases, got 1.00 in dist.probs when using Categorical(logits=net_output) which produced some issues. 
+    # Precision errors in internal computations most likely. Directly using torch.softmax solves the problem.
+    # dist = Categorical(logits=net_output) if policy_model._c_unnormalized_log_prob else Categorical(probs=net_output)
+    
+    probs = torch.softmax(net_output, dim=-1) if policy_model._c_unnormalized_log_prob else net_output
+    dist = Categorical(probs=probs)
+    log_prob = dist.log_prob(action)
+    return log_prob
+
+def compute_so_inrd(agent: IPPO | MAPPO, agent_id, states, epsilon):
+    actions, _, _ = agent.act(states, 0, 0)
+
+    state = states[agent_id].detach().clone().requires_grad_(True)
+    # Transfer action to agent.device before computing log probability
+    loss = compute_log_prob(agent, agent_id, state, actions[agent_id])
     
     # Compute the gradient of q_value with respect to stacked_states using autograd.grad
-    grad_J = torch.autograd.grad(loss, states[agent_id], create_graph=False)[0]
+    grad_J = torch.autograd.grad(loss, state, create_graph=False)[0]
 
     # Compute η_i (adversarial perturbation direction)
     eta_i = epsilon * grad_J.sign() / torch.max(grad_J.norm(p=2), torch.tensor(1e-6))
@@ -96,9 +109,7 @@ def compute_so_inrd(agent: IPPO | MAPPO, agent_id, states, epsilon):
 
     # Perturbed state towards adversarial direction
     perturbed_state = states[agent_id] + eta_i
-    p_net_output, _ = policy_model.compute({"states": agent._state_preprocessor[agent_id](perturbed_state)}, role="policy")
-    dist = Categorical(logits=p_net_output) if policy_model._c_unnormalized_log_prob else Categorical(probs=p_net_output)
-    perturbed_loss = dist.log_prob(actions[agent_id])
+    perturbed_loss = compute_log_prob(agent, agent_id, perturbed_state, actions[agent_id])
     
     # Compute L
     L = perturbed_loss - J_tilde
@@ -113,7 +124,7 @@ def get_episode_data(env, agent: IPPO | MAPPO, do_attack: bool, attacked_agent_i
     episode_reward = {agent_id: 0.0 for agent_id in env.agents}
     so_inrd_vals = dict()
     episode_data = dict()
-    perturb_eps = 0.001
+    perturb_eps = 0.1
 
     iter_count = 0
     frames = []  # List to collect frames
@@ -146,20 +157,20 @@ def get_episode_data(env, agent: IPPO | MAPPO, do_attack: bool, attacked_agent_i
             episode_data[agent_id]['so_inrd_l'].append(sum(so_inrd_vals[agent_id]))
         
         for agent_id in env.agents:
-            episode_reward[agent_id] += reward[agent_id]
+            episode_reward[agent_id] += reward[agent_id].item()
         
         state = next_state
         iter_count += 1
 
     print("Episode finished. Rewards:", episode_reward)
     imageio.mimwrite(
-        os.path.join(logdir, f"episode_vid_attack_{do_attack}.gif"), frames, duration=10
+        os.path.join(logdir, f"episode_vid_attack_{do_attack}.gif"), frames, duration=125
     )
     return episode_data
 
 
 def main(args):
-    set_seed(42, deterministic=True)
+    set_seed(42)
     # Dynamically import the environment from pettingzoo.mpe
     try:
         env_func = getattr(mpe, args.env_id)
@@ -222,7 +233,8 @@ def main(args):
         models[agent_name]["policy"] = PolicyCategorical(
             observation_space=env.observation_space(agent_name), 
             action_space=env.action_space(agent_name), 
-            device=env.device)
+            device=env.device,
+            eval_mode=True)  # Set eval_mode to True to get deterministic actions
         
         value_obs_space = env.observation_space(agent_name)
         if args.algo_name == 'MAPPO':
