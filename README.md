@@ -31,6 +31,13 @@ Delete lines regarding env.seed to avoid errors.
 
 You may need to run the training inside job. Head node might give errors.
 
+# SKRL
+```sh
+git clone https://github.com/Toni-SM/skrl.git
+cd skrl
+pip install -e .["all"]
+```
+
 # AgileRL
 ```sh
 git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL

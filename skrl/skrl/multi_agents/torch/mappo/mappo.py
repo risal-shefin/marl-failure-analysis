@@ -81,6 +81,7 @@ class MAPPO(MultiAgent):
         action_spaces: Optional[Union[Mapping[str, int], Mapping[str, gymnasium.Space]]] = None,
         device: Optional[Union[str, torch.device]] = None,
         cfg: Optional[dict] = None,
+        test_env = None,
         shared_observation_spaces: Optional[Union[Mapping[str, int], Mapping[str, gymnasium.Space]]] = None,
     ) -> None:
         """Multi-Agent Proximal Policy Optimization (MAPPO)
@@ -116,6 +117,7 @@ class MAPPO(MultiAgent):
             action_spaces=action_spaces,
             device=device,
             cfg=_cfg,
+            test_env=test_env,
         )
 
         self.shared_observation_spaces = shared_observation_spaces

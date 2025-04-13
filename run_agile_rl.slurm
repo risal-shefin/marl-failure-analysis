@@ -20,7 +20,7 @@ module load nvidia/cuda11/cudnn/8.7.0.84
 cd /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/AgileRL
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/.mujoco/mujoco210/bin:/usr/lib/nvidia
 
-python train.py --env_id simple_speaker_listener_v4 --train_steps 20000000 --algo_name MADDPG
+python train.py --env_id simple_spread_v3 --train_steps 20000000 --algo_name MADDPG
 # python train_with_evolution.py --env_id simple_speaker_listener_v4 --train_steps 10000000 --algo_name MADDPG
 # python test.py --env_id simple_speaker_listener_v4 --algo_name MADDPG --model_dir /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/AgileRL/logs/simple_speaker_listener_v4_MADDPG/20250320_020022/checkpoint.pt
 

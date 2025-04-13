@@ -7,7 +7,7 @@
 #SBATCH --account=alqahtaniGrp
 #SBATCH --partition=gpu
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=128gb					#Change depending on how much Memory you need
+#SBATCH --mem=16gb					#Change depending on how much Memory you need
 #SBATCH --gres=gpu:1
 #SBATCH --time=20-00:00:00				#4 days - change if you need more time
 
@@ -17,10 +17,11 @@ conda activate adversary_loss
 module load nvidia/cuda11/cuda/11.8.0
 module load nvidia/cuda11/cudnn/8.7.0.84
 
-cd /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/stable-baselines3
+cd /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/BenchMARL
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/.mujoco/mujoco210/bin:/usr/lib/nvidia
 
-# python -m experiments.train_ddqn --env_id ALE/Boxing-v5 --buffer_size 1000000 --train_timesteps 10000000
-python -m experiments.train_ddqn --env_id BoxingDeterministic-v4 --buffer_size 1000000 --train_timesteps 10000000
+python benchmarl/run.py algorithm=maddpg task=pettingzoo/simple_adversary \
+        experiment.checkpoint_at_end=True experiment.checkpoint_interval=18000 experiment.keep_checkpoints_num=10 \
+        experiment.sampling_device=cuda experiment.train_device=cuda experiment.buffer_device=cuda
 
 exit 0

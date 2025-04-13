@@ -26,6 +26,7 @@ class MultiAgent:
         action_spaces: Optional[Mapping[str, Union[int, Sequence[int], gymnasium.Space]]] = None,
         device: Optional[Union[str, torch.device]] = None,
         cfg: Optional[dict] = None,
+        test_env = None,
     ) -> None:
         """Base class that represent a RL multi-agent
 
@@ -87,6 +88,7 @@ class MultiAgent:
         if not experiment_name:
             experiment_name = f"{datetime.datetime.now().strftime('%y-%m-%d_%H-%M-%S-%f')}_{self.__class__.__name__}"
         self.experiment_dir = os.path.join(directory, experiment_name)
+        self.test_env = test_env
 
     def __str__(self) -> str:
         """Generate a representation of the agent as string
@@ -491,7 +493,10 @@ class MultiAgent:
         # update best models and write checkpoints
         if timestep > 1 and self.checkpoint_interval > 0 and not timestep % self.checkpoint_interval:
             # update best models
-            reward = np.mean(self.tracking_data.get("Reward / Total reward (mean)", -(2**31)))
+            if self.test_env:
+                reward = self.evaluate()
+            else:
+                reward = np.mean(self.tracking_data.get("Reward / Total reward (mean)", -(2**31)))
             print(f"Timsetep: {timestep}, Reward: {reward}", flush=True)
             if reward > self.checkpoint_best_modules["reward"]:
                 self.checkpoint_best_modules["timestep"] = timestep
@@ -525,3 +530,23 @@ class MultiAgent:
         :raises NotImplementedError: The method is not implemented by the inheriting classes
         """
         raise NotImplementedError
+    
+    def evaluate(self, num_episodes: int = 5):
+        total_reward = 0
+        for episode in range(num_episodes):
+            # Reset the environment
+            obs, info = self.test_env.reset()
+            done = False
+            episode_reward = {}
+            while not done:
+                # Get actions from the policy
+                actions, _, _ = self.act(obs, 0, 0)
+                # Step the environment
+                obs, rewards, terminated, truncated, info = self.test_env.step(actions)
+                done = terminated or truncated
+                for k in rewards.keys():
+                    episode_reward[k] = episode_reward.get(k, 0) + rewards[k].item()
+            total_reward += sum(episode_reward.values())
+        avg_total_reward = total_reward / num_episodes
+        print(f"\nEvaluation: Average total episode reward over {num_episodes} episodes: {avg_total_reward}", flush=True)
+        return avg_total_reward

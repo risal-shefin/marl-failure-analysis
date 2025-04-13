@@ -4,6 +4,8 @@ import collections
 
 import torch
 
+import gymnasium
+
 from skrl.envs.wrappers.torch.base import MultiAgentEnvWrapper
 from skrl.utils.spaces.torch import (
     flatten_tensorized_space,
@@ -20,7 +22,9 @@ class PettingZooWrapper(MultiAgentEnvWrapper):
         :param env: The environment to wrap
         :type env: Any supported PettingZoo (parallel) environment
         """
+        self.cur_obs = None
         super().__init__(env)
+        self.observation_space = self._env.observation_space
 
     def step(self, actions: Mapping[str, torch.Tensor]) -> Tuple[
         Mapping[str, torch.Tensor],
@@ -60,6 +64,7 @@ class PettingZooWrapper(MultiAgentEnvWrapper):
             uid: torch.tensor(value, device=self.device, dtype=torch.bool).view(self.num_envs, -1)
             for uid, value in truncated.items()
         }
+        self.cur_obs = observations
         return observations, rewards, terminated, truncated, infos
 
     def state(self) -> torch.Tensor:
@@ -68,9 +73,25 @@ class PettingZooWrapper(MultiAgentEnvWrapper):
         :return: State
         :rtype: torch.Tensor
         """
-        return flatten_tensorized_space(
-            tensorize_space(next(iter(self.state_spaces.values())), self._env.state(), device=self.device)
-        )
+        if hasattr(self, "state_spaces"):
+            return flatten_tensorized_space(
+                tensorize_space(next(iter(self.state_spaces.values())), self._env.state(), device=self.device)
+            )
+        
+        if self.cur_obs is None:
+            raise RuntimeError("Environment has not been reset yet. Cannot get state.")
+        
+        obs_list = []
+    
+        for agent in self._env.possible_agents:
+            obs = self.cur_obs[agent]
+            # Convert each observation to a tensor (assumes observation is np.ndarray)
+            obs_tensor = tensorize_space(self.observation_space(agent), obs, device=self.device)
+            obs_list.append(obs_tensor)
+        
+        # Concatenate along the feature dimension
+        full_state = torch.cat(obs_list, dim=0)
+        return flatten_tensorized_space(full_state)
 
     def reset(self, seed=None) -> Tuple[Mapping[str, torch.Tensor], Mapping[str, Any]]:
         """Reset the environment
@@ -90,6 +111,7 @@ class PettingZooWrapper(MultiAgentEnvWrapper):
             uid: flatten_tensorized_space(tensorize_space(self.observation_spaces[uid], value, device=self.device))
             for uid, value in observations.items()
         }
+        self.cur_obs = observations
         return observations, infos
 
     def render(self, *args, **kwargs) -> Any:
@@ -99,3 +121,8 @@ class PettingZooWrapper(MultiAgentEnvWrapper):
     def close(self) -> None:
         """Close the environment"""
         self._env.close()
+
+    @property
+    def observation_spaces(self) -> Mapping[str, gymnasium.Space]:
+        """Observation spaces"""
+        return {agent: self.observation_space(agent) for agent in self._env.possible_agents}

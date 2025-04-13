@@ -333,3 +333,6 @@ sheeprl/examples/models
 sheeprl/session_*
 sheeprl/bin/
 # SheepRL gitignore ends
+
+
+AgileRL/logs

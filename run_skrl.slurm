@@ -7,7 +7,7 @@
 #SBATCH --account=alqahtaniGrp
 #SBATCH --partition=gpu
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=16gb					#Change depending on how much Memory you need
+#SBATCH --mem=20gb					#Change depending on how much Memory you need
 #SBATCH --gres=gpu:1
 #SBATCH --time=10-00:00:00				#4 days - change if you need more time
 
@@ -21,6 +21,11 @@ cd /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/skrl
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/.mujoco/mujoco210/bin:/usr/lib/nvidia
 
 # python train.py --env_id simple_spread_v3 --algo_name IPPO --train_steps 10000000
-python train.py --env_id simple_spread_v3 --algo_name MAPPO --train_steps 10000000
+# python train.py --env_id simple_spread_v3 --algo_name MAPPO --train_steps 10000000
+# python train.py --env_id simple_adversary_v3 --algo_name IPPO --train_steps 10000000
+python train_atari.py --env_id space_invaders_v2 --algo_name IPPO --train_steps 10000000
+
+# python test.py --env_id simple_spread_v3 --algo_name IPPO --model_dir /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/skrl/runs/25-03-27_22-54-26-605109_IPPO/checkpoints/best_agent.pt
+# python test.py --env_id simple_spread_v3 --algo_name MAPPO --model_dir /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/skrl/runs/25-03-28_01-50-57-258165_MAPPO/checkpoints/best_agent.pt
 
 exit 0

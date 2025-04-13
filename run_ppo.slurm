@@ -20,7 +20,7 @@ module load nvidia/cuda11/cudnn/8.7.0.84
 cd /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/sheeprl
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/.mujoco/mujoco210/bin:/usr/lib/nvidia
 
-# python sheeprl.py exp=ppo env=atari env.id=RiverraidNoFrameskip-v4 algo.cnn_keys.encoder=[rgb] checkpoint.every=10000 checkpoint.keep_last=null fabric.accelerator=gpu fabric.strategy=ddp fabric.devices=1 algo.mlp_keys.encoder=[] algo.total_steps=10000000
+# python sheeprl.py exp=ppo env=atari env.id=RiverraidNoFrameskip-v4 algo.cnn_keys.encoder=[rgb] checkpoint.every=100000 checkpoint.keep_last=null fabric.accelerator=gpu fabric.strategy=ddp fabric.devices=1 algo.mlp_keys.encoder=[] algo.total_steps=10000000
 python sheeprl.py exp=ppo env=atari env.id=BoxingNoFrameskip-v4 algo.cnn_keys.encoder=[rgb] checkpoint.every=100000 checkpoint.keep_last=null fabric.accelerator=gpu fabric.strategy=ddp fabric.devices=1 algo.mlp_keys.encoder=[] algo.total_steps=10000000
 
 exit 0

@@ -7,20 +7,19 @@
 #SBATCH --account=alqahtaniGrp
 #SBATCH --partition=gpu
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=128gb					#Change depending on how much Memory you need
+#SBATCH --mem=64gb					#Change depending on how much Memory you need
 #SBATCH --gres=gpu:1
-#SBATCH --time=20-00:00:00				#4 days - change if you need more time
+#SBATCH --time=10-00:00:00				#4 days - change if you need more time
 
 module load apps/anaconda3/2024.02
-conda activate adversary_loss
+conda activate adversary_loss_marl
 
 module load nvidia/cuda11/cuda/11.8.0
 module load nvidia/cuda11/cudnn/8.7.0.84
 
-cd /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/stable-baselines3
+cd /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MADDPG_NEW_CODE
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/.mujoco/mujoco210/bin:/usr/lib/nvidia
 
-# python -m experiments.train_ddqn --env_id ALE/Boxing-v5 --buffer_size 1000000 --train_timesteps 10000000
-python -m experiments.train_ddqn --env_id BoxingDeterministic-v4 --buffer_size 1000000 --train_timesteps 10000000
+python main.py --env_id simple_speaker_listener_v4
 
 exit 0

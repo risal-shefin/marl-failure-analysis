@@ -78,6 +78,13 @@ def perturb_random_noise(states, perturb_agent_id, noise_std=0.1):
     perturbed_states[perturb_agent_id] = states[perturb_agent_id] + noise_std * torch.randn_like(states[perturb_agent_id])
     return perturbed_states
 
+def select_worst_action(agent: IPPO | MAPPO, agent_id, state):
+    policy_model = agent.models[agent_id]["policy"]
+    net_output, _ = policy_model.compute({"states": agent._state_preprocessor[agent_id](state)}, role="policy")
+    probs = torch.softmax(net_output, dim=-1) if policy_model._c_unnormalized_log_prob else net_output
+    min_prob_action = torch.argmin(probs, dim=-1)
+    return min_prob_action
+
 def compute_log_prob(agent: IPPO | MAPPO, agent_id, state, action):
     policy_model = agent.models[agent_id]["policy"]
     net_output, _ = policy_model.compute({"states": agent._state_preprocessor[agent_id](state)}, role="policy")
@@ -141,6 +148,7 @@ def get_episode_data(env, agent: IPPO | MAPPO, do_attack: bool, attacked_agent_i
         actions, log_prob, _ = agent.act(state, 0, 0)
         if do_attack and iter_count > 5 and np.random.rand() < 0.5:
             actions[attacked_agent_id] = torch.tensor([[env.action_space(attacked_agent_id).sample()]])
+            # actions[attacked_agent_id] = select_worst_action(agent, attacked_agent_id, state[attacked_agent_id])
 
         # Save the frame for this step and append to frames list
         frame = env.render()
@@ -221,6 +229,7 @@ def main(args):
         "entropy_loss_scale": 0.01,      # Added entropy loss scaling for better exploration
         "experiment": {
             "checkpoint_interval": 500,
+            "experiment_name": f"{datetime.now().strftime('%y-%m-%d_%H-%M-%S-%f')}_{args.env_id}_{args.algo_name}",
         }
     })
 
@@ -260,7 +269,7 @@ def main(args):
     agent.load(args.model_dir) # Load the model from the specified directory
 
     episode_data_unattacked = get_episode_data(env, agent, False, None, log_dir)
-    attacked_agent_id = "agent_0"
+    attacked_agent_id = "agent_4"
     episode_data_attacked = get_episode_data(env, agent, True, attacked_agent_id, log_dir)
 
     env.close()

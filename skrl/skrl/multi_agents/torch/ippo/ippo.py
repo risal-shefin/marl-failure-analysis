@@ -79,6 +79,7 @@ class IPPO(MultiAgent):
         action_spaces: Optional[Union[Mapping[str, int], Mapping[str, gymnasium.Space]]] = None,
         device: Optional[Union[str, torch.device]] = None,
         cfg: Optional[dict] = None,
+        test_env = None,
     ) -> None:
         """Independent Proximal Policy Optimization (IPPO)
 
@@ -111,6 +112,7 @@ class IPPO(MultiAgent):
             action_spaces=action_spaces,
             device=device,
             cfg=_cfg,
+            test_env=test_env,
         )
 
         # models

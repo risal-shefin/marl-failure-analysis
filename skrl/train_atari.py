@@ -4,7 +4,9 @@ from skrl.trainers.torch import SequentialTrainer
 from skrl.memories.torch import RandomMemory
 from skrl.envs.wrappers.torch import wrap_env
 from skrl.models.torch import Model, CategoricalMixin, DeterministicMixin
-import pettingzoo.mpe as mpe
+from gymnasium.spaces import Box
+import supersuit
+import pettingzoo.atari as atari
 import torch
 import torch.nn as nn
 import argparse
@@ -21,16 +23,28 @@ class PolicyCategorical(CategoricalMixin, Model):
         CategoricalMixin.__init__(self, unnormalized_log_prob)
         self.eval_mode = eval_mode
 
-        self.net = nn.Sequential(
-            nn.Linear(self.num_observations, 64),
-            nn.ReLU(),
-            nn.Linear(64, 64),
-            nn.ReLU(),
-            nn.Linear(64, self.num_actions)
-        )
+        in_channels = self.observation_space.shape[-1]
+
+        self.net = nn.Sequential(nn.Conv2d(in_channels, 32, kernel_size=8, stride=4),
+                                 nn.ReLU(),
+                                 nn.Conv2d(32, 64, kernel_size=4, stride=2),
+                                 nn.ReLU(),
+                                 nn.Conv2d(64, 64, kernel_size=3, stride=1),
+                                 nn.ReLU(),
+                                 nn.Flatten(),
+                                 nn.Linear(3136, 512),
+                                 nn.ReLU(),
+                                 nn.Linear(512, 16),
+                                 nn.Tanh(),
+                                 nn.Linear(16, 64),
+                                 nn.Tanh(),
+                                 nn.Linear(64, 32),
+                                 nn.Tanh(),
+                                 nn.Linear(32, self.num_actions))
 
     def compute(self, inputs, role):
-        return self.net(inputs["states"]), {}
+        # permute (samples, width * height * channels) -> (samples, channels, width, height)
+        return self.net(inputs["states"].view(-1, *self.observation_space.shape).permute(0, 3, 1, 2)), {}
 
 
 class ValueDeterministic(DeterministicMixin, Model):
@@ -38,28 +52,60 @@ class ValueDeterministic(DeterministicMixin, Model):
         Model.__init__(self, observation_space, action_space, device)
         DeterministicMixin.__init__(self, clip_actions)
 
-        self.net = nn.Sequential(
-            nn.Linear(self.num_observations, 64),
-            nn.ReLU(),
-            nn.Linear(64, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1)
-        )
+        in_channels = self.observation_space.shape[-1]
+
+        self.features_extractor = nn.Sequential(nn.Conv2d(in_channels, 32, kernel_size=8, stride=4),
+                                                nn.ReLU(),
+                                                nn.Conv2d(32, 64, kernel_size=4, stride=2),
+                                                nn.ReLU(),
+                                                nn.Conv2d(64, 64, kernel_size=3, stride=1),
+                                                nn.ReLU(),
+                                                nn.Flatten(),
+                                                nn.Linear(3136, 512),
+                                                nn.ReLU(),
+                                                nn.Linear(512, 16),
+                                                nn.Tanh())
+
+        self.net = nn.Sequential(nn.Linear(16, 64),
+                                 nn.Tanh(),
+                                 nn.Linear(64, 32),
+                                 nn.Tanh(),
+                                 nn.Linear(32, 1))
 
     def compute(self, inputs, role):
-        return self.net(inputs["states"]), {}
+        # permute (samples, width * height * channels) -> (samples, channels, width, height)
+        x = self.features_extractor(inputs["states"].view(-1, *self.observation_space.shape).permute(0, 3, 1, 2))
+        return self.net(x), {}
+
+
+def preprocess_env(env):
+    # as per openai baseline's MaxAndSKip wrapper, maxes over the last 2 frames
+    # to deal with frame flickering
+    env = supersuit.max_observation_v0(env, 2)
+
+    # skip frames for faster processing and less control
+    # to be compatible with gym, use frame_skip(env, (2,5))
+    env = supersuit.frame_skip_v0(env, 4)
+
+    # downscale observation for faster processing
+    env = supersuit.resize_v1(env, 84, 84)
+
+    # allow agent to see everything on the screen despite Atari's flickering screen problem
+    env = supersuit.frame_stack_v1(env, 4)
+    return env
 
 
 def main(args):
     # Dynamically import the environment from pettingzoo.mpe
     try:
-        env_func = getattr(mpe, args.env_id)
+        env_func = getattr(atari, args.env_id)
     except AttributeError:
         raise ValueError(f"Environment {args.env_id} not found in pettingzoo.mpe")
-    env = env_func.parallel_env(continuous_actions=False)
+    env = env_func.parallel_env()
+    env = preprocess_env(env)
 
     # wrap the environment
-    env = wrap_env(env)  # or 'env = wrap_env(env, wrapper="pettingzoo")'
+    env = wrap_env(env, wrapper="pettingzoo")  # or 'env = wrap_env(env, wrapper="pettingzoo")'
 
     # Agent configs
     cfg_agent = {}
@@ -75,8 +121,8 @@ def main(args):
         shared_observation_spaces_low = []
         shared_observation_spaces_high = []
         for agent_name in env.possible_agents:
-            shared_observation_spaces_low.append(env.observation_spaces[agent_name].low)
-            shared_observation_spaces_high.append(env.observation_spaces[agent_name].high)
+            shared_observation_spaces_low.append(env.observation_spaces(agent_name).low)
+            shared_observation_spaces_high.append(env.observation_spaces(agent_name).high)
         shared_observation_space = gymnasium.spaces.Box(
             low=np.concatenate(shared_observation_spaces_low),
             high=np.concatenate(shared_observation_spaces_high),
@@ -97,7 +143,7 @@ def main(args):
         "entropy_loss_scale": 0.01,      # Added entropy loss scaling for better exploration
         "experiment": {
             "checkpoint_interval": 500,
-            "experiment_name": f"{datetime.datetime.now().strftime('%y-%m-%d_%H-%M-%S-%f')}_{args.env_id}_N6_{args.algo_name}",
+            "experiment_name": f"{datetime.datetime.now().strftime('%y-%m-%d_%H-%M-%S-%f')}_{args.env_id}_{args.algo_name}",
         }
     })
 
