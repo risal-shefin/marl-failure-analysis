@@ -336,3 +336,13 @@ sheeprl/bin/
 
 
 AgileRL/logs
+
+
+# MADDPG_NEW_CODE gitignore
+.mypy_cache/
+**/models/
+**/results/
+**/slurm_files/
+**/baselines/
+**/assets/
+**/MADDPG_Simple_Ref_V3_results/
