@@ -17,9 +17,9 @@ conda activate adversary_loss_marl
 module load nvidia/cuda11/cuda/11.8.0
 module load nvidia/cuda11/cudnn/8.7.0.84
 
-cd /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MADDPG_NEW_CODE
+cd /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/maddpg-pytorch
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/.mujoco/mujoco210/bin:/usr/lib/nvidia
 
-python main.py --env_id simple_speaker_listener_v4
+python train_pettingzoo.py simple_speaker_listener_v4 maddpg_continuous
 
 exit 0
