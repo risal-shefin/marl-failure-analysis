@@ -274,7 +274,8 @@ class MADDPG(object):
         """
         Instantiate instance of this class from file created by 'save' method
         """
-        save_dict = torch.load(filename)
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        save_dict = torch.load(filename, map_location=device)
         instance = cls(**save_dict['init_dict'])
         instance.init_dict = save_dict['init_dict']
         for a, params in zip(instance.agents, save_dict['agent_params']):

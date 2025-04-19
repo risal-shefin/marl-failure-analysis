@@ -71,6 +71,11 @@ cd stable-baselines3
 pip install -e .[extra]
 ```
 
+# MADDPG (maddpg-pytorch) Source
+```sh
+git clone https://github.com/shariqiqbal2810/maddpg-pytorch
+```
+
 ## Acknowledgements
 - AdvExRL (https://github.com/asifurrahman1/AdvEx-RL.git)
 - SheepRL (https://github.com/Eclectic-Sheep/sheeprl)
