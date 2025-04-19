@@ -4,6 +4,7 @@ import time
 import os
 import numpy as np
 from gym.spaces import Box, Discrete
+import gymnasium
 from pathlib import Path
 from torch.autograd import Variable
 from tensorboardX import SummaryWriter
@@ -15,8 +16,8 @@ import pettingzoo.mpe as mpe
 USE_CUDA = torch.cuda.is_available()
 DEVICE = 'gpu' if USE_CUDA else 'cpu'
 
-def eval(env_func, maddpg, n_episodes=10):
-    env = env_func.parallel_env(continuous_actions=True)
+def eval(env_func, is_discrete_action, maddpg, n_episodes):
+    env = env_func.parallel_env(continuous_actions=not is_discrete_action)
     env = PettingZooWrapper.wrap_env(env)
     total_reward = 0
 
@@ -31,7 +32,10 @@ def eval(env_func, maddpg, n_episodes=10):
             with torch.no_grad():
                 torch_agent_actions = maddpg.step(torch_obs, explore=False)
             agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
-            actions = {agent_name: agent_actions[i].argmax() for i, agent_name in enumerate(env.possible_agents)}
+            if is_discrete_action:
+                actions = {agent_name: agent_actions[i].argmax() for i, agent_name in enumerate(env.possible_agents)}
+            else:
+                actions = {agent_name: agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)}
             next_obs, rewards, dones, infos = env.step(actions)
             episode_reward += np.sum([rewards[:,i] if env.agent_types[i] != 'adversary' else 0 for i in range(len(rewards))])
             obs = next_obs
@@ -69,7 +73,7 @@ def run(config):
     #                         config.discrete_action)
     
     env_func = getattr(mpe, config.env_id)
-    env = env_func.parallel_env(continuous_actions=True)
+    env = env_func.parallel_env(continuous_actions= not config.discrete_action)
     env = PettingZooWrapper.wrap_env(env)
     env.reset()
 
@@ -80,7 +84,7 @@ def run(config):
                                   hidden_dim=config.hidden_dim)
     replay_buffer = ReplayBuffer(config.buffer_length, maddpg.nagents,
                                  [obsp.shape[0] for obsp in env.observation_space],
-                                 [acsp.shape[0] if isinstance(acsp, Box) else acsp.n
+                                 [acsp.shape[0] if isinstance(acsp, Box) or isinstance(acsp, gymnasium.spaces.Box) else acsp.n
                                   for acsp in env.action_space])
     t = 0
     best_eval_reward = -np.inf
@@ -107,7 +111,10 @@ def run(config):
             # actions = [[ac[i] for ac in agent_actions] for i in range(config.n_rollout_threads)]
             # take the argmax over the first (and only) batch dim for each agent
             # take the argmax for each agent individually
-            actions = {agent_name: agent_actions[i].argmax() for i, agent_name in enumerate(env.possible_agents)}
+            if config.discrete_action:
+                actions = {agent_name: agent_actions[i].argmax() for i, agent_name in enumerate(env.possible_agents)}
+            else:
+                actions = {agent_name: agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)}
             next_obs, rewards, dones, infos = env.step(actions)
             replay_buffer.push(obs, agent_actions, rewards, next_obs, dones)
             obs = next_obs
@@ -133,7 +140,7 @@ def run(config):
         print(f"Ep#{ep_i+1},rew:{np.mean(ep_rews):.3f}", flush=True)
 
         if ep_i % config.save_interval < config.n_rollout_threads:
-            eval_reward = eval(env_func, maddpg, n_episodes=5)
+            eval_reward = eval(env_func, config.discrete_action, maddpg, n_episodes=5)
             if eval_reward >= best_eval_reward:
                 maddpg.save(run_dir / f'model_{eval_reward}.pt')
                 best_eval_reward = eval_reward
@@ -177,10 +184,12 @@ if __name__ == '__main__':
                         default="MADDPG", type=str,
                         choices=['MADDPG', 'DDPG'])
     parser.add_argument("--discrete_action",
-                        action='store_true')
+                        default=False,
+                        help="Use discrete action space")
 
     config = parser.parse_args()
     print("\n-- Configs: --")
     for key, value in vars(config).items():
         print(f"{key}: {value}")
+    print("--------------")
     run(config)

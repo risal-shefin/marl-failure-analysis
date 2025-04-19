@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from gym.spaces import Box, Discrete
+import gymnasium
 from utils.networks import MLPNetwork
 from utils.misc import soft_update, average_gradients, onehot_from_logits, gumbel_softmax
 from utils.agents import DDPGAgent
@@ -241,7 +242,7 @@ class MADDPG(object):
         for acsp, obsp, algtype in zip(env.action_space, env.observation_space,
                                        alg_types):
             num_in_pol = obsp.shape[0]
-            if isinstance(acsp, Box):
+            if isinstance(acsp, Box) or isinstance(acsp, gymnasium.spaces.Box):
                 discrete_action = False
                 get_shape = lambda x: x.shape[0]
             else:  # Discrete

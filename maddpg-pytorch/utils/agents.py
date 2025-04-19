@@ -69,9 +69,10 @@ class DDPGAgent(object):
                 action = onehot_from_logits(action)
         else:  # continuous action
             if explore:
-                action += Variable(Tensor(self.exploration.noise()),
-                                   requires_grad=False)
-            action = action.clamp(-1, 1)
+                noise = Tensor(self.exploration.noise()).to(action.device)
+                action = action + noise
+            # action = action.clamp(-1, 1)
+            action = action.clamp(0, 1)
         return action
 
     def get_params(self):
