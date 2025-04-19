@@ -9,6 +9,7 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=64gb					#Change depending on how much Memory you need
 #SBATCH --gres=gpu:1
+#SBATCH --nodelist=gpu-a100-04
 #SBATCH --time=10-00:00:00				#4 days - change if you need more time
 
 module load apps/anaconda3/2024.02
