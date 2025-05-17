@@ -14,21 +14,28 @@ from utils.misc import gumbel_softmax
 import pettingzoo.mpe as mpe
 import matplotlib.pyplot as plt
 from PIL import Image
+from collections import deque
 
 
 USE_CUDA = torch.cuda.is_available()
 DEVICE = 'gpu' if USE_CUDA else 'cpu'
 torch_device = torch.device("cuda" if USE_CUDA else "cpu")
 
-def compute_cross_hessian(maddpg, obs):
-    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
+def compute_cross_hessian_vector_product(maddpg, obs):
+    # obs: list of numpy arrays of shape (batch_size, obs_dim)
+    torch_obs = [Variable(torch.Tensor(obs[i]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
+    # compute actions under gradient for proper gradient flow
     actions = []
-    for i in range(maddpg.nagents):
-        action = maddpg.agents[i].policy(torch_obs[i])
-        actions.append(action)
+    for i, agent_i in enumerate(maddpg.agents):
+        if maddpg.discrete_action:
+            pol_out = agent_i.policy(torch_obs[i])
+            ac = gumbel_softmax(pol_out, hard=True)
+        else:
+            ac = agent_i.policy(torch_obs[i])
+        actions.append(ac)
 
     vf_in = torch.cat((*torch_obs, *actions), dim=1)
-    hess_ij = []
+    hvp_ij = []
     for i, agent_i in enumerate(maddpg.agents):
         if maddpg.discrete_action:
             policy_loss = -maddpg.agents[i].critic(vf_in).mean() + (gumbel_softmax(actions[i], hard=True)**2).mean() * 1e-3
@@ -37,22 +44,18 @@ def compute_cross_hessian(maddpg, obs):
 
         # compute gradient of the policy_loss w.r.t. the agent_i's policy parameters
         grads_i = torch.autograd.grad(policy_loss, agent_i.critic.parameters(), retain_graph=True, create_graph=True, allow_unused=True)
-        grads_i = [g for g in grads_i if g is not None]
-        grads_sum = torch.stack([g.sum() for g in grads_i]).sum()  # sum all gradients into a single scalar
-        # grads_flat = torch.cat([g.view(-1) for g in grads_i], dim=0)
-        # grads_sum  = grads_flat.norm(p=2)
-        # grads_sum = grads_flat.sum()
+        grad_i_flat = torch.cat([g.view(-1) for g in grads_i if g is not None])
         
         for j, agent_j in enumerate(maddpg.agents):
-            # for each grad in grads_i compute its gradient wrt agent_j’s policy parameters
-            cross_hessian = torch.autograd.grad(grads_sum, agent_j.policy.parameters(), retain_graph=True,create_graph=False, allow_unused=True)
-            cross_hessian = [h for h in cross_hessian if h is not None]
-            cross_hessian_sum = torch.stack([h.sum() for h in cross_hessian]).sum()  # sum all gradients into a single scalar
-            # cgrads_flat = torch.cat([g.view(-1) for g in cross_hessian], dim=0)
-            # cross_hessian_sum  = cgrads_flat.norm(p=2)
-            hess_ij.append(cross_hessian_sum)
+            params_j = agent_j.policy.parameters()
+            v = torch.randn_like(grad_i_flat) # HVP's vector v
+            v = v / (v.norm() + 1e-8)   # normalize v to improve stability of influence measurements
+            # HVP: compute (H_ij) v
+            cross_hvp = torch.autograd.grad(grad_i_flat, params_j, grad_outputs=v, retain_graph=True, allow_unused=True)
+            cross_hvp_flat = torch.cat([h.view(-1) for h in cross_hvp if h is not None])
+            hvp_ij.append(cross_hvp_flat.norm(p=2))
 
-    return hess_ij
+    return hvp_ij
 
 
 def get_episode_data(env, maddpg, config, logdir):
@@ -60,11 +63,13 @@ def get_episode_data(env, maddpg, config, logdir):
     obs = env.reset(seed=12345) # better for speaker_listener_v3
     episode_reward = 0
     frames = []
-    cross_hessian_list = []
+    cross_hvp_list = []
+    # initialize deque buffers for last batch_size observations
+    obs_buffer = [deque(maxlen=config.batch_size) for _ in range(maddpg.nagents)]
 
     while True:
         # add Gaussian noise to each agent's observation
-        noise_scale = 0.1  # adjust the standard deviation of the noise as needed
+        noise_scale = 0.0  # adjust the standard deviation of the noise as needed
         obs[1] = obs[1] + np.random.randn(*obs[1].shape) * noise_scale
         torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
         torch_agent_actions = maddpg.step(torch_obs, explore=False)
@@ -77,21 +82,27 @@ def get_episode_data(env, maddpg, config, logdir):
         if config.save_gifs:
             frames.append(Image.fromarray(env.render()))
 
-        cross_hessian_list.append(compute_cross_hessian(maddpg, obs))
+        # append current obs to sliding window buffers
+        for i in range(maddpg.nagents):
+            obs_buffer[i].append(obs[i])
+        # once we have batch_size observations, compute cross-HVP on last batch
+        if len(obs_buffer[0]) == config.batch_size:
+            batch_obs = [np.stack(obs_buffer[i], axis=0) for i in range(maddpg.nagents)]
+            cross_hvp_list.append(compute_cross_hessian_vector_product(maddpg, batch_obs))
 
         next_obs, rewards, dones, infos = env.step(actions)
         episode_reward += np.sum([rewards[:,i] if env.agent_types[i] != 'adversary' else 0 for i in range(len(rewards))])
 
         obs = next_obs
         if dones.all():
-            break
+                        break
 
     print(f"Episode reward: {episode_reward}")
     if config.save_gifs:
         imageio.mimsave(os.path.join(logdir, f'{config.env_id}_episode.gif'), frames, duration=125)
         print(f"Saved gif of episode to {logdir}")
 
-    return cross_hessian_list
+    return cross_hvp_list
 
 
 def plot_cross_hessian(cross_hessian_list, logdir):
@@ -150,6 +161,8 @@ if __name__ == '__main__':
                         help="Saves gif of each episode into model directory")
     parser.add_argument("--discrete_action", action="store_true",
                         help="Whether the action space is discrete or continuous")
+    parser.add_argument("--batch_size", type=int, default=5,
+                        help="Batch size for HVP computation")
 
     config = parser.parse_args()
 
