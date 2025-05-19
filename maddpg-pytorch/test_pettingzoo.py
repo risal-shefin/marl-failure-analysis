@@ -21,7 +21,7 @@ USE_CUDA = torch.cuda.is_available()
 DEVICE = 'gpu' if USE_CUDA else 'cpu'
 torch_device = torch.device("cuda" if USE_CUDA else "cpu")
 
-def compute_cross_hessian_vector_product(maddpg, obs):
+def get_policy_losses(maddpg, obs):
     # obs: list of numpy arrays of shape (batch_size, obs_dim)
     torch_obs = [Variable(torch.Tensor(obs[i]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
     # compute actions under gradient for proper gradient flow
@@ -35,27 +35,58 @@ def compute_cross_hessian_vector_product(maddpg, obs):
         actions.append(ac)
 
     vf_in = torch.cat((*torch_obs, *actions), dim=1)
-    hvp_ij = []
+    policy_losses = []
     for i, agent_i in enumerate(maddpg.agents):
-        if maddpg.discrete_action:
-            policy_loss = -maddpg.agents[i].critic(vf_in).mean() + (gumbel_softmax(actions[i], hard=True)**2).mean() * 1e-3
-        else:
-            policy_loss = -maddpg.agents[i].critic(vf_in).mean() + (actions[i]**2).mean() * 1e-3
+        policy_loss = -maddpg.agents[i].critic(vf_in).mean() + (actions[i]**2).mean() * 1e-3
+        policy_losses.append(policy_loss)
+        
+    return policy_losses
 
-        # compute gradient of the policy_loss w.r.t. the agent_i's policy parameters
+
+def compute_cross_hessian_vector_product(maddpg, policy_losses):
+    hvp_matrix = []
+    epsilon = 0.1
+    for i, agent_i in enumerate(maddpg.agents):
+        policy_loss = policy_losses[i]
+
+        # compute gradient of the policy_loss w.r.t. the agent_i's critic parameters
         grads_i = torch.autograd.grad(policy_loss, agent_i.critic.parameters(), retain_graph=True, create_graph=True, allow_unused=True)
         grad_i_flat = torch.cat([g.view(-1) for g in grads_i if g is not None])
         
         for j, agent_j in enumerate(maddpg.agents):
             params_j = agent_j.policy.parameters()
+
             v = torch.randn_like(grad_i_flat) # HVP's vector v
             v = v / (v.norm() + 1e-8)   # normalize v to improve stability of influence measurements
+
             # HVP: compute (H_ij) v
             cross_hvp = torch.autograd.grad(grad_i_flat, params_j, grad_outputs=v, retain_graph=True, allow_unused=True)
             cross_hvp_flat = torch.cat([h.view(-1) for h in cross_hvp if h is not None])
-            hvp_ij.append(cross_hvp_flat.norm(p=2))
+            # hvp_matrix.append(cross_hvp_flat.norm(p=2))
+            hvp_matrix.append(cross_hvp_flat)
 
-    return hvp_ij
+    return hvp_matrix
+
+
+def delta_loss_error(maddpg, policy_losses, cross_hvp):
+    errors = []
+    epsilon = 0.1
+    for i, agent_i in enumerate(maddpg.agents):
+        loss = policy_losses[i]
+        for j, agent_j in enumerate(maddpg.agents):
+            params_j = agent_j.policy.parameters()
+            grads_j = torch.autograd.grad(loss, params_j, retain_graph=True, create_graph=True, allow_unused=True)
+            grad_j_flat = torch.cat([g.view(-1) for g in grads_j if g is not None])
+
+            # Compute η_j (adversarial perturbation direction)
+            eta_j = epsilon * grad_j_flat.sign() / torch.max(grad_j_flat.norm(p=2), torch.tensor(1e-6))
+
+            # Compute delta loss
+            hvp_ij = cross_hvp[i * len(maddpg.agents) + j]
+            delta_loss = torch.dot(grad_j_flat.flatten(), eta_j.flatten()) + 0.5 * torch.dot(eta_j.flatten(), hvp_ij.flatten())
+            errors.append(delta_loss.item())
+
+    return errors
 
 
 def get_episode_data(env, maddpg, config, logdir):
@@ -64,13 +95,16 @@ def get_episode_data(env, maddpg, config, logdir):
     episode_reward = 0
     frames = []
     cross_hvp_list = []
+    delta_loss_list = []
     # initialize deque buffers for last batch_size observations
     obs_buffer = [deque(maxlen=config.batch_size) for _ in range(maddpg.nagents)]
 
     while True:
-        # add Gaussian noise to each agent's observation
-        noise_scale = 0.0  # adjust the standard deviation of the noise as needed
-        obs[1] = obs[1] + np.random.randn(*obs[1].shape) * noise_scale
+        # add Gaussian noise to an agent's observation
+        noise_scale = 0.1  # adjust the standard deviation of the noise as needed
+        attacked_agent = 1
+        obs[attacked_agent] = obs[attacked_agent] + np.random.randn(*obs[attacked_agent].shape) * noise_scale
+        
         torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
         torch_agent_actions = maddpg.step(torch_obs, explore=False)
         agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
@@ -88,21 +122,25 @@ def get_episode_data(env, maddpg, config, logdir):
         # once we have batch_size observations, compute cross-HVP on last batch
         if len(obs_buffer[0]) == config.batch_size:
             batch_obs = [np.stack(obs_buffer[i], axis=0) for i in range(maddpg.nagents)]
-            cross_hvp_list.append(compute_cross_hessian_vector_product(maddpg, batch_obs))
+            policy_losses = get_policy_losses(maddpg, batch_obs)
+            cross_hvp = compute_cross_hessian_vector_product(maddpg, policy_losses)
+            cross_hvp_list.append(cross_hvp)
+            delta_loss_list.append(delta_loss_error(maddpg, policy_losses, cross_hvp))
 
         next_obs, rewards, dones, infos = env.step(actions)
         episode_reward += np.sum([rewards[:,i] if env.agent_types[i] != 'adversary' else 0 for i in range(len(rewards))])
 
         obs = next_obs
         if dones.all():
-                        break
+            break
 
     print(f"Episode reward: {episode_reward}")
     if config.save_gifs:
         imageio.mimsave(os.path.join(logdir, f'{config.env_id}_episode.gif'), frames, duration=125)
         print(f"Saved gif of episode to {logdir}")
 
-    return cross_hvp_list
+    # return cross_hvp_list
+    return delta_loss_list
 
 
 def plot_cross_hessian(cross_hessian_list, logdir):
@@ -146,7 +184,8 @@ def run(config):
     env = PettingZooWrapper.wrap_env(env)
     env.reset()
 
-    maddpg.prep_rollouts(device=DEVICE)
+    # maddpg.prep_rollouts(device=DEVICE)
+    maddpg.prep_training(device=DEVICE)
 
     cross_hessian_list = get_episode_data(env, maddpg, config, logdir)
     plot_cross_hessian(cross_hessian_list, logdir)
