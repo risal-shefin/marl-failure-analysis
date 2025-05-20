@@ -81,14 +81,14 @@ def get_episode_data(env, maddpg, config, logdir):
         # obs[attacked_agent] = obs[attacked_agent] + np.random.randn(*obs[attacked_agent].shape) * noise_scale
 
         # FGSM attack
-        torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
-        torch_agent_actions = maddpg.step(torch_obs, explore=False)
-        agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
-        if config.discrete_action:
-            actions = {agent_name: agent_actions[i].argmax() for i, agent_name in enumerate(env.possible_agents)}
-        else:
-            actions = {agent_name: agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)}
-        obs[attacked_agent_id] = fgsm_attack(maddpg, obs, list(actions.values()), attacked_agent_id, 0.1)
+        # torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
+        # torch_agent_actions = maddpg.step(torch_obs, explore=False)
+        # agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
+        # if config.discrete_action:
+        #     actions = {agent_name: agent_actions[i].argmax() for i, agent_name in enumerate(env.possible_agents)}
+        # else:
+        #     actions = {agent_name: agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)}
+        # obs[attacked_agent_id] = fgsm_attack(maddpg, obs, list(actions.values()), attacked_agent_id, 0.1)
         
         torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
         torch_agent_actions = maddpg.step(torch_obs, explore=False)
@@ -97,6 +97,9 @@ def get_episode_data(env, maddpg, config, logdir):
             actions = {agent_name: agent_actions[i].argmax() for i, agent_name in enumerate(env.possible_agents)}
         else:
             actions = {agent_name: agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)}
+
+        # random attack
+        actions[env.possible_agents[attacked_agent_id]] = env.action_spaces[env.possible_agents[attacked_agent_id]].sample()
 
         if config.save_gifs:
             frames.append(Image.fromarray(env.render()))
