@@ -12,12 +12,19 @@ from utils.buffer import ReplayBuffer
 from utils.pettingzoo_wrapper import PettingZooWrapper
 from algorithms.maddpg import MADDPG
 import pettingzoo.mpe as mpe
+import pettingzoo.sisl as sisl
 
 USE_CUDA = torch.cuda.is_available()
 DEVICE = 'gpu' if USE_CUDA else 'cpu'
 
 def eval(env_func, is_discrete_action, maddpg, n_episodes):
-    env = env_func.parallel_env(continuous_actions=not is_discrete_action)
+    # Check if env_func exists in mpe
+    if 'mpe' in env_func.__name__:
+        env = env_func.parallel_env(continuous_actions=not is_discrete_action)
+    elif 'waterworld' in env_func.__name__:
+        env = env_func.parallel_env(n_pursuers=5)   # it's a sisl env
+    else:
+        env = env_func.parallel_env()
     env = PettingZooWrapper.wrap_env(env)
     total_reward = 0
 
@@ -37,7 +44,7 @@ def eval(env_func, is_discrete_action, maddpg, n_episodes):
             else:
                 actions = {agent_name: agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)}
             next_obs, rewards, dones, infos = env.step(actions)
-            episode_reward += np.sum([rewards[:,i] if env.agent_types[i] != 'adversary' else 0 for i in range(len(rewards))])
+            episode_reward += np.sum([rewards[:,i] if env.agent_types[i] != 'adversary' else np.zeros_like(rewards[:,i]) for i in range(maddpg.nagents)])  # sum rewards for all agents except adversaries
             obs = next_obs
             if dones.all():
                 break
@@ -72,8 +79,12 @@ def run(config):
     # env = make_parallel_env(config.env_id, config.n_rollout_threads, config.seed,
     #                         config.discrete_action)
     
-    env_func = getattr(mpe, config.env_id)
-    env = env_func.parallel_env(continuous_actions= not config.discrete_action)
+    try:
+        env_func = getattr(mpe, config.env_id)
+        env = env_func.parallel_env(continuous_actions= not config.discrete_action)
+    except:
+        env_func = getattr(sisl, config.env_id)
+        env = env_func.parallel_env(n_pursuers=5) if config.env_id == 'waterworld_v4' else env_func.parallel_env()
     env = PettingZooWrapper.wrap_env(env)
     env.reset()
 

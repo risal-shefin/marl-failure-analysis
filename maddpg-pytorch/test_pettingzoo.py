@@ -128,7 +128,7 @@ def get_episode_data(env, maddpg, config, logdir):
             delta_loss_list.append(delta_loss_error(maddpg, policy_losses, cross_hvp))
 
         next_obs, rewards, dones, infos = env.step(actions)
-        episode_reward += np.sum([rewards[:,i] if env.agent_types[i] != 'adversary' else 0 for i in range(len(rewards))])
+        episode_reward += np.sum([rewards[:,i] if env.agent_types[i] != 'adversary' else np.zeros_like(rewards[:,i]) for i in range(maddpg.nagents)])
 
         obs = next_obs
         if dones.all():

@@ -111,7 +111,7 @@ def get_episode_data(env, maddpg, config, logdir):
         so_inrd_vals.append([[sum(so_inrd_deques[i][j]) for j in range(maddpg.nagents)] for i in range(maddpg.nagents)])
 
         next_obs, rewards, dones, infos = env.step(actions)
-        episode_reward += np.sum([rewards[:,i] if env.agent_types[i] != 'adversary' else 0 for i in range(len(rewards))])
+        episode_reward += np.sum([rewards[:,i] if env.agent_types[i] != 'adversary' else np.zeros_like(rewards[:,i]) for i in range(maddpg.nagents)])
 
         obs = next_obs
         if dones.all():
