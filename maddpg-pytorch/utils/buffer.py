@@ -23,10 +23,17 @@ class ReplayBuffer(object):
         self.next_obs_buffs = []
         self.done_buffs = []
         for odim, adim in zip(obs_dims, ac_dims):
-            self.obs_buffs.append(np.zeros((max_steps, odim)))
+            if isinstance(odim, tuple):
+                obs_shape = (max_steps,) + odim
+                next_obs_shape = (max_steps,) + odim
+            else:
+                obs_shape = (max_steps, odim)
+                next_obs_shape = (max_steps, odim)
+            
+            self.obs_buffs.append(np.zeros(obs_shape))
             self.ac_buffs.append(np.zeros((max_steps, adim)))
             self.rew_buffs.append(np.zeros(max_steps))
-            self.next_obs_buffs.append(np.zeros((max_steps, odim)))
+            self.next_obs_buffs.append(np.zeros(next_obs_shape))
             self.done_buffs.append(np.zeros(max_steps))
 
 
@@ -83,10 +90,13 @@ class ReplayBuffer(object):
         else:
             cast = lambda x: Variable(Tensor(x), requires_grad=False)
         if norm_rews:
-            ret_rews = [cast((self.rew_buffs[i][inds] -
-                              self.rew_buffs[i][:self.filled_i].mean()) /
-                             self.rew_buffs[i][:self.filled_i].std())
-                        for i in range(self.num_agents)]
+            ret_rews = []
+            for i in range(self.num_agents):
+                std = self.rew_buffs[i][:self.filled_i].std()
+                if std == 0:
+                    ret_rews.append(cast(self.rew_buffs[i][inds] - self.rew_buffs[i][:self.filled_i].mean()))
+                else:
+                    ret_rews.append(cast((self.rew_buffs[i][inds] - self.rew_buffs[i][:self.filled_i].mean()) / std))
         else:
             ret_rews = [cast(self.rew_buffs[i][inds]) for i in range(self.num_agents)]
         return ([cast(self.obs_buffs[i][inds]) for i in range(self.num_agents)],

@@ -13,9 +13,26 @@ from utils.pettingzoo_wrapper import PettingZooWrapper
 from algorithms.maddpg import MADDPG
 import pettingzoo.mpe as mpe
 import pettingzoo.sisl as sisl
+import pettingzoo.atari as atari
+import supersuit
 
 USE_CUDA = torch.cuda.is_available()
 DEVICE = 'gpu' if USE_CUDA else 'cpu'
+
+
+def preprocess_env_atari(env):
+    # as per openai baseline's MaxAndSKip wrapper, maxes over the last 2 frames
+    # to deal with frame flickering
+    env = supersuit.max_observation_v0(env, 2)
+    # skip frames for faster processing and less control
+    # to be compatible with gym, use frame_skip(env, (2,5))
+    env = supersuit.frame_skip_v0(env, 4)
+    # downscale observation for faster processing
+    env = supersuit.resize_v1(env, 84, 84)
+    # allow agent to see everything on the screen despite Atari's flickering screen problem
+    env = supersuit.frame_stack_v1(env, 4)
+    return env
+
 
 def eval(env_func, is_discrete_action, maddpg, n_episodes):
     # Check if env_func exists in mpe
@@ -25,6 +42,8 @@ def eval(env_func, is_discrete_action, maddpg, n_episodes):
         env = env_func.parallel_env(n_pursuers=5)   # it's a sisl env
     else:
         env = env_func.parallel_env()
+        if 'atari' in env_func.__name__:
+            env = preprocess_env_atari(env)  # for atari envs
     env = PettingZooWrapper.wrap_env(env)
     total_reward = 0
 
@@ -78,13 +97,18 @@ def run(config):
 
     # env = make_parallel_env(config.env_id, config.n_rollout_threads, config.seed,
     #                         config.discrete_action)
-    
     try:
         env_func = getattr(mpe, config.env_id)
         env = env_func.parallel_env(continuous_actions= not config.discrete_action)
     except:
-        env_func = getattr(sisl, config.env_id)
-        env = env_func.parallel_env(n_pursuers=5) if config.env_id == 'waterworld_v4' else env_func.parallel_env()
+        try:
+            env_func = getattr(sisl, config.env_id)
+            env = env_func.parallel_env(n_pursuers=5) if config.env_id == 'waterworld_v4' else env_func.parallel_env()
+        except:
+            env_func = getattr(atari, config.env_id)
+            env = env_func.parallel_env()
+            env = preprocess_env_atari(env)
+            
     env = PettingZooWrapper.wrap_env(env)
     env.reset()
 
@@ -94,7 +118,7 @@ def run(config):
                                   lr=config.lr,
                                   hidden_dim=config.hidden_dim)
     replay_buffer = ReplayBuffer(config.buffer_length, maddpg.nagents,
-                                 [obsp.shape[0] for obsp in env.observation_space],
+                                 [obsp.shape[0] if len(obsp.shape) == 1 else obsp.shape for obsp in env.observation_space],
                                  [acsp.shape[0] if isinstance(acsp, Box) or isinstance(acsp, gymnasium.spaces.Box) else acsp.n
                                   for acsp in env.action_space])
     t = 0
@@ -108,6 +132,7 @@ def run(config):
         maddpg.scale_noise(config.final_noise_scale + (config.init_noise_scale - config.final_noise_scale) * explr_pct_remaining)
         maddpg.reset_noise()
 
+        episode_length = 0
         for et_i in range(config.episode_length):
             # rearrange observations to be per agent, and convert to torch Variable
             # torch_obs = [Variable(torch.Tensor(np.vstack(obs[:, i])),
@@ -143,8 +168,13 @@ def run(config):
                         maddpg.update(sample, a_i, logger=logger)
                     maddpg.update_all_targets()
                 maddpg.prep_rollouts(device=DEVICE)
+            
+            episode_length += 1
+            if dones.all():
+                break
+
         ep_rews = replay_buffer.get_average_rewards(
-            config.episode_length * config.n_rollout_threads)
+            episode_length * config.n_rollout_threads)
         for a_i, a_ep_rew in enumerate(ep_rews):
             logger.add_scalar('agent%i/mean_episode_rewards' % a_i, a_ep_rew, ep_i)
 

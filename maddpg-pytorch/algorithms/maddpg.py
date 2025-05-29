@@ -4,7 +4,7 @@ from gym.spaces import Box, Discrete
 import gymnasium
 from utils.networks import MLPNetwork
 from utils.misc import soft_update, average_gradients, onehot_from_logits, gumbel_softmax
-from utils.agents import DDPGAgent
+from utils.agents import DDPGAgent, DDPGImageAgent
 
 MSELoss = torch.nn.MSELoss()
 
@@ -14,7 +14,8 @@ class MADDPG(object):
     """
     def __init__(self, agent_init_params, alg_types,
                  gamma=0.95, tau=0.01, lr=0.01, hidden_dim=64,
-                 discrete_action=False):
+                 discrete_action=False, obs_shapes=None,
+                 total_action_dim=None):
         """
         Inputs:
             agent_init_params (list of dict): List of dicts with parameters to
@@ -32,10 +33,18 @@ class MADDPG(object):
         """
         self.nagents = len(alg_types)
         self.alg_types = alg_types
-        self.agents = [DDPGAgent(lr=lr, discrete_action=discrete_action,
-                                 hidden_dim=hidden_dim,
-                                 **params)
-                       for params in agent_init_params]
+        if obs_shapes and any(len(obs_shape) == 3 for obs_shape in obs_shapes if isinstance(obs_shape, tuple)):
+            self.agents = [DDPGImageAgent(lr=lr, discrete_action=discrete_action,
+                 hidden_dim=hidden_dim,
+                 obs_shapes_critic=obs_shapes,
+                 total_action_dim=total_action_dim,
+                 **params)
+               for params in agent_init_params]
+        else:
+            self.agents = [DDPGAgent(lr=lr, discrete_action=discrete_action,
+                    hidden_dim=hidden_dim,
+                    **params)
+                for params in agent_init_params]
         self.agent_init_params = agent_init_params
         self.gamma = gamma
         self.tau = tau
@@ -95,6 +104,7 @@ class MADDPG(object):
         """
         obs, acs, rews, next_obs, dones = sample
         curr_agent = self.agents[agent_i]
+        is_obs_image = len(obs[agent_i].shape) >= 3 # the first dimension can be the batch size
 
         curr_agent.critic_optimizer.zero_grad()
         if self.alg_types[agent_i] == 'MADDPG':
@@ -104,7 +114,7 @@ class MADDPG(object):
             else:
                 all_trgt_acs = [pi(nobs) for pi, nobs in zip(self.target_policies,
                                                              next_obs)]
-            trgt_vf_in = torch.cat((*next_obs, *all_trgt_acs), dim=1)
+            trgt_vf_in = torch.cat((*next_obs, *all_trgt_acs), dim=1) if not is_obs_image else (next_obs, all_trgt_acs)
         else:  # DDPG
             if self.discrete_action:
                 trgt_vf_in = torch.cat((next_obs[agent_i],
@@ -116,15 +126,18 @@ class MADDPG(object):
                 trgt_vf_in = torch.cat((next_obs[agent_i],
                                         curr_agent.target_policy(next_obs[agent_i])),
                                        dim=1)
+                
+        if is_obs_image:
+            target_critic_val = curr_agent.target_critic(*trgt_vf_in)
+        else:
+            target_critic_val = curr_agent.target_critic(trgt_vf_in)
         target_value = (rews[agent_i].view(-1, 1) + self.gamma *
-                        curr_agent.target_critic(trgt_vf_in) *
-                        (1 - dones[agent_i].view(-1, 1)))
-
+                        target_critic_val * (1 - dones[agent_i].view(-1, 1)))
         if self.alg_types[agent_i] == 'MADDPG':
-            vf_in = torch.cat((*obs, *acs), dim=1)
+            vf_in = torch.cat((*obs, *acs), dim=1) if not is_obs_image else (obs, acs)
         else:  # DDPG
             vf_in = torch.cat((obs[agent_i], acs[agent_i]), dim=1)
-        actual_value = curr_agent.critic(vf_in)
+        actual_value = curr_agent.critic(*vf_in) if is_obs_image else curr_agent.critic(vf_in)
         vf_loss = MSELoss(actual_value, target_value.detach())
         vf_loss.backward()
         if parallel:
@@ -154,11 +167,11 @@ class MADDPG(object):
                     all_pol_acs.append(onehot_from_logits(pi(ob)))
                 else:
                     all_pol_acs.append(pi(ob))
-            vf_in = torch.cat((*obs, *all_pol_acs), dim=1)
+            vf_in = torch.cat((*obs, *all_pol_acs), dim=1) if not is_obs_image else (obs, all_pol_acs)
         else:  # DDPG
             vf_in = torch.cat((obs[agent_i], curr_pol_vf_in),
                               dim=1)
-        pol_loss = -curr_agent.critic(vf_in).mean()
+        pol_loss = -curr_agent.critic(vf_in).mean() if not is_obs_image else -curr_agent.critic(*vf_in).mean()
         pol_loss += (curr_pol_out**2).mean() * 1e-3
         pol_loss.backward()
         if parallel:
@@ -239,9 +252,12 @@ class MADDPG(object):
         agent_init_params = []
         alg_types = [adversary_alg if atype == 'adversary' else agent_alg for
                      atype in env.agent_types]
+        obs_shapes = []
+        total_action_dim = 0
         for acsp, obsp, algtype in zip(env.action_space, env.observation_space,
                                        alg_types):
-            num_in_pol = obsp.shape[0]
+            obs_shapes.append(obsp.shape)
+            num_in_pol = obsp.shape[0] if len(obsp.shape) == 1 else obsp.shape
             if isinstance(acsp, Box) or isinstance(acsp, gymnasium.spaces.Box):
                 discrete_action = False
                 get_shape = lambda x: x.shape[0]
@@ -249,6 +265,7 @@ class MADDPG(object):
                 discrete_action = True
                 get_shape = lambda x: x.n
             num_out_pol = get_shape(acsp)
+            total_action_dim += num_out_pol
             if algtype == "MADDPG":
                 num_in_critic = 0
                 for oobsp in env.observation_space:
@@ -264,7 +281,9 @@ class MADDPG(object):
                      'hidden_dim': hidden_dim,
                      'alg_types': alg_types,
                      'agent_init_params': agent_init_params,
-                     'discrete_action': discrete_action}
+                     'discrete_action': discrete_action,
+                     'obs_shapes': obs_shapes,
+                     'total_action_dim': total_action_dim}
         instance = cls(**init_dict)
         instance.init_dict = init_dict
         return instance
