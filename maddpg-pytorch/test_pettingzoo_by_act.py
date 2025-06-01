@@ -13,14 +13,30 @@ from utils.pettingzoo_wrapper import PettingZooWrapper
 from utils.misc import gumbel_softmax
 import pettingzoo.mpe as mpe
 import pettingzoo.sisl as sisl
+import pettingzoo.atari as atari
 import matplotlib.pyplot as plt
 from PIL import Image
 from collections import deque
+import supersuit
 
 
 USE_CUDA = torch.cuda.is_available()
 DEVICE = 'gpu' if USE_CUDA else 'cpu'
 torch_device = torch.device("cuda" if USE_CUDA else "cpu")
+
+def preprocess_env_atari(env):
+    # as per openai baseline's MaxAndSKip wrapper, maxes over the last 2 frames
+    # to deal with frame flickering
+    env = supersuit.max_observation_v0(env, 2)
+    # skip frames for faster processing and less control
+    # to be compatible with gym, use frame_skip(env, (2,5))
+    env = supersuit.frame_skip_v0(env, 4)
+    # downscale observation for faster processing
+    env = supersuit.resize_v1(env, 84, 84)
+    # allow agent to see everything on the screen despite Atari's flickering screen problem
+    env = supersuit.frame_stack_v1(env, 4)
+    return env
+
 
 def fgsm_attack(maddpg, obs, actions, attacked_agent_id, epsilon):
     torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
@@ -34,13 +50,17 @@ def fgsm_attack(maddpg, obs, actions, attacked_agent_id, epsilon):
     return obs_perturbed_i
 
 def so_inrd(maddpg, obs, actions, epsilon):
+    is_obs_image = isinstance(obs[0], np.ndarray) and len(obs[0].shape) >= 3
     torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
     actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
-    vf_in = torch.cat((*torch_obs, *actions), dim=1)
+    vf_in = torch.cat((*torch_obs, *actions), dim=1) if not is_obs_image else (torch_obs, actions)
     so_inrd_mat = [[] for _ in range(maddpg.nagents)]
     
     for i, agent_i in enumerate(maddpg.agents):
-        policy_loss_i = -agent_i.critic(vf_in).mean() + (actions[i]**2).mean() * 1e-3
+        if not is_obs_image:
+            policy_loss_i = -agent_i.critic(vf_in).mean() + (actions[i]**2).mean() * 1e-3
+        else:
+            policy_loss_i = -agent_i.critic(*vf_in).mean() + (actions[i]**2).mean() * 1e-3
 
         for j, agent_j in enumerate(maddpg.agents):
             # The gradient with respect to obs
@@ -68,13 +88,17 @@ def so_inrd(maddpg, obs, actions, epsilon):
     return so_inrd_mat
 
 def hessian_wrt_action(maddpg, obs, actions, epsilon):
+    is_obs_image = isinstance(obs[0], np.ndarray) and len(obs[0].shape) >= 3
     torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
     actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
-    vf_in = torch.cat((*torch_obs, *actions), dim=1)
+    vf_in = torch.cat((*torch_obs, *actions), dim=1) if not is_obs_image else (torch_obs,actions)
     hessian_mat = [[] for _ in range(maddpg.nagents)]
     
     for i, agent_i in enumerate(maddpg.agents):
-        policy_loss_i = -agent_i.critic(vf_in).mean() + (actions[i]**2).mean() * 1e-3
+        if not is_obs_image:
+            policy_loss_i = -agent_i.critic(vf_in).mean() + (actions[i]**2).mean() * 1e-3
+        else:
+            policy_loss_i = -agent_i.critic(*vf_in).mean() + (actions[i]**2).mean() * 1e-3
 
         def policy_loss_i_fn(agent_id, agent_action):
             new_actions = actions.copy()
@@ -131,7 +155,7 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_aget_id=-
         torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
         torch_agent_actions = maddpg.step(torch_obs, explore=False)
         agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
-        if config.discrete_action:
+        if maddpg.discrete_action:
             actions = {agent_name: agent_actions[i].argmax() for i, agent_name in enumerate(env.possible_agents)}
         else:
             actions = {agent_name: agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)}
@@ -143,8 +167,13 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_aget_id=-
         if config.save_gifs:
             frames.append(Image.fromarray(env.render()))
         
-        # result_mat = hessian_wrt_action(maddpg, obs, list(actions.values()), 0.1)
-        result_mat = so_inrd(maddpg, obs, list(actions.values()), 0.1)
+        cur_actions = actions.copy()
+        if maddpg.discrete_action:  # convert discrete actions to one-hot encoding
+            for agent_name in actions:
+                action_dim = env.action_spaces[agent_name].n
+                cur_actions[agent_name] = torch.nn.functional.one_hot(torch.tensor(cur_actions[agent_name]), action_dim).float().numpy()
+        result_mat = hessian_wrt_action(maddpg, obs, list(cur_actions.values()), 0.1)
+        # result_mat = so_inrd(maddpg, obs, list(actions.values()), 0.1)
         for i in range(maddpg.nagents):
             for j in range(maddpg.nagents):
                 metric_deques[i][j].append(result_mat[i][j])
@@ -188,9 +217,10 @@ def plot_results(results, results_attacked, atk_agent_id, logdir):
             attacked_series = [results_attacked[t][i][j] for t in range(len(results_attacked))]
             
             # Plot the curves
-            steps = range(len(normal_series))
-            ax.plot(steps, normal_series, 'b-', label='Normal', linewidth=2)
-            ax.plot(steps, attacked_series, 'r-', label='Attacked', linewidth=2)
+            steps_normal = range(len(normal_series))
+            steps_attacked = range(len(attacked_series))
+            ax.plot(steps_normal, normal_series, 'b-', label='Normal', linewidth=2)
+            ax.plot(steps_attacked, attacked_series, 'r-', label='Attacked', linewidth=2)
             
             ax.set_xlabel('Step')
             ax.set_ylabel('First Order(L_i wrt A_j)')
@@ -215,10 +245,15 @@ def run(config):
 
     try:
         env_func = getattr(mpe, config.env_id)
-        env = env_func.parallel_env(continuous_actions= not config.discrete_action, render_mode='rgb_array')
+        env = env_func.parallel_env(continuous_actions= not maddpg.discrete_action, render_mode='rgb_array')
     except:
-        env_func = getattr(sisl, config.env_id)
-        env = env_func.parallel_env(n_pursuers=5, render_mode='rgb_array') if config.env_id == 'waterworld_v4' else env_func.parallel_env(render_mode='rgb_array')
+        try:
+            env_func = getattr(sisl, config.env_id)
+            env = env_func.parallel_env(n_pursuers=5, render_mode='rgb_array') if config.env_id == 'waterworld_v4' else env_func.parallel_env(render_mode='rgb_array')
+        except:
+            env_func = getattr(atari, config.env_id)
+            env = env_func.parallel_env(render_mode='rgb_array')
+            env = preprocess_env_atari(env)
 
     env = PettingZooWrapper.wrap_env(env)
     env.reset()
@@ -239,8 +274,6 @@ if __name__ == '__main__':
                         help="model directory")
     parser.add_argument("--save_gifs", action="store_true",
                         help="Saves gif of each episode into model directory")
-    parser.add_argument("--discrete_action", action="store_true",
-                        help="Whether the action space is discrete or continuous")
 
     config = parser.parse_args()
 
