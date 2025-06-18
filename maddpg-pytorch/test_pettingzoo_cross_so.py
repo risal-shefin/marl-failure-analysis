@@ -12,25 +12,46 @@ from datetime import datetime
 from utils.pettingzoo_wrapper import PettingZooWrapper
 from utils.misc import gumbel_softmax
 import pettingzoo.mpe as mpe
+import pettingzoo.sisl as sisl
+import pettingzoo.atari as atari
 import matplotlib.pyplot as plt
 from PIL import Image
 from collections import deque
-
+import supersuit
 
 USE_CUDA = torch.cuda.is_available()
 DEVICE = 'gpu' if USE_CUDA else 'cpu'
 torch_device = torch.device("cuda" if USE_CUDA else "cpu")
 
-def fgsm_attack(maddpg, obs, actions, attacked_agent_id, epsilon):
-    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
-    actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
-    vf_in = torch.cat((*torch_obs, *actions), dim=1)
+def preprocess_env_atari(env):
+    # as per openai baseline's MaxAndSKip wrapper, maxes over the last 2 frames
+    # to deal with frame flickering
+    env = supersuit.max_observation_v0(env, 2)
+    # skip frames for faster processing and less control
+    # to be compatible with gym, use frame_skip(env, (2,5))
+    env = supersuit.frame_skip_v0(env, 4)
+    # downscale observation for faster processing
+    env = supersuit.resize_v1(env, 84, 84)
+    # allow agent to see everything on the screen despite Atari's flickering screen problem
+    env = supersuit.frame_stack_v1(env, 4)
+    return env
 
-    policy_loss = -maddpg.agents[attacked_agent_id].critic(vf_in).mean() + (actions[attacked_agent_id]**2).mean() * 1e-3
-    grad = torch.autograd.grad(policy_loss, torch_obs[attacked_agent_id], retain_graph=True)[0]
-    eta = epsilon * grad.sign()
-    obs_perturbed_i = obs[attacked_agent_id] + torch.dot(grad.flatten(), eta.flatten()).cpu().numpy()
-    return obs_perturbed_i
+
+def fgsm_attack(maddpg, obs, actions, attacked_agent_id, epsilon):
+    # Convert to tensors with gradient tracking
+    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
+    torch_actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
+    # Concatenate for critic input
+    vf_in = torch.cat((*torch_obs, *torch_actions), dim=1)
+    # Loss to maximize (degrade agent performance)
+    loss = -maddpg.agents[attacked_agent_id].critic(vf_in).mean()  # Negative to maximize via gradient ascent
+    # Compute gradient
+    grad = torch.autograd.grad(loss, torch_obs[attacked_agent_id], retain_graph=True)[0]
+    # FGSM perturbation: move in direction of gradient sign
+    perturbation = epsilon * grad.sign()
+    # Apply perturbation element-wise
+    obs_perturbed = obs[attacked_agent_id] + perturbation.squeeze().cpu().numpy()
+    return obs_perturbed
 
 
 def so_inrd(maddpg, obs, actions, epsilon):
@@ -65,50 +86,189 @@ def so_inrd(maddpg, obs, actions, epsilon):
     return so_inrd_mat
 
 
-def get_episode_data(env, maddpg, config, logdir):
+def compute_x_hessian_log_softmax(maddpg, obs, actions, action_spaces, epsilon):
+    if not maddpg.discrete_action:
+        raise NotImplementedError("This function is only implemented for discrete action spaces.")
+    
+    # Convert discrete actions to one-hot encoding
+    one_hot_actions = []
+    for i, action in enumerate(actions):
+        one_hot = np.zeros(action_spaces[i].n)
+        one_hot[action] = 1.0
+        one_hot_actions.append(one_hot)
+    actions = one_hot_actions
+
+    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
+    actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
+    vf_in = torch.cat((*torch_obs, *actions), dim=1)
+    
+    # Store eigenvalues for each agent pair (i, j)
+    hess_mat = [[] for _ in range(maddpg.nagents)]
+    
+    for i, agent_i in enumerate(maddpg.agents):
+        q_vals = []
+        # Iterate through all possible actions for agent i
+        for agent_action in range(action_spaces[i].n):
+            if agent_action == actions[i].argmax():  # Use the original actions tensor for the actual action
+                temp_actions = actions
+            else:
+                # Create a copy of the current actions
+                temp_actions = [actions[k].clone() for k in range(maddpg.nagents)]
+                # Convert agent_action to one-hot encoding
+                one_hot_action = torch.zeros(action_spaces[i].n).to(torch_device)
+                one_hot_action[agent_action] = 1.0
+                temp_actions[i] = Variable(one_hot_action.unsqueeze(0), requires_grad=True)
+            
+            # Recompute vf_in with the new action
+            vf_in_temp = torch.cat((*torch_obs, *temp_actions), dim=1)
+            q_val = agent_i.critic(vf_in_temp).mean()
+            q_vals.append(q_val)
+            
+        # Apply softmax to q_vals, then log, and store the value from index actions[i]
+        q_vals_tensor = torch.stack(q_vals).squeeze()
+        softmax_q_vals = torch.softmax(q_vals_tensor, dim=0)
+        log_softmax_q_vals = torch.log(softmax_q_vals)
+        log_pi = log_softmax_q_vals[actions[i].argmax()]    # actions[i] is one-hot encoded
+
+        # Compute first-order gradient with respect to agent i's observation
+        grad_i = torch.autograd.grad(log_pi, torch_obs[i], create_graph=True, retain_graph=True)[0]
+        for j in range(maddpg.nagents):
+            grad_j = torch.autograd.grad(grad_i.sum(), torch_obs[j], create_graph=True, retain_graph=True)[0]
+            hess_mat[i].append(grad_j.sum().item())  # Store the Frobenius norm of the Hessian matrix
+
+    return hess_mat
+
+
+def compute_eigen(maddpg, obs, actions, action_spaces, epsilon):
+    if not maddpg.discrete_action:
+        raise NotImplementedError("This function is only implemented for discrete action spaces.")
+    
+    # Convert discrete actions to one-hot encoding
+    one_hot_actions = []
+    for i, action in enumerate(actions):
+        one_hot = np.zeros(action_spaces[i].n)
+        one_hot[action] = 1.0
+        one_hot_actions.append(one_hot)
+    actions = one_hot_actions
+
+    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
+    actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
+    vf_in = torch.cat((*torch_obs, *actions), dim=1)
+    
+    # Store eigenvalues for each agent pair (i, j)
+    eigen_mat = [[] for _ in range(maddpg.nagents)]
+    
+    for i, agent_i in enumerate(maddpg.agents):
+        q_vals = []
+        # Iterate through all possible actions for agent i
+        for agent_action in range(action_spaces[i].n):
+            if agent_action == actions[i].argmax():  # Use the original actions tensor for the actual action
+                temp_actions = actions
+            else:
+                # Create a copy of the current actions
+                temp_actions = [actions[k].clone() for k in range(maddpg.nagents)]
+                # Convert agent_action to one-hot encoding
+                one_hot_action = torch.zeros(action_spaces[i].n).to(torch_device)
+                one_hot_action[agent_action] = 1.0
+                temp_actions[i] = Variable(one_hot_action.unsqueeze(0), requires_grad=True)
+            
+            # Recompute vf_in with the new action
+            vf_in_temp = torch.cat((*torch_obs, *temp_actions), dim=1)
+            q_val = agent_i.critic(vf_in_temp).mean()
+            q_vals.append(q_val)
+            
+        # Apply softmax to q_vals, then log, and store the value from index actions[i]
+        q_vals_tensor = torch.stack(q_vals).squeeze()
+        softmax_q_vals = torch.softmax(q_vals_tensor, dim=0)
+        log_softmax_q_vals = torch.log(softmax_q_vals)
+        log_pi = log_softmax_q_vals[actions[i].argmax()]    # actions[i] is one-hot encoded
+
+        # Compute first-order gradient with respect to agent i's observation
+        grad_i = torch.autograd.grad(log_pi, torch_obs[i], create_graph=True, retain_graph=True)[0]
+
+        for j in range(maddpg.nagents):
+            # Compute cross-agent Hessian matrix for agent pair (i, j)
+            # This represents ∂²log_π_i/∂obs_i∂obs_j
+            hessian_matrix = []
+            
+            for k in range(grad_i.shape[1]):  # For each dimension of agent i's observation (has shape [1, obs_dim])
+                # Compute ∂²log_π_i/∂obs_i[k]∂obs_j
+                second_grad = torch.autograd.grad(
+                    grad_i[0, k], 
+                    torch_obs[j], 
+                    retain_graph=True, 
+                    allow_unused=True
+                )[0]
+                
+                hessian_matrix.append(second_grad.flatten())
+
+            # Convert to tensor and compute eigenvalues
+            H = torch.stack(hessian_matrix)
+    
+            assert H.shape[0] == H.shape[1], "Hessian matrix must be square."
+
+            # Make symmetric by averaging H and H^T for numerical stability
+            H_symmetric = (H + H.T) / 2
+            
+            # Compute eigenvalues
+            eigenvals = torch.linalg.eigvals(H_symmetric)
+            
+            # Get the most negative eigenvalue (real part)
+            if torch.is_complex(eigenvals):
+                eigenvals_real = eigenvals.real
+            else:
+                eigenvals_real = eigenvals
+            
+            min_eigenval = torch.min(eigenvals_real).item() # most negative eigenvalue
+            eigen_mat[i].append(min_eigenval)
+
+    return eigen_mat
+
+
+def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_aget_id=-1):
     # obs = env.reset(seed=42)
     obs = env.reset(seed=12345) # better for speaker_listener_v3
     episode_reward = 0
     frames = []
     # initialize deque buffers for last batch_size observations
-    so_inrd_deques = [[deque(maxlen=5) for _ in range(maddpg.nagents)] for _ in range(maddpg.nagents)]
-    so_inrd_vals = []
+    result_deques = [[deque(maxlen=5) for _ in range(maddpg.nagents)] for _ in range(maddpg.nagents)]
+    metric_vals = []
 
     while True:
         # add Gaussian noise to an agent's observation
         # noise_scale = 0.0  # adjust the standard deviation of the noise as needed
-        attacked_agent_id = 1
         # obs[attacked_agent] = obs[attacked_agent] + np.random.randn(*obs[attacked_agent].shape) * noise_scale
 
         # FGSM attack
-        # torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
-        # torch_agent_actions = maddpg.step(torch_obs, explore=False)
-        # agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
-        # if config.discrete_action:
-        #     actions = {agent_name: agent_actions[i].argmax() for i, agent_name in enumerate(env.possible_agents)}
-        # else:
-        #     actions = {agent_name: agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)}
-        # obs[attacked_agent_id] = fgsm_attack(maddpg, obs, list(actions.values()), attacked_agent_id, 0.1)
+        if do_attack:
+            temp_torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
+            temp_torch_agent_actions = maddpg.step(temp_torch_obs, explore=False)
+            agent_actions = [ac.data.cpu().numpy() for ac in temp_torch_agent_actions]
+            temp_actions = [agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)]
+            obs[atk_aget_id] = fgsm_attack(maddpg, obs, temp_actions, atk_aget_id, 0.1)
         
         torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
         torch_agent_actions = maddpg.step(torch_obs, explore=False)
         agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
-        if config.discrete_action:
+        if maddpg.discrete_action:
             actions = {agent_name: agent_actions[i].argmax() for i, agent_name in enumerate(env.possible_agents)}
         else:
             actions = {agent_name: agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)}
 
         # random attack
-        actions[env.possible_agents[attacked_agent_id]] = env.action_spaces[env.possible_agents[attacked_agent_id]].sample()
+        if do_attack and False:
+            actions[env.possible_agents[atk_aget_id]] = env.action_spaces[env.possible_agents[atk_aget_id]].sample()
 
         if config.save_gifs:
             frames.append(Image.fromarray(env.render()))
         
-        so_inrd_mat = so_inrd(maddpg, obs, list(actions.values()), 0.1)
+        # result_mat = so_inrd(maddpg, obs, list(actions.values()), 0.1)
+        # result_mat = compute_eigen(maddpg, obs, list(actions.values()), env.action_space, 0.1)
+        result_mat = compute_x_hessian_log_softmax(maddpg, obs, list(actions.values()), env.action_space, 0.1)
         for i in range(maddpg.nagents):
             for j in range(maddpg.nagents):
-                so_inrd_deques[i][j].append(so_inrd_mat[i][j])
-        so_inrd_vals.append([[sum(so_inrd_deques[i][j]) for j in range(maddpg.nagents)] for i in range(maddpg.nagents)])
+                result_deques[i][j].append(result_mat[i][j])
+        metric_vals.append([[np.mean(result_deques[i][j]) for j in range(maddpg.nagents)] for i in range(maddpg.nagents)])
 
         next_obs, rewards, dones, infos = env.step(actions)
         episode_reward += np.sum([rewards[:,i] if env.agent_types[i] != 'adversary' else np.zeros_like(rewards[:,i]) for i in range(maddpg.nagents)])
@@ -119,31 +279,50 @@ def get_episode_data(env, maddpg, config, logdir):
 
     print(f"Episode reward: {episode_reward}")
     if config.save_gifs:
-        imageio.mimsave(os.path.join(logdir, f'{config.env_id}_episode.gif'), frames, duration=125)
+        imageio.mimsave(os.path.join(logdir, f'{config.env_id}_episode_atk_{atk_aget_id if do_attack else "free"}.gif'), frames, duration=125)
         print(f"Saved gif of episode to {logdir}")
 
-    return so_inrd_vals
+    return metric_vals
 
 
-def plot_so_inrd(so_inrd_list, logdir):
-    # convert to array: shape (T, N_agents * N_agents)
-    data = np.array(so_inrd_list)
-    timesteps = np.arange(data.shape[0])
-
-    plt.figure(figsize=(10, 6))
-    for i in range(data.shape[1]):
-        for j in range(data.shape[1]):
-            plt.plot(timesteps, data[:, i, j], label=f"{i},{j}")
-    plt.xlabel("Timestep")
-    plt.ylabel("SO INRD")
-    plt.title("Cross SO INRD over Time for Each Agent Pair (agent 1 attacked)")
-    plt.legend(loc="upper right", fontsize="small", ncol=2)
-    plt.tight_layout()
-
-    out_path = os.path.join(logdir, "cross_so.png")
-    plt.savefig(out_path)
-    plt.close()
-    print(f"Saved cross-so plot to {out_path}")
+def plot_results(results, results_attacked, atk_agent_id, logdir):
+    n = len(results[0])  # number of agents
+    t = len(results)     # number of time steps
+    
+    # Create n x n subplots
+    fig, axes = plt.subplots(n, n, figsize=(4*n, 4*n))
+    fig.suptitle(f'Hessian Analysis (FGSM Attacked Agent ID: {atk_agent_id})', fontsize=16, y=0.95)
+    
+    # Ensure axes is 2D even for single agent case
+    if n == 1:
+        axes = [[axes]]
+    elif n == 2:
+        axes = axes.reshape(n, n)
+    
+    for i in range(n):
+        for j in range(n):
+            ax = axes[i][j]
+            
+            # Extract time series for agent i's metric w.r.t agent j
+            normal_series = [results[t][i][j] for t in range(len(results))]
+            attacked_series = [results_attacked[t][i][j] for t in range(len(results_attacked))]
+            
+            # Plot the curves
+            steps_normal = range(len(normal_series))
+            steps_attacked = range(len(attacked_series))
+            ax.plot(steps_normal, normal_series, 'b-', label='Normal', linewidth=2)
+            ax.plot(steps_attacked, attacked_series, 'r-', label='Attacked', linewidth=2)
+            
+            ax.set_xlabel('Step')
+            ax.set_ylabel('l')
+            ax.set_title(f'l_{i} , Obs_{j}')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
+    plt.savefig(os.path.join(logdir, f'plot_analysis_attacked_{atk_agent_id}.png'), dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved analysis plot to {logdir}")
 
 def run(config):
     maddpg = MADDPG.init_from_save(config.model_path)
@@ -154,16 +333,28 @@ def run(config):
     logdir = os.path.join(cwd, 'runs', f"{config.env_id}_{'discrete' if maddpg.discrete_action else 'continuous'}", timestamp)
     os.makedirs(logdir, exist_ok=True)
 
-    env_func = getattr(mpe, config.env_id)
-    env = env_func.parallel_env(continuous_actions= not config.discrete_action, render_mode='rgb_array')
+    try:
+        env_func = getattr(mpe, config.env_id)
+        env = env_func.parallel_env(continuous_actions= not maddpg.discrete_action, render_mode='rgb_array')
+    except:
+        try:
+            env_func = getattr(sisl, config.env_id)
+            env = env_func.parallel_env(n_pursuers=5, render_mode='rgb_array') if config.env_id == 'waterworld_v4' else env_func.parallel_env(render_mode='rgb_array')
+        except:
+            env_func = getattr(atari, config.env_id)
+            env = env_func.parallel_env(render_mode='rgb_array')
+            env = preprocess_env_atari(env)
+
     env = PettingZooWrapper.wrap_env(env)
     env.reset()
 
     # maddpg.prep_rollouts(device=DEVICE)
     maddpg.prep_training(device=DEVICE)
 
-    so_inrd_list = get_episode_data(env, maddpg, config, logdir)
-    plot_so_inrd(so_inrd_list, logdir)
+    attacked_agent_id = 2  # specify the agent to attack
+    results = get_episode_data(env, maddpg, config, logdir)
+    results_attacked = get_episode_data(env, maddpg, config, logdir, do_attack=True, atk_aget_id=attacked_agent_id)
+    plot_results(results, results_attacked, attacked_agent_id, logdir)
     env.close()
 
 if __name__ == '__main__':
@@ -173,8 +364,6 @@ if __name__ == '__main__':
                         help="model directory")
     parser.add_argument("--save_gifs", action="store_true",
                         help="Saves gif of each episode into model directory")
-    parser.add_argument("--discrete_action", action="store_true",
-                        help="Whether the action space is discrete or continuous")
 
     config = parser.parse_args()
 
