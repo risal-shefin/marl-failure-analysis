@@ -88,6 +88,11 @@ class MADDPG(object):
         """
         return [a.step(obs, explore=explore) for a, obs in zip(self.agents,
                                                                  observations)]
+    
+    def get_action_logits(self, observations):
+        assert self.discrete_action, "get_action_logits is only available for discrete action spaces"
+        return [a.policy(obs) for a, obs in zip(self.agents, observations)]
+
 
     def update(self, sample, agent_i, parallel=False, logger=None):
         """

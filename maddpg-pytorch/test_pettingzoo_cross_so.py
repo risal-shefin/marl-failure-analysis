@@ -140,16 +140,17 @@ def compute_x_hessian_log_softmax(maddpg, obs, actions, action_spaces, epsilon):
 
 
 def compute_eigen(maddpg, obs, actions, action_spaces, epsilon):
-    if not maddpg.discrete_action:
-        raise NotImplementedError("This function is only implemented for discrete action spaces.")
+    # if not maddpg.discrete_action:
+    #     raise NotImplementedError("This function is only implemented for discrete action spaces.")
     
     # Convert discrete actions to one-hot encoding
-    one_hot_actions = []
-    for i, action in enumerate(actions):
-        one_hot = np.zeros(action_spaces[i].n)
-        one_hot[action] = 1.0
-        one_hot_actions.append(one_hot)
-    actions = one_hot_actions
+    if maddpg.discrete_action:
+        one_hot_actions = []
+        for i, action in enumerate(actions):
+            one_hot = np.zeros(action_spaces[i].n)
+            one_hot[action] = 1.0
+            one_hot_actions.append(one_hot)
+        actions = one_hot_actions
 
     torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
     actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
@@ -159,40 +160,43 @@ def compute_eigen(maddpg, obs, actions, action_spaces, epsilon):
     eigen_mat = [[] for _ in range(maddpg.nagents)]
     
     for i, agent_i in enumerate(maddpg.agents):
-        q_vals = []
-        # Iterate through all possible actions for agent i
-        for agent_action in range(action_spaces[i].n):
-            if agent_action == actions[i].argmax():  # Use the original actions tensor for the actual action
-                temp_actions = actions
-            else:
-                # Create a copy of the current actions
-                temp_actions = [actions[k].clone() for k in range(maddpg.nagents)]
-                # Convert agent_action to one-hot encoding
-                one_hot_action = torch.zeros(action_spaces[i].n).to(torch_device)
-                one_hot_action[agent_action] = 1.0
-                temp_actions[i] = Variable(one_hot_action.unsqueeze(0), requires_grad=True)
+        # q_vals = []
+        # # Iterate through all possible actions for agent i
+        # for agent_action in range(action_spaces[i].n):
+        #     if agent_action == actions[i].argmax():  # Use the original actions tensor for the actual action
+        #         temp_actions = actions
+        #     else:
+        #         # Create a copy of the current actions
+        #         temp_actions = [actions[k].clone() for k in range(maddpg.nagents)]
+        #         # Convert agent_action to one-hot encoding
+        #         one_hot_action = torch.zeros(action_spaces[i].n).to(torch_device)
+        #         one_hot_action[agent_action] = 1.0
+        #         temp_actions[i] = Variable(one_hot_action.unsqueeze(0), requires_grad=True)
             
-            # Recompute vf_in with the new action
-            vf_in_temp = torch.cat((*torch_obs, *temp_actions), dim=1)
-            q_val = agent_i.critic(vf_in_temp).mean()
-            q_vals.append(q_val)
+        #     # Recompute vf_in with the new action
+        #     vf_in_temp = torch.cat((*torch_obs, *temp_actions), dim=1)
+        #     q_val = agent_i.critic(vf_in_temp).mean()
+        #     q_vals.append(q_val)
             
-        # Apply softmax to q_vals, then log, and store the value from index actions[i]
-        q_vals_tensor = torch.stack(q_vals).squeeze()
-        softmax_q_vals = torch.softmax(q_vals_tensor, dim=0)
-        log_softmax_q_vals = torch.log(softmax_q_vals)
-        log_pi = log_softmax_q_vals[actions[i].argmax()]    # actions[i] is one-hot encoded
+        # # Apply softmax to q_vals, then log, and store the value from index actions[i]
+        # q_vals_tensor = torch.stack(q_vals).squeeze()
+        # softmax_q_vals = torch.softmax(q_vals_tensor, dim=0)
+        # log_softmax_q_vals = torch.log(softmax_q_vals)
+        # log_pi = log_softmax_q_vals[actions[i].argmax()]    # actions[i] is one-hot encoded
 
         # Compute first-order gradient with respect to agent i's observation
-        grad_i = torch.autograd.grad(log_pi, torch_obs[i], create_graph=True, retain_graph=True)[0]
+        # grad_i = torch.autograd.grad(log_pi, torch_obs[i], create_graph=True, retain_graph=True)[0]
+
+        critic_val = agent_i.critic(vf_in).mean()
+        grad_i = torch.autograd.grad(critic_val, torch_obs[i], create_graph=True, retain_graph=True)[0]
 
         for j in range(maddpg.nagents):
             # Compute cross-agent Hessian matrix for agent pair (i, j)
-            # This represents ∂²log_π_i/∂obs_i∂obs_j
+            # This represents ∂²V/∂obs_i∂obs_j
             hessian_matrix = []
             
             for k in range(grad_i.shape[1]):  # For each dimension of agent i's observation (has shape [1, obs_dim])
-                # Compute ∂²log_π_i/∂obs_i[k]∂obs_j
+                # Compute ∂²V/∂obs_i[k]∂obs_j
                 second_grad = torch.autograd.grad(
                     grad_i[0, k], 
                     torch_obs[j], 
@@ -204,6 +208,10 @@ def compute_eigen(maddpg, obs, actions, action_spaces, epsilon):
 
             # Convert to tensor and compute eigenvalues
             H = torch.stack(hessian_matrix)
+
+            # Frob norm
+            # eigen_mat[i].append(H.norm(p='fro').item())
+            # continue
     
             assert H.shape[0] == H.shape[1], "Hessian matrix must be square."
 
@@ -225,27 +233,29 @@ def compute_eigen(maddpg, obs, actions, action_spaces, epsilon):
     return eigen_mat
 
 
-def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_aget_id=-1):
-    # obs = env.reset(seed=42)
-    obs = env.reset(seed=12345) # better for speaker_listener_v3
+def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=-1):
+    obs = env.reset(seed=42)
+    # obs = env.reset(seed=12345) # better for speaker_listener_v3
     episode_reward = 0
     frames = []
     # initialize deque buffers for last batch_size observations
     result_deques = [[deque(maxlen=5) for _ in range(maddpg.nagents)] for _ in range(maddpg.nagents)]
     metric_vals = []
+    cnt = 0
 
     while True:
+        cnt += 1
         # add Gaussian noise to an agent's observation
         # noise_scale = 0.0  # adjust the standard deviation of the noise as needed
         # obs[attacked_agent] = obs[attacked_agent] + np.random.randn(*obs[attacked_agent].shape) * noise_scale
 
         # FGSM attack
-        if do_attack:
+        if do_attack and np.random.rand() and False:
             temp_torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
             temp_torch_agent_actions = maddpg.step(temp_torch_obs, explore=False)
             agent_actions = [ac.data.cpu().numpy() for ac in temp_torch_agent_actions]
             temp_actions = [agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)]
-            obs[atk_aget_id] = fgsm_attack(maddpg, obs, temp_actions, atk_aget_id, 0.1)
+            obs[atk_agent_id] = fgsm_attack(maddpg, obs, temp_actions, atk_agent_id, 3.0)
         
         torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
         torch_agent_actions = maddpg.step(torch_obs, explore=False)
@@ -254,17 +264,28 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_aget_id=-
             actions = {agent_name: agent_actions[i].argmax() for i, agent_name in enumerate(env.possible_agents)}
         else:
             actions = {agent_name: agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)}
+        action_logits = maddpg.get_action_logits(torch_obs)
 
         # random attack
-        if do_attack and False:
-            actions[env.possible_agents[atk_aget_id]] = env.action_spaces[env.possible_agents[atk_aget_id]].sample()
+        if do_attack and np.random.rand() and False:
+            actions[env.possible_agents[atk_agent_id]] = env.action_spaces[env.possible_agents[atk_agent_id]].sample()
+        
+        # worst action attack
+        # Compute entropy of action logits
+        atk_agent_action_probs = torch.softmax(action_logits[atk_agent_id].squeeze(), dim=0)
+        atk_agent_log_probs = torch.log(atk_agent_action_probs)
+        atk_agent_entropy = -torch.sum(atk_agent_action_probs * atk_agent_log_probs)
+        if do_attack and np.random.rand() < 1.0 and atk_agent_entropy < 0.1:
+            assert maddpg.discrete_action, "Worst action attack is only implemented for discrete action spaces."
+            print(" >> attacked ")
+            actions[env.possible_agents[atk_agent_id]] = torch.argmin(action_logits[atk_agent_id]).item()
 
         if config.save_gifs:
             frames.append(Image.fromarray(env.render()))
         
         # result_mat = so_inrd(maddpg, obs, list(actions.values()), 0.1)
-        # result_mat = compute_eigen(maddpg, obs, list(actions.values()), env.action_space, 0.1)
-        result_mat = compute_x_hessian_log_softmax(maddpg, obs, list(actions.values()), env.action_space, 0.1)
+        result_mat = compute_eigen(maddpg, obs, list(actions.values()), env.action_space, 0.1)
+        # result_mat = compute_x_hessian_log_softmax(maddpg, obs, list(actions.values()), env.action_space, 0.1)
         for i in range(maddpg.nagents):
             for j in range(maddpg.nagents):
                 result_deques[i][j].append(result_mat[i][j])
@@ -279,7 +300,7 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_aget_id=-
 
     print(f"Episode reward: {episode_reward}")
     if config.save_gifs:
-        imageio.mimsave(os.path.join(logdir, f'{config.env_id}_episode_atk_{atk_aget_id if do_attack else "free"}.gif'), frames, duration=125)
+        imageio.mimsave(os.path.join(logdir, f'{config.env_id}_episode_atk_{atk_agent_id if do_attack else "free"}.gif'), frames, duration=125)
         print(f"Saved gif of episode to {logdir}")
 
     return metric_vals
@@ -291,7 +312,7 @@ def plot_results(results, results_attacked, atk_agent_id, logdir):
     
     # Create n x n subplots
     fig, axes = plt.subplots(n, n, figsize=(4*n, 4*n))
-    fig.suptitle(f'Hessian Analysis (FGSM Attacked Agent ID: {atk_agent_id})', fontsize=16, y=0.95)
+    fig.suptitle(f'Most Negative Eigen (Worst Action Attack | Attacked Agent ID: {atk_agent_id})', fontsize=16, y=0.95)
     
     # Ensure axes is 2D even for single agent case
     if n == 1:
@@ -314,8 +335,8 @@ def plot_results(results, results_attacked, atk_agent_id, logdir):
             ax.plot(steps_attacked, attacked_series, 'r-', label='Attacked', linewidth=2)
             
             ax.set_xlabel('Step')
-            ax.set_ylabel('l')
-            ax.set_title(f'l_{i} , Obs_{j}')
+            ax.set_ylabel('∂²Q/∂obs_i∂obs_j')
+            ax.set_title(f'agent_{i} , agent_{j}')
             ax.legend()
             ax.grid(True, alpha=0.3)
     
@@ -351,9 +372,9 @@ def run(config):
     # maddpg.prep_rollouts(device=DEVICE)
     maddpg.prep_training(device=DEVICE)
 
-    attacked_agent_id = 2  # specify the agent to attack
+    attacked_agent_id = config.attack_agent_id  # specify the agent to attack
     results = get_episode_data(env, maddpg, config, logdir)
-    results_attacked = get_episode_data(env, maddpg, config, logdir, do_attack=True, atk_aget_id=attacked_agent_id)
+    results_attacked = get_episode_data(env, maddpg, config, logdir, do_attack=True, atk_agent_id=attacked_agent_id)
     plot_results(results, results_attacked, attacked_agent_id, logdir)
     env.close()
 
@@ -364,6 +385,7 @@ if __name__ == '__main__':
                         help="model directory")
     parser.add_argument("--save_gifs", action="store_true",
                         help="Saves gif of each episode into model directory")
+    parser.add_argument("--attack_agent_id", type=int, default=0,)
 
     config = parser.parse_args()
 
