@@ -26,8 +26,8 @@ class PettingZooWrapper:
             self.observation_space.append(self.env.observation_space(agent))
             self.action_space.append(self.env.action_space(agent))
     
-    def reset(self):
-        observations, _ = self.env.reset()
+    def reset(self, seed=None):
+        observations, _ = self.env.reset(seed=seed) if seed is not None else self.env.reset()
         # Convert the dict to a list in the same order as agent_ids
         obs_list = [observations[agent] for agent in self.agent_ids]
         return obs_list

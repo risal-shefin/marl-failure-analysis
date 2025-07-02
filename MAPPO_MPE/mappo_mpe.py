@@ -318,7 +318,7 @@ class MAPPO_MPE:
     def load_model_from_directory(self, path):
         self.actor.load_state_dict(torch.load(path))
 
-    def select_action(self, obs, agent_id, evaluate=False):
+    def select_action(self, obs, agent_id, evaluate=False, return_dist=False):
         """
         Select an action for the specified agent based on the observation
         
@@ -350,13 +350,15 @@ class MAPPO_MPE:
             
             # Get action probabilities
             action_probs = self.actor(actor_input)  # shape: (1, action_dim)
+            dist = torch.distributions.Categorical(action_probs)
             if evaluate:  # Use deterministic policy for evaluation
                 action = torch.argmax(action_probs, dim=-1).item()  # Select the action with highest probability
             else:  # Use stochastic policy for training
                 # For discrete action spaces
-                dist = torch.distributions.Categorical(action_probs)
                 action = dist.sample().item()
-                
+        
+        if return_dist:
+            return action, dist
         return action
     
     def compute_log_prob(self, obs, agent_id, action):
@@ -381,3 +383,22 @@ class MAPPO_MPE:
         action_probs = self.actor(actor_input)  # shape: (1, action_dim)
         dist = torch.distributions.Categorical(action_probs)
         return dist.log_prob(action)
+    
+    # gradient enabled version of get_value
+    def compute_value(self, s_tensor):
+        critic_inputs = []
+        # Because each agent has the same global state, we need to repeat the global state 'N' times.
+        s = s_tensor.unsqueeze(0).repeat(self.N, 1)  # (state_dim,)-->(N,state_dim)
+        critic_inputs.append(s)
+        if self.add_agent_id:  # Add an one-hot vector to represent the agent_id
+            critic_inputs.append(torch.eye(self.N))
+        critic_inputs = torch.cat([x for x in critic_inputs], dim=-1)  # critic_input.shape=(N, critic_input_dim)
+        
+        # Reset the RNN hidden state if using RNN
+        if self.use_rnn:
+            batch_size = critic_inputs.size(0)  # Should be N
+            self.critic.rnn_hidden = torch.zeros(batch_size, self.rnn_hidden_dim, 
+                                                device=critic_inputs.device)
+        
+        v_n = self.critic(critic_inputs)  # v_n.shape(N,1)
+        return v_n
