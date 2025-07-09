@@ -18,6 +18,9 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from collections import deque
 import supersuit
+import csv
+import math
+from tqdm import tqdm
 
 USE_CUDA = torch.cuda.is_available()
 DEVICE = 'gpu' if USE_CUDA else 'cpu'
@@ -233,8 +236,9 @@ def compute_eigen(maddpg, obs, actions, action_spaces, epsilon):
     return eigen_mat
 
 
-def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=-1):
-    obs = env.reset(seed=42)
+def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=-1, seed=None):
+    # obs = env.reset()
+    obs = env.reset(seed=seed) if seed else env.reset()
     # obs = env.reset(seed=12345) # better for speaker_listener_v3
     episode_reward = 0
     frames = []
@@ -244,13 +248,12 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
     cnt = 0
 
     while True:
-        cnt += 1
         # add Gaussian noise to an agent's observation
         # noise_scale = 0.0  # adjust the standard deviation of the noise as needed
         # obs[attacked_agent] = obs[attacked_agent] + np.random.randn(*obs[attacked_agent].shape) * noise_scale
 
         # FGSM attack
-        if do_attack and np.random.rand() and False:
+        if do_attack and False:
             temp_torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
             temp_torch_agent_actions = maddpg.step(temp_torch_obs, explore=False)
             agent_actions = [ac.data.cpu().numpy() for ac in temp_torch_agent_actions]
@@ -267,7 +270,7 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
         action_logits = maddpg.get_action_logits(torch_obs)
 
         # random attack
-        if do_attack and np.random.rand() and False:
+        if do_attack and False:
             actions[env.possible_agents[atk_agent_id]] = env.action_spaces[env.possible_agents[atk_agent_id]].sample()
         
         # worst action attack
@@ -275,7 +278,9 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
         atk_agent_action_probs = torch.softmax(action_logits[atk_agent_id].squeeze(), dim=0)
         atk_agent_log_probs = torch.log(atk_agent_action_probs)
         atk_agent_entropy = -torch.sum(atk_agent_action_probs * atk_agent_log_probs)
-        if do_attack and np.random.rand() < 1.0 and atk_agent_entropy < 0.1:
+        # if do_attack and np.random.rand() < 0.75:
+        # if do_attack and atk_agent_entropy < 0.1:
+        if do_attack and cnt >= config.atk_start_step and cnt <= config.atk_end_step:
             assert maddpg.discrete_action, "Worst action attack is only implemented for discrete action spaces."
             print(" >> attacked ")
             actions[env.possible_agents[atk_agent_id]] = torch.argmin(action_logits[atk_agent_id]).item()
@@ -295,6 +300,7 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
         episode_reward += np.sum([rewards[:,i] if env.agent_types[i] != 'adversary' else np.zeros_like(rewards[:,i]) for i in range(maddpg.nagents)])
 
         obs = next_obs
+        cnt += 1
         if dones.all():
             break
 
@@ -345,6 +351,43 @@ def plot_results(results, results_attacked, atk_agent_id, logdir):
     plt.show()
     print(f"Saved analysis plot to {logdir}")
 
+def save_matrix_to_files(matrix, attacked_agent_id, total_agents, logdir, suffix=""):
+    """
+    Save matrix data to a CSV file for all timesteps.
+    
+    Args:
+        matrix: List of timesteps, where each timestep contains n_agent x n_agent data
+        attacked_agent_id: ID of the attacked agent
+        total_agents: Total number of agents
+        logdir: Directory to save the file
+    """
+    if attacked_agent_id is None:
+        filename = f"maddpg_h_data_atk_free{suffix}.csv"
+    else:
+        filename = f"maddpg_h_data_atk_{attacked_agent_id}{suffix}.csv"
+    filepath = os.path.join(logdir, filename)
+    
+    # Create header row
+    # header = ["timestep", "attacked_agent"]
+    header = ["num", "attacked_agent"]
+    for i in range(total_agents):
+        for j in range(total_agents):
+            header.append(f"agent_{i}_{j}")
+    
+    with open(filepath, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(header)
+        
+        for timestep, timestep_data in enumerate(matrix):
+            row = [timestep, attacked_agent_id]
+            for i in range(total_agents):
+                for j in range(total_agents):
+                    row.append(timestep_data[i][j])
+            writer.writerow(row)
+    
+    print(f"Saved {len(matrix)} timestep matrices to {filepath}")
+
+
 def run(config):
     maddpg = MADDPG.init_from_save(config.model_path)
 
@@ -372,9 +415,39 @@ def run(config):
     # maddpg.prep_rollouts(device=DEVICE)
     maddpg.prep_training(device=DEVICE)
 
+
+    # result_dataset = {}
+    # for i in tqdm(range(500), desc="Processing episodes"):
+    #     results = get_episode_data(env, maddpg, config, logdir)
+    #     for timestep in range(len(results)):
+    #         if timestep not in result_dataset:
+    #             result_dataset[timestep] = []
+    #         result_dataset[timestep].append(results[timestep])
+    
+    # for timestep, timestep_data in result_dataset.items():
+    #     save_matrix_to_files(timestep_data, None, maddpg.nagents, logdir, suffix=f"_{timestep}")
+
+    #     # Compute mean and variance for each agent pair across all episodes
+    #     print(f"\n ---- Timestep {timestep}:")
+    #     for i in range(maddpg.nagents):
+    #         for j in range(maddpg.nagents):
+    #             # Extract values for agent pair (i,j) across all episodes
+    #             values = [agent_ij_history[i][j] for agent_ij_history in timestep_data]
+    #             mean_val = np.mean(values)
+    #             var_val = np.var(values)
+    #             print(f"agent pair ({i}, {j}): mean = {mean_val:.4f}, variance = {var_val:.4f}")
+                
+    # exit()
+
     attacked_agent_id = config.attack_agent_id  # specify the agent to attack
-    results = get_episode_data(env, maddpg, config, logdir)
-    results_attacked = get_episode_data(env, maddpg, config, logdir, do_attack=True, atk_agent_id=attacked_agent_id)
+    seed = 42
+
+    results = get_episode_data(env, maddpg, config, logdir, seed=seed)
+    save_matrix_to_files(results, None, maddpg.nagents, logdir)
+
+    results_attacked = get_episode_data(env, maddpg, config, logdir, do_attack=True, atk_agent_id=attacked_agent_id, seed=seed)
+    save_matrix_to_files(results_attacked, attacked_agent_id, maddpg.nagents, logdir)
+
     plot_results(results, results_attacked, attacked_agent_id, logdir)
     env.close()
 
@@ -386,6 +459,8 @@ if __name__ == '__main__':
     parser.add_argument("--save_gifs", action="store_true",
                         help="Saves gif of each episode into model directory")
     parser.add_argument("--attack_agent_id", type=int, default=0,)
+    parser.add_argument("--atk_start_step", type=int, default=-math.inf)
+    parser.add_argument("--atk_end_step", type=int, default=math.inf)
 
     config = parser.parse_args()
 
