@@ -132,6 +132,52 @@ def compute_taylor_delta(maddpg, obs, actions, action_spaces, epsilon):
 
     return delta_errors
 
+def compute_eigen(maddpg, obs, actions, action_spaces, epsilon):
+    # Convert discrete actions to one-hot encoding
+    if maddpg.discrete_action:
+        one_hot_actions = []
+        for i, action in enumerate(actions):
+            one_hot = np.zeros(action_spaces[i].n)
+            one_hot[action] = 1.0
+            one_hot_actions.append(one_hot)
+        actions = one_hot_actions
+
+    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
+    actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
+    vf_in = torch.cat((*torch_obs, *actions), dim=1)
+
+    eigen_vals = []
+
+    for i, agent_i in enumerate(maddpg.agents):
+        critic_val = agent_i.critic(vf_in).mean()
+        # critic_val = (agent_i.critic(vf_in)**2).mean() # higher magnitude for better detection
+        grad_i = torch.autograd.grad(critic_val, torch_obs[i], create_graph=True, retain_graph=True)[0]
+
+        # Compute Hessian matrix
+        hessian_flat = []
+        for j in range(grad_i.numel()):
+            grad2 = torch.autograd.grad(
+            outputs=grad_i.flatten()[j], 
+            inputs=torch_obs[i], 
+            retain_graph=True,
+            create_graph=False
+            )[0]
+            hessian_flat.append(grad2.flatten())
+        
+        hessian = torch.stack(hessian_flat)
+
+        # # Compute Frobenius norm of Hessian
+        # hessian_frob_norm = torch.norm(hessian, p='fro')
+        # eigen_vals.append(hessian_frob_norm)
+        # continue
+        
+        # Compute eigenvalues
+        eigenvals = torch.linalg.eigvals(hessian)
+        eigenval = torch.max(eigenvals.real).item() 
+        eigen_vals.append(eigenval)
+
+    return eigen_vals
+
 
 def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=-1, seed=None):
     # obs = env.reset()
@@ -185,7 +231,8 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
         if config.save_gifs:
             frames.append(Image.fromarray(env.render()))
         
-        results = compute_taylor_delta(maddpg, obs, list(actions.values()), env.action_space, 0.1)
+        # results = compute_taylor_delta(maddpg, obs, list(actions.values()), env.action_space, 0.1)
+        results = compute_eigen(maddpg, obs, list(actions.values()), env.action_space, 0.1)
         for i in range(maddpg.nagents):
             result_deques[i].append(results[i])
         metric_vals.append([np.mean(result_deques[i]) for i in range(maddpg.nagents)])
