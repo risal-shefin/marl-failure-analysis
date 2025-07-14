@@ -47,7 +47,7 @@ def fgsm_attack(maddpg, obs, actions, attacked_agent_id, epsilon):
     # Concatenate for critic input
     vf_in = torch.cat((*torch_obs, *torch_actions), dim=1)
     # Loss to maximize (degrade agent performance)
-    loss = -maddpg.agents[attacked_agent_id].critic(vf_in).mean()  # Negative to maximize via gradient ascent
+    loss = -(maddpg.agents[attacked_agent_id].critic(vf_in)).mean()  # Negative to maximize via gradient ascent
     # Compute gradient
     grad = torch.autograd.grad(loss, torch_obs[attacked_agent_id], retain_graph=True)[0]
     # FGSM perturbation: move in direction of gradient sign
@@ -109,24 +109,100 @@ def compute_taylor_delta(maddpg, obs, actions, action_spaces, epsilon):
         # critic_val = agent_i.critic(vf_in).mean()
         critic_val = (agent_i.critic(vf_in)**2).mean() # higher magnitude for better detection
         grad_i = torch.autograd.grad(critic_val, torch_obs[i], create_graph=True, retain_graph=True)[0]
+        # grad_i = torch.autograd.grad(critic_val, actions[i], create_graph=True, retain_graph=True)[0]
 
         eta_i = 0.1 * grad_i.sign() / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
+        eta_i = -eta_i  # we want to go in the direction where Q decreases
         
         # Second-order Taylor expansion using Hessian-vector product (HVP)
         # Instead of computing full Hessian, compute H * eta_i directly
-        hvp = torch.autograd.grad(
-            outputs=grad_i.flatten(), 
-            inputs=torch_obs[i], 
-            grad_outputs=eta_i.flatten(),
-            retain_graph=True
-        )[0]
+        # hvp = torch.autograd.grad(
+        #     outputs=grad_i.flatten(), 
+        #     inputs=torch_obs[i], 
+        #     grad_outputs=eta_i.flatten(),
+        #     retain_graph=True
+        # )[0]
         
         # Second-order Taylor approximation: f(x + η) ≈ f(x) + ∇f(x)^T η + 0.5 η^T H η
         j_tilde = critic_val + torch.dot(grad_i.flatten(), eta_i.flatten())# + 0.5 * torch.dot(eta_i.flatten(), hvp.flatten())
         p_torch_obs = [torch_obs[k].clone() for k in range(maddpg.nagents)]
         p_torch_obs[i] = torch_obs[i] + eta_i
+        # p_actions = [actions[k].clone() for k in range(maddpg.nagents)]
+        # p_actions[i] = actions[i] + eta_i
         # j_perturbed = agent_i.critic(torch.cat((*p_torch_obs, *actions), dim=1)).mean()
         j_perturbed = (agent_i.critic(torch.cat((*p_torch_obs, *actions), dim=1))**2).mean()
+        # j_perturbed = (agent_i.critic(torch.cat((*torch_obs, *p_actions), dim=1))**1).mean()
+        delta_error = abs(j_perturbed - j_tilde).item()
+        delta_errors.append(delta_error)
+
+    return delta_errors
+
+def compute_taylor_delta_policy(maddpg, obs, actions, action_spaces, epsilon):
+    # Convert discrete actions to one-hot encoding
+    if maddpg.discrete_action:
+        one_hot_actions = []
+        for i, action in enumerate(actions):
+            one_hot = np.zeros(action_spaces[i].n)
+            one_hot[action] = 1.0
+            one_hot_actions.append(one_hot)
+        actions = one_hot_actions
+
+    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
+    actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
+    vf_in = torch.cat((*torch_obs, *actions), dim=1)
+
+    delta_errors = []
+
+    for i, agent_i in enumerate(maddpg.agents):
+        action_logits_i = agent_i.policy(torch_obs[i])
+        action_log_probs = torch.log_softmax(action_logits_i, dim=-1)
+        max_action_idx = torch.argmax(action_log_probs, dim=-1)
+        critic_val = action_log_probs.gather(-1, max_action_idx.unsqueeze(-1)).squeeze()
+        grad_i = torch.autograd.grad(critic_val, torch_obs[i], create_graph=True, retain_graph=True)[0]
+        # grad_i = torch.autograd.grad(critic_val, actions[i], create_graph=True, retain_graph=True)[0]
+
+        eta_i = 0.01 * grad_i.sign() / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
+        
+        # Second-order Taylor expansion using Hessian-vector product (HVP)
+        # Instead of computing full Hessian, compute H * eta_i directly
+        # hvp = torch.autograd.grad(
+        #     outputs=grad_i.flatten(), 
+        #     inputs=torch_obs[i], 
+        #     grad_outputs=eta_i.flatten(),
+        #     retain_graph=True
+        # )[0]
+
+        # Compute Hessian matrix
+        hessian_flat = []
+        for j in range(grad_i.numel()):
+            grad2 = torch.autograd.grad(
+                outputs=grad_i.flatten()[j], 
+                inputs=torch_obs[i], 
+                retain_graph=True,
+                create_graph=False
+            )[0]
+            hessian_flat.append(grad2.flatten())
+        
+        hessian = torch.stack(hessian_flat)
+
+        # # Compute Frobenius norm of Hessian
+        hessian_frob_norm = torch.norm(hessian, p='fro')
+        delta_errors.append(hessian_frob_norm)
+        continue
+        
+        # Compute eigenvalues
+        eigenvals = torch.linalg.eigvals(hessian)
+        eigenval = torch.max(eigenvals.real).item() 
+        delta_errors.append(eigenval)
+        continue
+        
+        # Second-order Taylor approximation: f(x + η) ≈ f(x) + ∇f(x)^T η + 0.5 η^T H η
+        j_tilde = critic_val + torch.dot(grad_i.flatten(), eta_i.flatten())# + 0.5 * torch.dot(eta_i.flatten(), hvp.flatten())
+        p_torch_obs_i = torch_obs[i] + eta_i
+        p_action_logits_i = agent_i.policy(p_torch_obs_i)
+        p_action_log_probs = torch.log_softmax(p_action_logits_i, dim=-1)
+        p_max_action_idx = torch.argmax(p_action_log_probs, dim=-1)
+        j_perturbed = p_action_log_probs.gather(-1, p_max_action_idx.unsqueeze(-1)).squeeze()
         delta_error = abs(j_perturbed - j_tilde).item()
         delta_errors.append(delta_error)
 
@@ -149,8 +225,8 @@ def compute_eigen(maddpg, obs, actions, action_spaces, epsilon):
     eigen_vals = []
 
     for i, agent_i in enumerate(maddpg.agents):
-        critic_val = agent_i.critic(vf_in).mean()
-        # critic_val = (agent_i.critic(vf_in)**2).mean() # higher magnitude for better detection
+        # critic_val = agent_i.critic(vf_in).mean()
+        critic_val = (agent_i.critic(vf_in)**2).mean() # higher magnitude for better detection
         grad_i = torch.autograd.grad(critic_val, torch_obs[i], create_graph=True, retain_graph=True)[0]
 
         # Compute Hessian matrix
@@ -196,12 +272,12 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
         # obs[attacked_agent] = obs[attacked_agent] + np.random.randn(*obs[attacked_agent].shape) * noise_scale
 
         # FGSM attack
-        if do_attack and False:
+        if do_attack and cnt >= config.atk_start_step and cnt <= config.atk_end_step and False:
             temp_torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
             temp_torch_agent_actions = maddpg.step(temp_torch_obs, explore=False)
             agent_actions = [ac.data.cpu().numpy() for ac in temp_torch_agent_actions]
             temp_actions = [agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)]
-            obs[atk_agent_id] = fgsm_attack(maddpg, obs, temp_actions, atk_agent_id, 3.0)
+            obs[atk_agent_id] = fgsm_attack(maddpg, obs, temp_actions, atk_agent_id, 0.1)
         
         torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
         torch_agent_actions = maddpg.step(torch_obs, explore=False)
@@ -232,7 +308,8 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
             frames.append(Image.fromarray(env.render()))
         
         # results = compute_taylor_delta(maddpg, obs, list(actions.values()), env.action_space, 0.1)
-        results = compute_eigen(maddpg, obs, list(actions.values()), env.action_space, 0.1)
+        results = compute_taylor_delta_policy(maddpg, obs, list(actions.values()), env.action_space, 0.1)
+        # results = compute_eigen(maddpg, obs, list(actions.values()), env.action_space, 0.1)
         for i in range(maddpg.nagents):
             result_deques[i].append(results[i])
         metric_vals.append([np.mean(result_deques[i]) for i in range(maddpg.nagents)])

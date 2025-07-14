@@ -193,10 +193,20 @@ def compute_eigen(maddpg, obs, actions, action_spaces, epsilon):
         critic_val = agent_i.critic(vf_in).mean()
         grad_i = torch.autograd.grad(critic_val, torch_obs[i], create_graph=True, retain_graph=True)[0]
 
+        # so-inrd
+        # eta_i = 0.1 * grad_i.sign() / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
+        # j_tilde = critic_val + torch.dot(grad_i.flatten(), eta_i.flatten())
+        # p_torch_obs = [torch_obs[k].clone() for k in range(maddpg.nagents)]
+        # p_torch_obs[i] = torch_obs[i] + eta_i
+        # j_perturbed = agent_i.critic(torch.cat((*p_torch_obs, *actions), dim=1)).mean()
+
         for j in range(maddpg.nagents):
             # Compute cross-agent Hessian matrix for agent pair (i, j)
             # This represents ∂²V/∂obs_i∂obs_j
             hessian_matrix = []
+
+            # eigen_mat[i].append((j_perturbed - j_tilde).item())
+            # continue
             
             for k in range(grad_i.shape[1]):  # For each dimension of agent i's observation (has shape [1, obs_dim])
                 # Compute ∂²V/∂obs_i[k]∂obs_j
@@ -213,8 +223,8 @@ def compute_eigen(maddpg, obs, actions, action_spaces, epsilon):
             H = torch.stack(hessian_matrix)
 
             # Frob norm
-            # eigen_mat[i].append(H.norm(p='fro').item())
-            # continue
+            eigen_mat[i].append(H.norm(p='fro').item())
+            continue
     
             assert H.shape[0] == H.shape[1], "Hessian matrix must be square."
 

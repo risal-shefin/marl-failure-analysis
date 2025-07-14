@@ -402,3 +402,44 @@ class MAPPO_MPE:
         
         v_n = self.critic(critic_inputs)  # v_n.shape(N,1)
         return v_n
+    
+    # gradient enabled version of select_action
+    def compute_action(self, obs, agent_id, evaluate=False, return_dist=False):
+        """
+        Select an action for the specified agent based on the observation
+        
+        Args:
+            obs: The observation for the agent
+            agent_id: The ID of the agent
+            evaluate: Whether to use deterministic policy (for evaluation) or stochastic policy (for training)
+            
+        Returns:
+            action: The selected action
+        """
+        
+        # Add agent ID if needed
+        if self.add_agent_id:
+            agent_id_one_hot = torch.zeros(1, self.N)
+            agent_id_one_hot[0, agent_id] = 1.0
+            actor_input = torch.cat([obs, agent_id_one_hot], dim=-1)
+        else:
+            actor_input = obs
+        
+        # Reset RNN hidden state if using RNN
+        if self.use_rnn:
+            batch_size = actor_input.size(0)  # Should be 1
+            self.actor.rnn_hidden = torch.zeros(batch_size, self.rnn_hidden_dim, 
+                                                device=actor_input.device)
+        
+        # Get action probabilities
+        action_probs = self.actor(actor_input)  # shape: (1, action_dim)
+        dist = torch.distributions.Categorical(action_probs)
+        if evaluate:  # Use deterministic policy for evaluation
+            action = torch.argmax(action_probs, dim=-1) # Select the action with highest probability
+        else:  # Use stochastic policy for training
+            # For discrete action spaces
+            action = dist.sample()
+    
+        if return_dist:
+            return action, dist
+        return action
