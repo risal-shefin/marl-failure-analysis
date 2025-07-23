@@ -223,8 +223,13 @@ def compute_eigen(maddpg, obs, actions, action_spaces, epsilon):
             H = torch.stack(hessian_matrix)
 
             # Frob norm
-            eigen_mat[i].append(H.norm(p='fro').item())
-            continue
+            # eigen_mat[i].append(H.norm(p='fro').item())
+            # continue
+
+            # Compute trace of the Hessian matrix
+            # hess_trace = torch.trace(H).item()
+            # eigen_mat[i].append(hess_trace)
+            # continue
     
             assert H.shape[0] == H.shape[1], "Hessian matrix must be square."
 
@@ -244,6 +249,62 @@ def compute_eigen(maddpg, obs, actions, action_spaces, epsilon):
             eigen_mat[i].append(min_eigenval)
 
     return eigen_mat
+
+
+def compute_quadratic_hessian(maddpg, obs, actions, action_spaces, epsilon):
+    # if not maddpg.discrete_action:
+    #     raise NotImplementedError("This function is only implemented for discrete action spaces.")
+    
+    # Convert discrete actions to one-hot encoding
+    if maddpg.discrete_action:
+        one_hot_actions = []
+        for i, action in enumerate(actions):
+            one_hot = np.zeros(action_spaces[i].n)
+            one_hot[action] = 1.0
+            one_hot_actions.append(one_hot)
+        actions = one_hot_actions
+
+    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
+    actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
+    vf_in = torch.cat((*torch_obs, *actions), dim=1)
+    
+    # for each agent pair (i, j)
+    result_mat = [[] for _ in range(maddpg.nagents)]
+    
+    for i, agent_i in enumerate(maddpg.agents):
+        critic_val = agent_i.critic(vf_in).mean()
+        grad_i = torch.autograd.grad(critic_val, torch_obs[i], create_graph=True, retain_graph=True)[0]
+        v = 1.0 * grad_i.sign() / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
+
+        # action_logits_i = agent_i.policy(torch_obs[i])
+        # action_log_probs = torch.log_softmax(action_logits_i, dim=-1)
+        # max_action_idx = torch.argmax(action_log_probs, dim=-1)
+        # action_log_prob = action_log_probs.gather(-1, max_action_idx.unsqueeze(-1)).squeeze()
+        # grad_i_lp = torch.autograd.grad(action_log_prob, torch_obs[i], create_graph=True, retain_graph=True)[0]
+        # v = 0.01 * grad_i_lp.sign() / torch.max(grad_i_lp.norm(p=2), torch.tensor(1e-6))
+
+        for j, agent_j in enumerate(maddpg.agents):
+            # Compute Hessian-vector product (HVP) of grad_i and v with respect to torch_obs[j]
+            hvp = torch.autograd.grad(
+                outputs=grad_i,
+                inputs=torch_obs[j],
+                grad_outputs=v,
+                retain_graph=True,
+                allow_unused=True
+            )[0]
+            
+            # Compute v^T * H * v (quadratic form)
+            # quadratic_form = torch.dot(v.flatten(), hvp.flatten())
+            # result_mat[i].append(quadratic_form.item())
+
+            # Compute u^T * H * v (quadratic form)
+            critic_val_j = agent_j.critic(vf_in).mean()
+            grad_j = torch.autograd.grad(-critic_val_j, torch_obs[j], create_graph=True, retain_graph=True)[0]
+            u = 1.0 * grad_j.sign() / torch.max(grad_j.norm(p=2), torch.tensor(1e-6))
+            quadratic_form = torch.dot(u.flatten(), hvp.flatten())
+            result_mat[i].append(quadratic_form.item())
+
+    return result_mat
 
 
 def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=-1, seed=None):
@@ -299,8 +360,9 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
             frames.append(Image.fromarray(env.render()))
         
         # result_mat = so_inrd(maddpg, obs, list(actions.values()), 0.1)
-        result_mat = compute_eigen(maddpg, obs, list(actions.values()), env.action_space, 0.1)
+        # result_mat = compute_eigen(maddpg, obs, list(actions.values()), env.action_space, 0.1)
         # result_mat = compute_x_hessian_log_softmax(maddpg, obs, list(actions.values()), env.action_space, 0.1)
+        result_mat = compute_quadratic_hessian(maddpg, obs, list(actions.values()), env.action_space, 0.1)
         for i in range(maddpg.nagents):
             for j in range(maddpg.nagents):
                 result_deques[i][j].append(result_mat[i][j])

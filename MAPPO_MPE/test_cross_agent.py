@@ -118,6 +118,38 @@ def compute_cross_eigen(runner: Runner_MAPPO_MPE, states):
     return eigen_mat
 
 
+def compute_quadratic_hessian(runner: Runner_MAPPO_MPE, states):
+    states_tensors = [torch.tensor(state, dtype=torch.float32, requires_grad=True) for state in states]
+    states_tensor = torch.cat(states_tensors, dim=0)
+    values = runner.agent_n.compute_value(states_tensor).squeeze(-1)  # shape: (N,)
+
+    # Store eigenvalues for each agent pair (i, j)
+    result_mat = [[] for _ in range(runner.args.N)]
+
+    for i in range(runner.args.N):
+        # Compute first-order gradient with respect to agent i's observation
+        grad_i = torch.autograd.grad(values[i], states_tensors[i], create_graph=True, retain_graph=True)[0]
+        v = 0.1 * grad_i.sign() / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
+
+        for j in range(runner.args.N):
+            # Compute Hessian-vector product (HVP) of grad_i and v with respect to torch_obs[j]
+            hvp = torch.autograd.grad(
+                outputs=grad_i,
+                inputs=states_tensors[j],
+                grad_outputs=v,
+                retain_graph=True,
+                allow_unused=True
+            )[0]
+
+            # Compute u^T * H * v (quadratic form)
+            grad_j = torch.autograd.grad(-values[j], states_tensors[j], create_graph=True, retain_graph=True)[0]
+            u = 0.1 * grad_j.sign() / torch.max(grad_j.norm(p=2), torch.tensor(1e-6))
+            quadratic_form = torch.dot(u.flatten(), hvp.flatten())
+            result_mat[i].append(quadratic_form.item())
+
+    return result_mat
+
+
 def get_episode_data(env, runner: Runner_MAPPO_MPE, do_attack: bool, attacked_agent_id: str):
 
     # Run one episode and perturb the observation of the "adversary" agent
@@ -156,7 +188,8 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, do_attack: bool, attacked_ag
             actions.append(action)
 
         
-        result_mat = compute_cross_eigen(runner, state)
+        # result_mat = compute_cross_eigen(runner, state)
+        result_mat = compute_quadratic_hessian(runner, state)
         for i in range(runner.args.N):
             for j in range(runner.args.N):
                 result_deques[i][j].append(result_mat[i][j])

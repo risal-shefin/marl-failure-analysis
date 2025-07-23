@@ -173,28 +173,28 @@ def compute_taylor_delta_policy(maddpg, obs, actions, action_spaces, epsilon):
         # )[0]
 
         # Compute Hessian matrix
-        hessian_flat = []
-        for j in range(grad_i.numel()):
-            grad2 = torch.autograd.grad(
-                outputs=grad_i.flatten()[j], 
-                inputs=torch_obs[i], 
-                retain_graph=True,
-                create_graph=False
-            )[0]
-            hessian_flat.append(grad2.flatten())
+        # hessian_flat = []
+        # for j in range(grad_i.numel()):
+        #     grad2 = torch.autograd.grad(
+        #         outputs=grad_i.flatten()[j], 
+        #         inputs=torch_obs[i], 
+        #         retain_graph=True,
+        #         create_graph=False
+        #     )[0]
+        #     hessian_flat.append(grad2.flatten())
         
-        hessian = torch.stack(hessian_flat)
+        # hessian = torch.stack(hessian_flat)
 
         # # Compute Frobenius norm of Hessian
-        hessian_frob_norm = torch.norm(hessian, p='fro')
-        delta_errors.append(hessian_frob_norm)
-        continue
+        # hessian_frob_norm = torch.norm(hessian, p='fro')
+        # delta_errors.append(hessian_frob_norm)
+        # continue
         
         # Compute eigenvalues
-        eigenvals = torch.linalg.eigvals(hessian)
-        eigenval = torch.max(eigenvals.real).item() 
-        delta_errors.append(eigenval)
-        continue
+        # eigenvals = torch.linalg.eigvals(hessian)
+        # eigenval = torch.max(eigenvals.real).item() 
+        # delta_errors.append(eigenval)
+        # continue
         
         # Second-order Taylor approximation: f(x + η) ≈ f(x) + ∇f(x)^T η + 0.5 η^T H η
         j_tilde = critic_val + torch.dot(grad_i.flatten(), eta_i.flatten())# + 0.5 * torch.dot(eta_i.flatten(), hvp.flatten())

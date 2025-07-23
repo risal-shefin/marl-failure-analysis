@@ -143,8 +143,8 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, do_attack: bool, attacked_ag
             actions.append(action)
 
         
-        # results = compute_taylor_policy(runner, state)
-        results = compute_eigen_policy(runner, state)
+        results = compute_taylor_policy(runner, state)
+        # results = compute_eigen_policy(runner, state)
         for i in range(runner.args.N):
             result_deques[i].append(results[i])
         metric_vals.append([np.mean(result_deques[i]) for i in range(runner.args.N)])
