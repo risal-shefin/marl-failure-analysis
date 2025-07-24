@@ -57,86 +57,6 @@ def fgsm_attack(maddpg, obs, actions, attacked_agent_id, epsilon):
     return obs_perturbed
 
 
-def so_inrd(maddpg, obs, actions, epsilon):
-    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
-    actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
-    vf_in = torch.cat((*torch_obs, *actions), dim=1)
-    so_inrd_mat = [[] for _ in range(maddpg.nagents)]
-    
-    for i, agent_i in enumerate(maddpg.agents):
-        policy_loss_i = -agent_i.critic(vf_in).mean() + (actions[i]**2).mean() * 1e-3
-
-        for j, agent_j in enumerate(maddpg.agents):
-            # The gradient with respect to obs
-            grad_J = torch.autograd.grad(policy_loss_i, torch_obs[j], retain_graph=True)[0]
-
-            # Compute η_i (adversarial perturbation direction)
-            eta_i = epsilon * grad_J.sign() / torch.max(grad_J.norm(p=2), torch.tensor(1e-6))
-
-            # Compute J tilde
-            J_tilde = policy_loss_i + torch.dot(grad_J.flatten(), eta_i.flatten())
-
-            # Perturbed state
-            torch_obs_perturbed = [torch_obs[i].clone() for i in range(maddpg.nagents)]
-            torch_obs_perturbed[j] = torch_obs[j] + eta_i
-            vf_in_perturbed = torch.cat((*torch_obs_perturbed, *actions), dim=1)
-            policy_loss_i_perturbed = -agent_i.critic(vf_in_perturbed).mean() + (actions[i]**2).mean() * 1e-3
-
-            # Compute L
-            L = policy_loss_i_perturbed - J_tilde
-            so_inrd_mat[i].append(L.item())
-
-    return so_inrd_mat
-
-
-def compute_taylor_delta(maddpg, obs, actions, action_spaces, epsilon):
-    # Convert discrete actions to one-hot encoding
-    if maddpg.discrete_action:
-        one_hot_actions = []
-        for i, action in enumerate(actions):
-            one_hot = np.zeros(action_spaces[i].n)
-            one_hot[action] = 1.0
-            one_hot_actions.append(one_hot)
-        actions = one_hot_actions
-
-    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
-    actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
-    vf_in = torch.cat((*torch_obs, *actions), dim=1)
-
-    delta_errors = []
-
-    for i, agent_i in enumerate(maddpg.agents):
-        # critic_val = agent_i.critic(vf_in).mean()
-        critic_val = (agent_i.critic(vf_in)**2).mean() # higher magnitude for better detection
-        grad_i = torch.autograd.grad(critic_val, torch_obs[i], create_graph=True, retain_graph=True)[0]
-        # grad_i = torch.autograd.grad(critic_val, actions[i], create_graph=True, retain_graph=True)[0]
-
-        eta_i = 0.1 * grad_i.sign() / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
-        eta_i = -eta_i  # we want to go in the direction where Q decreases
-        
-        # Second-order Taylor expansion using Hessian-vector product (HVP)
-        # Instead of computing full Hessian, compute H * eta_i directly
-        # hvp = torch.autograd.grad(
-        #     outputs=grad_i.flatten(), 
-        #     inputs=torch_obs[i], 
-        #     grad_outputs=eta_i.flatten(),
-        #     retain_graph=True
-        # )[0]
-        
-        # Second-order Taylor approximation: f(x + η) ≈ f(x) + ∇f(x)^T η + 0.5 η^T H η
-        j_tilde = critic_val + torch.dot(grad_i.flatten(), eta_i.flatten())# + 0.5 * torch.dot(eta_i.flatten(), hvp.flatten())
-        p_torch_obs = [torch_obs[k].clone() for k in range(maddpg.nagents)]
-        p_torch_obs[i] = torch_obs[i] + eta_i
-        # p_actions = [actions[k].clone() for k in range(maddpg.nagents)]
-        # p_actions[i] = actions[i] + eta_i
-        # j_perturbed = agent_i.critic(torch.cat((*p_torch_obs, *actions), dim=1)).mean()
-        j_perturbed = (agent_i.critic(torch.cat((*p_torch_obs, *actions), dim=1))**2).mean()
-        # j_perturbed = (agent_i.critic(torch.cat((*torch_obs, *p_actions), dim=1))**1).mean()
-        delta_error = abs(j_perturbed - j_tilde).item()
-        delta_errors.append(delta_error)
-
-    return delta_errors
-
 def compute_taylor_delta_policy(maddpg, obs, actions, action_spaces, epsilon):
     # Convert discrete actions to one-hot encoding
     if maddpg.discrete_action:
@@ -161,40 +81,7 @@ def compute_taylor_delta_policy(maddpg, obs, actions, action_spaces, epsilon):
         grad_i = torch.autograd.grad(critic_val, torch_obs[i], create_graph=True, retain_graph=True)[0]
         # grad_i = torch.autograd.grad(critic_val, actions[i], create_graph=True, retain_graph=True)[0]
 
-        eta_i = 0.01 * grad_i.sign() / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
-        
-        # Second-order Taylor expansion using Hessian-vector product (HVP)
-        # Instead of computing full Hessian, compute H * eta_i directly
-        # hvp = torch.autograd.grad(
-        #     outputs=grad_i.flatten(), 
-        #     inputs=torch_obs[i], 
-        #     grad_outputs=eta_i.flatten(),
-        #     retain_graph=True
-        # )[0]
-
-        # Compute Hessian matrix
-        # hessian_flat = []
-        # for j in range(grad_i.numel()):
-        #     grad2 = torch.autograd.grad(
-        #         outputs=grad_i.flatten()[j], 
-        #         inputs=torch_obs[i], 
-        #         retain_graph=True,
-        #         create_graph=False
-        #     )[0]
-        #     hessian_flat.append(grad2.flatten())
-        
-        # hessian = torch.stack(hessian_flat)
-
-        # # Compute Frobenius norm of Hessian
-        # hessian_frob_norm = torch.norm(hessian, p='fro')
-        # delta_errors.append(hessian_frob_norm)
-        # continue
-        
-        # Compute eigenvalues
-        # eigenvals = torch.linalg.eigvals(hessian)
-        # eigenval = torch.max(eigenvals.real).item() 
-        # delta_errors.append(eigenval)
-        # continue
+        eta_i = epsilon * grad_i.sign() / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
         
         # Second-order Taylor approximation: f(x + η) ≈ f(x) + ∇f(x)^T η + 0.5 η^T H η
         j_tilde = critic_val + torch.dot(grad_i.flatten(), eta_i.flatten())# + 0.5 * torch.dot(eta_i.flatten(), hvp.flatten())
@@ -206,9 +93,12 @@ def compute_taylor_delta_policy(maddpg, obs, actions, action_spaces, epsilon):
         delta_error = abs(j_perturbed - j_tilde).item()
         delta_errors.append(delta_error)
 
-    return delta_errors
+    return delta_error
 
-def compute_eigen(maddpg, obs, actions, action_spaces, epsilon):
+def compute_frob_norms(maddpg, obs, actions, action_spaces, vulnerable_agent_id):
+    # if not maddpg.discrete_action:
+    #     raise NotImplementedError("This function is only implemented for discrete action spaces.")
+    
     # Convert discrete actions to one-hot encoding
     if maddpg.discrete_action:
         one_hot_actions = []
@@ -221,50 +111,88 @@ def compute_eigen(maddpg, obs, actions, action_spaces, epsilon):
     torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
     actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
     vf_in = torch.cat((*torch_obs, *actions), dim=1)
-
-    eigen_vals = []
+    
+    results = []
 
     for i, agent_i in enumerate(maddpg.agents):
-        # critic_val = agent_i.critic(vf_in).mean()
-        critic_val = (agent_i.critic(vf_in)**2).mean() # higher magnitude for better detection
+        critic_val = agent_i.critic(vf_in).mean()
         grad_i = torch.autograd.grad(critic_val, torch_obs[i], create_graph=True, retain_graph=True)[0]
 
         # Compute Hessian matrix
-        hessian_flat = []
-        for j in range(grad_i.numel()):
-            grad2 = torch.autograd.grad(
-            outputs=grad_i.flatten()[j], 
-            inputs=torch_obs[i], 
-            retain_graph=True,
-            create_graph=False
+        hessian_matrix = []
+        for k in range(grad_i.shape[1]):
+            # Compute ∂²Q/∂obs_i[k]∂obs_j
+            second_grad = torch.autograd.grad(
+                grad_i[0, k], 
+                torch_obs[vulnerable_agent_id], 
+                retain_graph=True, 
+                allow_unused=True
             )[0]
-            hessian_flat.append(grad2.flatten())
-        
-        hessian = torch.stack(hessian_flat)
+            
+            hessian_matrix.append(second_grad.flatten())
 
-        # # Compute Frobenius norm of Hessian
-        # hessian_frob_norm = torch.norm(hessian, p='fro')
-        # eigen_vals.append(hessian_frob_norm)
-        # continue
-        
-        # Compute eigenvalues
-        eigenvals = torch.linalg.eigvals(hessian)
-        eigenval = torch.max(eigenvals.real).item() 
-        eigen_vals.append(eigenval)
+        H = torch.stack(hessian_matrix)
+        hessian_frob_norm = torch.norm(H, p='fro')
+        results.append(hessian_frob_norm.item())
 
-    return eigen_vals
+    return results
 
 
-def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=-1, seed=None):
+# second order directional derivative
+def compute_2nd_ord_dir_derivatives(maddpg, obs, actions, action_spaces, vulnerable_agent_id):
+    # if not maddpg.discrete_action:
+    #     raise NotImplementedError("This function is only implemented for discrete action spaces.")
+    
+    # Convert discrete actions to one-hot encoding
+    if maddpg.discrete_action:
+        one_hot_actions = []
+        for i, action in enumerate(actions):
+            one_hot = np.zeros(action_spaces[i].n)
+            one_hot[action] = 1.0
+            one_hot_actions.append(one_hot)
+        actions = one_hot_actions
+
+    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
+    actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
+    vf_in = torch.cat((*torch_obs, *actions), dim=1)
+    
+    results = []
+
+    for i, agent_i in enumerate(maddpg.agents):
+        critic_val = agent_i.critic(vf_in).mean()
+        grad_i = torch.autograd.grad(critic_val, torch_obs[i], create_graph=True, retain_graph=True)[0]
+        v = grad_i / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
+
+        # Compute Hessian-vector product (HVP) of grad_i and v with respect to torch_obs[j]
+        hvp = torch.autograd.grad(
+            outputs=grad_i,
+            inputs=torch_obs[vulnerable_agent_id],
+            grad_outputs=v,
+            retain_graph=True,
+            allow_unused=True
+        )[0]
+
+        # Compute u^T * H * v (quadratic form)
+        grad_j = torch.autograd.grad(-critic_val, torch_obs[vulnerable_agent_id], create_graph=True, retain_graph=True)[0]
+        u = grad_j / torch.max(grad_j.norm(p=2), torch.tensor(1e-6))
+        curvature_val = torch.dot(u.flatten(), hvp.flatten())
+        results.append(curvature_val.item())
+
+    return results
+
+
+def get_episode_data(env, maddpg, config, logdir, ref_means, ref_std_devs, do_attack=False, atk_agent_id=-1, seed=None):
     # obs = env.reset()
     obs = env.reset(seed=seed) if seed else env.reset()
     # obs = env.reset(seed=12345) # better for speaker_listener_v3
     episode_reward = 0
+    episode_rewards = [0 for _ in range(maddpg.nagents)]
     frames = []
     # initialize deque buffers for last batch_size observations
     result_deques = [deque(maxlen=5) for _ in range(maddpg.nagents)]
     metric_vals = []
     cnt = 0
+    vulnerable_agent_id = None
 
     while True:
         # add Gaussian noise to an agent's observation
@@ -301,21 +229,40 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
         # if do_attack and atk_agent_entropy < 0.1:
         if do_attack and cnt >= config.atk_start_step and cnt <= config.atk_end_step:
             assert maddpg.discrete_action, "Worst action attack is only implemented for discrete action spaces."
-            print(" >> attacked ")
+            # print(" >> attacked ")
             actions[env.possible_agents[atk_agent_id]] = torch.argmin(action_logits[atk_agent_id]).item()
 
         if config.save_gifs:
             frames.append(Image.fromarray(env.render()))
         
         # results = compute_taylor_delta(maddpg, obs, list(actions.values()), env.action_space, 0.1)
-        results = compute_taylor_delta_policy(maddpg, obs, list(actions.values()), env.action_space, 0.1)
+        results = compute_taylor_delta_policy(maddpg, obs, list(actions.values()), env.action_space, 0.01)
         # results = compute_eigen(maddpg, obs, list(actions.values()), env.action_space, 0.1)
         for i in range(maddpg.nagents):
             result_deques[i].append(results[i])
+            taylor_approx_error = np.mean(result_deques[i])
+            if not (ref_means[i][cnt] - ref_std_devs[i][cnt] <= taylor_approx_error <= ref_means[i][cnt] + ref_std_devs[i][cnt]) and vulnerable_agent_id is None:
+                print(f" [!!!] Anomaly detected for agent {i} at timestep: {cnt}. Taylor Appx. Error: {taylor_approx_error}")
+                vulnerable_agent_id = i
         metric_vals.append([np.mean(result_deques[i]) for i in range(maddpg.nagents)])
+
+        if vulnerable_agent_id is not None:
+            print(f"\n --- Timestep: {cnt} ------")
+            frob_norms = compute_frob_norms(maddpg, obs, list(actions.values()), env.action_space, vulnerable_agent_id)
+            # Rank frob_norm values from largest to smallest
+            frob_norms_with_indices = [(i, frob_norms[i]) for i in range(len(frob_norms)) if i != vulnerable_agent_id]
+            frob_norms_ranked = sorted(frob_norms_with_indices, key=lambda x: x[1], reverse=True)
+            print(f" --- Frob norm ranking: {frob_norms_ranked}")
+
+            s_dir_derivatives = compute_2nd_ord_dir_derivatives(maddpg, obs, list(actions.values()), env.action_space, vulnerable_agent_id)
+            for i in range(maddpg.nagents):
+                if i == vulnerable_agent_id or s_dir_derivatives[i] >= 0.0:
+                    continue
+                print(f" >> Cascading anomaly detected for agent {i}. 2nd Dir Derivative: {s_dir_derivatives[i]}")
 
         next_obs, rewards, dones, infos = env.step(actions)
         episode_reward += np.sum([rewards[:,i] if env.agent_types[i] != 'adversary' else np.zeros_like(rewards[:,i]) for i in range(maddpg.nagents)])
+        episode_rewards = [episode_rewards[i] + rewards[:,i].sum() for i in range(maddpg.nagents)]
 
         obs = next_obs
         cnt += 1
@@ -323,6 +270,7 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
             break
 
     print(f"Episode reward: {episode_reward}")
+    print(f"Episode rewards: {episode_rewards}")
     if config.save_gifs:
         imageio.mimsave(os.path.join(logdir, f'{config.env_id}_episode_atk_{atk_agent_id if do_attack else "free"}.gif'), frames, duration=125)
         print(f"Saved gif of episode to {logdir}")
@@ -330,9 +278,9 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
     return metric_vals
 
 
-def plot_results(results, results_attacked, atk_agent_id, logdir):
-    n = len(results[0])  # number of agents
-    t = len(results)     # number of time steps
+def plot_results(results_attacked, atk_agent_id, ref_means, ref_std_devs, logdir):
+    n = len(results_attacked[0])  # number of agents
+    t = len(results_attacked)     # number of time steps
     
     # Create n subplots in a row
     fig, axes = plt.subplots(1, n, figsize=(4*n, 4))
@@ -346,14 +294,19 @@ def plot_results(results, results_attacked, atk_agent_id, logdir):
         ax = axes[i]
         
         # Extract time series for agent i
-        normal_series = [results[t][i] for t in range(len(results))]
         attacked_series = [results_attacked[t][i] for t in range(len(results_attacked))]
         
         # Plot the curves
-        steps_normal = range(len(normal_series))
-        steps_attacked = range(len(attacked_series))
-        ax.plot(steps_normal, normal_series, 'b-', label='Normal', linewidth=2)
-        ax.plot(steps_attacked, attacked_series, 'r-', label='Attacked', linewidth=2)
+        steps = range(len(attacked_series))
+        
+        # Add green region using ref_means and ref_std_devs
+        ref_steps = range(len(ref_means[i]))
+        ref_lower = [ref_means[i][t] - ref_std_devs[i][t] for t in range(len(ref_means[i]))]
+        ref_upper = [ref_means[i][t] + ref_std_devs[i][t] for t in range(len(ref_means[i]))]
+        ax.fill_between(steps, ref_lower, ref_upper, alpha=0.1, color='green')
+        
+        ax.plot(steps, attacked_series, 'r-', label='Attacked', linewidth=2)
+        ax.plot(steps, ref_means[i], 'g--', label='Mean', linewidth=2)
         
         ax.set_xlabel('Step')
         ax.set_ylabel('Taylor Delta Error')
@@ -428,40 +381,28 @@ def run(config):
     # maddpg.prep_rollouts(device=DEVICE)
     maddpg.prep_training(device=DEVICE)
 
+    # Read reference values from CSV files if provided
+    ref_means = [[] for _ in range(maddpg.nagents)]
+    ref_std_devs = [[] for _ in range(maddpg.nagents)]
 
-    # result_dataset = {}
-    # for i in tqdm(range(500), desc="Processing episodes"):
-    #     results = get_episode_data(env, maddpg, config, logdir)
-    #     for timestep in range(len(results)):
-    #         if timestep not in result_dataset:
-    #             result_dataset[timestep] = []
-    #         result_dataset[timestep].append(results[timestep])
-    
-    # for timestep, timestep_data in result_dataset.items():
-    #     save_matrix_to_files(timestep_data, None, maddpg.nagents, logdir, suffix=f"_{timestep}")
-
-    #     # Compute mean and variance for each agent pair across all episodes
-    #     print(f"\n ---- Timestep {timestep}:")
-    #     for i in range(maddpg.nagents):
-    #         for j in range(maddpg.nagents):
-    #             # Extract values for agent pair (i,j) across all episodes
-    #             values = [agent_ij_history[i][j] for agent_ij_history in timestep_data]
-    #             mean_val = np.mean(values)
-    #             var_val = np.var(values)
-    #             print(f"agent pair ({i}, {j}): mean = {mean_val:.4f}, variance = {var_val:.4f}")
-                
-    # exit()
+    for agent_id in range(maddpg.nagents):
+        csv_filename = f"maddpg_taylor_error_atk_free_agent_{agent_id}.csv"
+        csv_path = os.path.join(config.ref_val_dir, csv_filename)
+        
+        with open(csv_path, 'r') as csvfile:
+            reader = csv.reader(csvfile)
+            next(reader)  # Skip header
+            for row in reader:
+                ref_means[agent_id].append(float(row[2]))
+                ref_std_devs[agent_id].append(float(row[4]))
 
     attacked_agent_id = config.attack_agent_id  # specify the agent to attack
     seed = 42
 
-    results = get_episode_data(env, maddpg, config, logdir, seed=seed)
-    save_matrix_to_files(results, None, maddpg.nagents, logdir)
-
-    results_attacked = get_episode_data(env, maddpg, config, logdir, do_attack=True, atk_agent_id=attacked_agent_id, seed=seed)
+    results_attacked = get_episode_data(env, maddpg, config, logdir, ref_means, ref_std_devs, do_attack=True, atk_agent_id=attacked_agent_id, seed=seed)
     save_matrix_to_files(results_attacked, attacked_agent_id, maddpg.nagents, logdir)
 
-    plot_results(results, results_attacked, attacked_agent_id, logdir)
+    plot_results(results_attacked, attacked_agent_id, ref_means, ref_std_devs, logdir)
     env.close()
 
 if __name__ == '__main__':
@@ -471,6 +412,7 @@ if __name__ == '__main__':
                         help="model directory")
     parser.add_argument("--save_gifs", action="store_true",
                         help="Saves gif of each episode into model directory")
+    parser.add_argument("--ref_val_dir", type=str, default='',)
     parser.add_argument("--attack_agent_id", type=int, default=0,)
     parser.add_argument("--atk_start_step", type=int, default=-math.inf)
     parser.add_argument("--atk_end_step", type=int, default=math.inf)
