@@ -33,7 +33,73 @@ def perturb_fgsm(states, perturb_agent_id, perturb_eps=0.1):
     return states[perturb_agent_id] + perturb_eps * np.sign(grad[perturb_agent_id*agent_state_dim : (perturb_agent_id+1)*agent_state_dim].detach().cpu().numpy())
 
 
-def compute_taylor_policy(runner: Runner_MAPPO_MPE, states):
+def compute_frob_norms(runner: Runner_MAPPO_MPE, states, vulnerable_agent_id):
+    states_tensors = [torch.tensor(state, dtype=torch.float32, requires_grad=True) for state in states]
+    states_tensor = torch.cat(states_tensors, dim=0)
+    values = runner.agent_n.compute_value(states_tensor).squeeze(-1)  # shape: (N,)
+
+    # Store eigenvalues for each agent pair (i, j)
+    results = []
+
+    for i in range(runner.args.N):
+        # Compute first-order gradient with respect to agent i's observation
+        grad_i = torch.autograd.grad(values[i], states_tensors[i], create_graph=True, retain_graph=True)[0]
+
+        # Compute cross-agent Hessian matrix for agent pair (i, j)
+        # This represents ∂²v/∂obs_i∂obs_j
+        hessian_matrix = []
+        
+        for k in range(grad_i.shape[0]):  # For each dimension of agent i's observation (has shape (obs_dim,))
+            # Compute ∂²v/∂obs_i[k]∂obs_j
+            second_grad = torch.autograd.grad(
+                grad_i[k], 
+                states_tensors[vulnerable_agent_id],
+                retain_graph=True, 
+                allow_unused=True
+            )[0]
+            hessian_matrix.append(second_grad.flatten())
+
+        # Convert to tensor and compute eigenvalues
+        H = torch.stack(hessian_matrix)
+
+        # Frobenius norm of the Hessian matrix
+        results.append(H.norm(p='fro').item()) 
+
+    return results
+
+# second order directional derivative
+def compute_2nd_ord_dir_derivatives(runner: Runner_MAPPO_MPE, states, vulnerable_agent_id):
+    states_tensors = [torch.tensor(state, dtype=torch.float32, requires_grad=True) for state in states]
+    states_tensor = torch.cat(states_tensors, dim=0)
+    values = runner.agent_n.compute_value(states_tensor).squeeze(-1)  # shape: (N,)
+
+    # Store eigenvalues for each agent pair (i, j)
+    results = []
+
+    for i in range(runner.args.N):
+        # Compute first-order gradient with respect to agent i's observation
+        grad_i = torch.autograd.grad(values[i], states_tensors[i], create_graph=True, retain_graph=True)[0]
+        v = grad_i / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
+
+        # Compute Hessian-vector product (HVP) of grad_i and v with respect to states_tensors[j]
+        hvp = torch.autograd.grad(
+            outputs=grad_i,
+            inputs=states_tensors[vulnerable_agent_id],
+            grad_outputs=v,
+            retain_graph=True,
+            allow_unused=True
+        )[0]
+
+        # Compute u^T * H * v (quadratic form)
+        grad_j = torch.autograd.grad(-values[i], states_tensors[vulnerable_agent_id], create_graph=True, retain_graph=True)[0]
+        u = grad_j / torch.max(grad_j.norm(p=2), torch.tensor(1e-6))
+        curvature_val = torch.dot(u.flatten(), hvp.flatten())
+        results.append(curvature_val.item())
+
+    return results
+
+
+def compute_taylor_error_policy(runner: Runner_MAPPO_MPE, states):
     states_tensor = torch.stack([torch.tensor(state, dtype=torch.float32, requires_grad=True) for state in states])
 
     delta_errors = []
@@ -105,7 +171,7 @@ def compute_eigen_policy(runner: Runner_MAPPO_MPE, states):
     return results
 
 
-def get_episode_data(env, runner: Runner_MAPPO_MPE, do_attack: bool, attacked_agent_id: str):
+def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_means, ref_std_devs, do_attack: bool, attacked_agent_id: str):
 
     # Run one episode and perturb the observation of the "adversary" agent
     state = env.reset(seed=runner.seed)
@@ -118,6 +184,7 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, do_attack: bool, attacked_ag
     # initialize deque buffers for last batch_size observations
     result_deques = [deque(maxlen=5) for _ in range(runner.args.N)]
     metric_vals = []
+    vulnerable_agent_id = None
 
     while not all(done):
         # Get actions from the agent (in evaluation mode, training=False)
@@ -143,11 +210,31 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, do_attack: bool, attacked_ag
             actions.append(action)
 
         
-        results = compute_taylor_policy(runner, state)
+        results = compute_taylor_error_policy(runner, state)
         # results = compute_eigen_policy(runner, state)
         for i in range(runner.args.N):
             result_deques[i].append(results[i])
+            taylor_approx_error = np.mean(result_deques[i])
+            if abs(taylor_approx_error) > ref_means[i][iter_count] + ref_std_devs[i][iter_count] and vulnerable_agent_id is None:
+                print(f" [!!!] Anomaly detected for agent {i} at timestep: {iter_count}. Taylor Appx. Error: {taylor_approx_error}")
+                vulnerable_agent_id = i
         metric_vals.append([np.mean(result_deques[i]) for i in range(runner.args.N)])
+
+
+        if vulnerable_agent_id is not None:
+            print(f"\n --- Timestep: {iter_count} ------")
+            frob_norms = compute_frob_norms(runner, state, vulnerable_agent_id)
+            # Rank frob_norm values from largest to smallest
+            frob_norms_with_indices = [(i, frob_norms[i]) for i in range(len(frob_norms)) if i != vulnerable_agent_id]
+            frob_norms_ranked = sorted(frob_norms_with_indices, key=lambda x: x[1], reverse=True)
+            print(f" --- Frob norm ranking: {frob_norms_ranked}")
+
+            s_dir_derivatives = compute_2nd_ord_dir_derivatives(runner, state, vulnerable_agent_id)
+            for i in range(runner.args.N):
+                if i == vulnerable_agent_id or s_dir_derivatives[i] >= 0.0:
+                    continue
+                print(f"\t >> Potential Vulnerability for agent {i}. 2nd Dir Derivative: {s_dir_derivatives[i]}")
+        
 
         next_state, reward, done, info = env.step(actions)
         
@@ -161,9 +248,9 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, do_attack: bool, attacked_ag
     return metric_vals
 
 
-def plot_results(results, results_attacked, atk_agent_id, logdir):
-    n = len(results[0])  # number of agents
-    t = len(results)     # number of time steps
+def plot_results(results_attacked, atk_agent_id, ref_means, ref_std_devs, logdir):
+    n = len(results_attacked[0])  # number of agents
+    t = len(results_attacked)     # number of time steps
     
     # Create n subplots in a row
     fig, axes = plt.subplots(1, n, figsize=(4*n, 4))
@@ -177,14 +264,19 @@ def plot_results(results, results_attacked, atk_agent_id, logdir):
         ax = axes[i]
         
         # Extract time series for agent i
-        normal_series = [results[t][i] for t in range(len(results))]
         attacked_series = [results_attacked[t][i] for t in range(len(results_attacked))]
         
         # Plot the curves
-        steps_normal = range(len(normal_series))
-        steps_attacked = range(len(attacked_series))
-        ax.plot(steps_normal, normal_series, 'b-', label='Normal', linewidth=2)
-        ax.plot(steps_attacked, attacked_series, 'r-', label='Attacked', linewidth=2)
+        steps = range(len(attacked_series))
+        
+        # Add green region using ref_means and ref_std_devs
+        ref_steps = range(len(ref_means[i]))
+        ref_lower = [ref_means[i][t] - ref_std_devs[i][t] for t in range(len(ref_means[i]))]
+        ref_upper = [ref_means[i][t] + ref_std_devs[i][t] for t in range(len(ref_means[i]))]
+        ax.fill_between(steps, ref_lower, ref_upper, alpha=0.1, color='green')
+        
+        ax.plot(steps, attacked_series, 'r-', label='Attacked', linewidth=2)
+        ax.plot(steps, ref_means[i], 'g--', label='Mean', linewidth=2)
         
         ax.set_xlabel('Step')
         ax.set_ylabel('Taylor Delta Error')
@@ -196,6 +288,7 @@ def plot_results(results, results_attacked, atk_agent_id, logdir):
     plt.savefig(os.path.join(logdir, f'plot_analysis_attacked_{atk_agent_id}.png'), dpi=300, bbox_inches='tight')
     plt.show()
     print(f"Saved analysis plot to {logdir}")
+
 
 def save_matrix_to_files(matrix, attacked_agent_id, total_agents, logdir, suffix=""):
     """
@@ -239,17 +332,30 @@ def main(runner: Runner_MAPPO_MPE, env, args):
     logdir = os.path.join(cwd, 'runs', f"{args.env_id}_{'discrete' if args.discrete_action else 'continuous'}", timestamp)
     os.makedirs(logdir, exist_ok=True)
     print(f"Logging directory: {logdir}")
-    
-    episode_data_unattacked = get_episode_data(env, runner, False, None)
-    save_matrix_to_files(episode_data_unattacked, None, runner.args.N, logdir)
 
-    episode_data_attacked = get_episode_data(env, runner, True, attacked_agent_id)
+    # Read reference values from CSV files if provided
+    ref_means = [[] for _ in range(runner.args.N)]
+    ref_std_devs = [[] for _ in range(runner.args.N)]
+
+    for agent_id in range(runner.args.N):
+        csv_filename = f"mappo_taylor_error_atk_free_agent_{agent_id}.csv"
+        csv_path = os.path.join(args.ref_val_dir, csv_filename)
+
+        with open(csv_path, 'r') as csvfile:
+            reader = csv.reader(csvfile)
+            next(reader)  # Skip header
+            for row in reader:
+                ref_means[agent_id].append(float(row[2]))
+                ref_std_devs[agent_id].append(float(row[4]))
+    
+    # episode_data_unattacked = get_episode_data(env, runner, False, None)
+    # save_matrix_to_files(episode_data_unattacked, None, runner.args.N, logdir)
+
+    episode_data_attacked = get_episode_data(env, runner, ref_means, ref_std_devs, True, attacked_agent_id)
     save_matrix_to_files(episode_data_attacked, attacked_agent_id, runner.args.N, logdir)
-    
-    env.close()
 
-    # Plot the SO-INRD values for all agents
-    plot_results(episode_data_unattacked, episode_data_attacked, attacked_agent_id, logdir)
+    plot_results(episode_data_attacked, attacked_agent_id, ref_means, ref_std_devs, logdir)
+    env.close()
 
 
 if __name__ == '__main__':    
@@ -290,6 +396,7 @@ if __name__ == '__main__':
     parser.add_argument("--discrete_action", type=bool, default=True, help="Whether the action space is discrete or continuous")
     parser.add_argument("--atk_step_start", type=int, default=-math.inf, help="Attack start step")
     parser.add_argument("--atk_step_end", type=int, default=math.inf, help="Attack end step")
+    parser.add_argument("--ref_val_dir", type=str, required=True, help="Directory to fetch reference value files")
 
     args = parser.parse_args()
     env = make_env(env_name=args.env_id, discrete=True)
