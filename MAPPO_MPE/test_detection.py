@@ -99,7 +99,7 @@ def compute_2nd_ord_dir_derivatives(runner: Runner_MAPPO_MPE, states, vulnerable
     return results
 
 
-def compute_taylor_error_policy(runner: Runner_MAPPO_MPE, states):
+def compute_taylor_error_policy(runner: Runner_MAPPO_MPE, states, epsilon):
     states_tensor = torch.stack([torch.tensor(state, dtype=torch.float32, requires_grad=True) for state in states])
 
     delta_errors = []
@@ -111,7 +111,7 @@ def compute_taylor_error_policy(runner: Runner_MAPPO_MPE, states):
         grad_i = torch.autograd.grad(target_val, obs, create_graph=True, retain_graph=True)[0]
         # grad_i = torch.autograd.grad(critic_val, actions[i], create_graph=True, retain_graph=True)[0]
 
-        eta_i = 0.01 * grad_i.sign() / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
+        eta_i = epsilon * grad_i.sign() / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
         
         # Second-order Taylor expansion using Hessian-vector product (HVP)
         # Instead of computing full Hessian, compute H * eta_i directly
@@ -183,8 +183,15 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_means, ref_std_devs, do_
 
     # initialize deque buffers for last batch_size observations
     result_deques = [deque(maxlen=5) for _ in range(runner.args.N)]
+    frob_norms_deques = [deque(maxlen=1) for _ in range(runner.args.N)]
+    sec_dir_derivatives_deques = [deque(maxlen=1) for _ in range(runner.args.N)]
     metric_vals = []
     vulnerable_agent_id = None
+    attacked_steps = []
+    frob_norms_list = []
+    sec_dir_derivatives = []
+    do_start_attack = False
+    attack_step_remaining = 10
 
     while not all(done):
         # Get actions from the agent (in evaluation mode, training=False)
@@ -199,18 +206,24 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_means, ref_std_devs, do_
             # action space attack
             # if do_attack and id == attacked_agent_id and np.random.rand() < args.attack_rate:
             # if do_attack and id == attacked_agent_id and dist.entropy() < 0.5:
-            if do_attack and id == attacked_agent_id and runner.args.atk_step_start <= iter_count <= runner.args.atk_step_end:
+            if do_attack and id == attacked_agent_id and dist.entropy() < 0.2:
+                do_start_attack = True
+            # if do_attack and id == attacked_agent_id and runner.args.atk_step_start <= iter_count <= runner.args.atk_step_end:
+            if do_start_attack and id == attacked_agent_id and attack_step_remaining > 0:
                 # # random action
                 # action = env.action_space[attacked_agent_id].sample()
                 # worst action attack
                 action = torch.argmin(dist.probs).item()
-                print(" >> attacked")
-            
+                # print(" >> attacked")
+                attacked_steps.append(iter_count)
+                attack_step_remaining -= 1
             
             actions.append(action)
 
         
-        results = compute_taylor_error_policy(runner, state)
+        results = compute_taylor_error_policy(runner, state, 0.01)
+        results_frob_norms = compute_frob_norms(runner, state, attacked_agent_id)
+        results_sec_dir_derivatives = compute_2nd_ord_dir_derivatives(runner, state, attacked_agent_id)
         # results = compute_eigen_policy(runner, state)
         for i in range(runner.args.N):
             result_deques[i].append(results[i])
@@ -218,18 +231,22 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_means, ref_std_devs, do_
             if abs(taylor_approx_error) > ref_means[i][iter_count] + ref_std_devs[i][iter_count] and vulnerable_agent_id is None:
                 print(f" [!!!] Anomaly detected for agent {i} at timestep: {iter_count}. Taylor Appx. Error: {taylor_approx_error}")
                 vulnerable_agent_id = i
-        metric_vals.append([np.mean(result_deques[i]) for i in range(runner.args.N)])
+            frob_norms_deques[i].append(results_frob_norms[i])
+            sec_dir_derivatives_deques[i].append(results_sec_dir_derivatives[i])
 
+        metric_vals.append([np.mean(result_deques[i]) for i in range(runner.args.N)])
+        frob_norms_list.append([np.mean(frob_norms_deques[i]) for i in range(runner.args.N)])
+        sec_dir_derivatives.append([np.mean(sec_dir_derivatives_deques[i]) for i in range(runner.args.N)])
 
         if vulnerable_agent_id is not None:
             print(f"\n --- Timestep: {iter_count} ------")
-            frob_norms = compute_frob_norms(runner, state, vulnerable_agent_id)
+            frob_norms = frob_norms_list[-1]
             # Rank frob_norm values from largest to smallest
             frob_norms_with_indices = [(i, frob_norms[i]) for i in range(len(frob_norms)) if i != vulnerable_agent_id]
             frob_norms_ranked = sorted(frob_norms_with_indices, key=lambda x: x[1], reverse=True)
             print(f" --- Frob norm ranking: {frob_norms_ranked}")
 
-            s_dir_derivatives = compute_2nd_ord_dir_derivatives(runner, state, vulnerable_agent_id)
+            s_dir_derivatives = sec_dir_derivatives[-1]
             for i in range(runner.args.N):
                 if i == vulnerable_agent_id or s_dir_derivatives[i] >= 0.0:
                     continue
@@ -245,10 +262,10 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_means, ref_std_devs, do_
         iter_count += 1
     
     print("Episode finished. Rewards:", episode_reward, " Steps:", iter_count)
-    return metric_vals
+    return metric_vals, attacked_steps, frob_norms_list, sec_dir_derivatives
 
 
-def plot_results(results_attacked, atk_agent_id, ref_means, ref_std_devs, logdir):
+def plot_results(results_attacked, attacked_steps, atk_agent_id, ref_means, ref_std_devs, logdir):
     n = len(results_attacked[0])  # number of agents
     t = len(results_attacked)     # number of time steps
     
@@ -275,8 +292,15 @@ def plot_results(results_attacked, atk_agent_id, ref_means, ref_std_devs, logdir
         ref_upper = [ref_means[i][t] + ref_std_devs[i][t] for t in range(len(ref_means[i]))]
         ax.fill_between(steps, ref_lower, ref_upper, alpha=0.1, color='green')
         
-        ax.plot(steps, attacked_series, 'r-', label='Attacked', linewidth=2)
-        ax.plot(steps, ref_means[i], 'g--', label='Mean', linewidth=2)
+        ax.plot(steps, attacked_series, 'r-', label='Under Attack', linewidth=2)
+        ax.plot(steps, ref_means[i], 'g--', label='Normal (Mean)', linewidth=2)
+        
+        # Mark attacked timesteps with vertical lines
+        if i == atk_agent_id and attacked_steps:
+            for attack_step in attacked_steps:
+                ax.axvline(x=attack_step, color='orange', linestyle=':', alpha=0.5, linewidth=1.5)
+            # Add legend entry for attack markers
+            ax.axvline(x=attacked_steps[0], color='orange', linestyle=':', alpha=0.5, linewidth=1.5, label='Attacked Steps')
         
         ax.set_xlabel('Step')
         ax.set_ylabel('Taylor Delta Error')
@@ -290,7 +314,7 @@ def plot_results(results_attacked, atk_agent_id, ref_means, ref_std_devs, logdir
     print(f"Saved analysis plot to {logdir}")
 
 
-def save_matrix_to_files(matrix, attacked_agent_id, total_agents, logdir, suffix=""):
+def save_matrix_to_files(matrix, attacked_steps, attacked_agent_id, total_agents, logdir, filename):
     """
     Save matrix data to a CSV file for all timesteps.
     
@@ -300,15 +324,11 @@ def save_matrix_to_files(matrix, attacked_agent_id, total_agents, logdir, suffix
         total_agents: Total number of agents
         logdir: Directory to save the file
     """
-    if attacked_agent_id is None:
-        filename = f"maddpg_h_data_atk_free{suffix}.csv"
-    else:
-        filename = f"maddpg_h_data_atk_{attacked_agent_id}{suffix}.csv"
     filepath = os.path.join(logdir, filename)
     
     # Create header row
     # header = ["timestep", "attacked_agent"]
-    header = ["num", "attacked_agent"]
+    header = ["timestep", "is_attacked", "attacked_agent"]
     for i in range(total_agents):
         header.append(f"agent_{i}")
     
@@ -317,7 +337,8 @@ def save_matrix_to_files(matrix, attacked_agent_id, total_agents, logdir, suffix
         writer.writerow(header)
         
         for timestep, timestep_data in enumerate(matrix):
-            row = [timestep, attacked_agent_id]
+            is_attacked = 1 if timestep in attacked_steps else 0
+            row = [timestep, is_attacked, attacked_agent_id]
             for i in range(total_agents):
                 row.append(timestep_data[i])
             writer.writerow(row)
@@ -351,10 +372,12 @@ def main(runner: Runner_MAPPO_MPE, env, args):
     # episode_data_unattacked = get_episode_data(env, runner, False, None)
     # save_matrix_to_files(episode_data_unattacked, None, runner.args.N, logdir)
 
-    episode_data_attacked = get_episode_data(env, runner, ref_means, ref_std_devs, True, attacked_agent_id)
-    save_matrix_to_files(episode_data_attacked, attacked_agent_id, runner.args.N, logdir)
+    results_attacked, attacked_steps, frob_norms_atk, sec_dir_derivatives_atk = get_episode_data(env, runner, ref_means, ref_std_devs, True, attacked_agent_id)
+    save_matrix_to_files(results_attacked, attacked_steps, attacked_agent_id, runner.args.N, logdir, f'mappo_taylor_error_atk_{attacked_agent_id}.csv')
+    save_matrix_to_files(frob_norms_atk, attacked_steps, attacked_agent_id, runner.args.N, logdir, f'mappo_frobenius_norms_atk_{attacked_agent_id}.csv')
+    save_matrix_to_files(sec_dir_derivatives_atk, attacked_steps, attacked_agent_id, runner.args.N, logdir, f'mappo_sec_dir_derivatives_atk_{attacked_agent_id}.csv')
 
-    plot_results(episode_data_attacked, attacked_agent_id, ref_means, ref_std_devs, logdir)
+    plot_results(results_attacked, attacked_steps, attacked_agent_id, ref_means, ref_std_devs, logdir)
     env.close()
 
 

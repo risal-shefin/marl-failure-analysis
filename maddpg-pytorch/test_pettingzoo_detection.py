@@ -93,7 +93,7 @@ def compute_taylor_delta_policy(maddpg, obs, actions, action_spaces, epsilon):
         delta_error = abs(j_perturbed - j_tilde).item()
         delta_errors.append(delta_error)
 
-    return delta_error
+    return delta_errors
 
 def compute_frob_norms(maddpg, obs, actions, action_spaces, vulnerable_agent_id):
     # if not maddpg.discrete_action:
@@ -190,9 +190,16 @@ def get_episode_data(env, maddpg, config, logdir, ref_means, ref_std_devs, do_at
     frames = []
     # initialize deque buffers for last batch_size observations
     result_deques = [deque(maxlen=5) for _ in range(maddpg.nagents)]
+    frob_norms_deques = [deque(maxlen=1) for _ in range(maddpg.nagents)]
+    sec_dir_derivatives_deques = [deque(maxlen=1) for _ in range(maddpg.nagents)]
     metric_vals = []
     cnt = 0
     vulnerable_agent_id = None
+    attacked_steps = []
+    frob_norms_list = []
+    sec_dir_derivatives = []
+    do_start_attack = False
+    attack_step_remaining = 10
 
     while True:
         # add Gaussian noise to an agent's observation
@@ -226,11 +233,14 @@ def get_episode_data(env, maddpg, config, logdir, ref_means, ref_std_devs, do_at
         atk_agent_log_probs = torch.log(atk_agent_action_probs)
         atk_agent_entropy = -torch.sum(atk_agent_action_probs * atk_agent_log_probs)
         # if do_attack and np.random.rand() < 0.75:
-        # if do_attack and atk_agent_entropy < 0.1:
-        if do_attack and cnt >= config.atk_start_step and cnt <= config.atk_end_step:
+        if do_attack and atk_agent_entropy < 0.05:
+            do_start_attack = True
+        # if do_attack and cnt >= config.atk_start_step and cnt <= config.atk_end_step:
+        if do_start_attack and attack_step_remaining > 0:
             assert maddpg.discrete_action, "Worst action attack is only implemented for discrete action spaces."
-            # print(" >> attacked ")
             actions[env.possible_agents[atk_agent_id]] = torch.argmin(action_logits[atk_agent_id]).item()
+            attacked_steps.append(cnt)
+            attack_step_remaining -= 1
 
         if config.save_gifs:
             frames.append(Image.fromarray(env.render()))
@@ -238,27 +248,36 @@ def get_episode_data(env, maddpg, config, logdir, ref_means, ref_std_devs, do_at
         # results = compute_taylor_delta(maddpg, obs, list(actions.values()), env.action_space, 0.1)
         results = compute_taylor_delta_policy(maddpg, obs, list(actions.values()), env.action_space, 0.01)
         # results = compute_eigen(maddpg, obs, list(actions.values()), env.action_space, 0.1)
+        results_frob_norms = compute_frob_norms(maddpg, obs, list(actions.values()), env.action_space, atk_agent_id)
+        results_sec_dir_derivatives = compute_2nd_ord_dir_derivatives(maddpg, obs, list(actions.values()), env.action_space, atk_agent_id)
+
         for i in range(maddpg.nagents):
             result_deques[i].append(results[i])
             taylor_approx_error = np.mean(result_deques[i])
             if not (ref_means[i][cnt] - ref_std_devs[i][cnt] <= taylor_approx_error <= ref_means[i][cnt] + ref_std_devs[i][cnt]) and vulnerable_agent_id is None:
                 print(f" [!!!] Anomaly detected for agent {i} at timestep: {cnt}. Taylor Appx. Error: {taylor_approx_error}")
                 vulnerable_agent_id = i
+            frob_norms_deques[i].append(results_frob_norms[i])
+            sec_dir_derivatives_deques[i].append(results_sec_dir_derivatives[i])
+
         metric_vals.append([np.mean(result_deques[i]) for i in range(maddpg.nagents)])
+        frob_norms_list.append([np.mean(frob_norms_deques[i]) for i in range(maddpg.nagents)])
+        sec_dir_derivatives.append([np.mean(sec_dir_derivatives_deques[i]) for i in range(maddpg.nagents)])
 
         if vulnerable_agent_id is not None:
             print(f"\n --- Timestep: {cnt} ------")
-            frob_norms = compute_frob_norms(maddpg, obs, list(actions.values()), env.action_space, vulnerable_agent_id)
+            frob_norms = frob_norms_list[-1]
             # Rank frob_norm values from largest to smallest
             frob_norms_with_indices = [(i, frob_norms[i]) for i in range(len(frob_norms)) if i != vulnerable_agent_id]
             frob_norms_ranked = sorted(frob_norms_with_indices, key=lambda x: x[1], reverse=True)
             print(f" --- Frob norm ranking: {frob_norms_ranked}")
 
-            s_dir_derivatives = compute_2nd_ord_dir_derivatives(maddpg, obs, list(actions.values()), env.action_space, vulnerable_agent_id)
+            s_dir_derivatives = sec_dir_derivatives[-1]
+
             for i in range(maddpg.nagents):
                 if i == vulnerable_agent_id or s_dir_derivatives[i] >= 0.0:
                     continue
-                print(f" >> Cascading anomaly detected for agent {i}. 2nd Dir Derivative: {s_dir_derivatives[i]}")
+                print(f" >> Potential Vulnerable Position for agent {i} wrt faulty agent. 2nd Dir Derivative: {s_dir_derivatives[i]}")
 
         next_obs, rewards, dones, infos = env.step(actions)
         episode_reward += np.sum([rewards[:,i] if env.agent_types[i] != 'adversary' else np.zeros_like(rewards[:,i]) for i in range(maddpg.nagents)])
@@ -275,10 +294,10 @@ def get_episode_data(env, maddpg, config, logdir, ref_means, ref_std_devs, do_at
         imageio.mimsave(os.path.join(logdir, f'{config.env_id}_episode_atk_{atk_agent_id if do_attack else "free"}.gif'), frames, duration=125)
         print(f"Saved gif of episode to {logdir}")
 
-    return metric_vals
+    return metric_vals, attacked_steps, frob_norms_list, sec_dir_derivatives
 
 
-def plot_results(results_attacked, atk_agent_id, ref_means, ref_std_devs, logdir):
+def plot_results(results_attacked, attacked_steps, atk_agent_id, ref_means, ref_std_devs, logdir):
     n = len(results_attacked[0])  # number of agents
     t = len(results_attacked)     # number of time steps
     
@@ -305,8 +324,15 @@ def plot_results(results_attacked, atk_agent_id, ref_means, ref_std_devs, logdir
         ref_upper = [ref_means[i][t] + ref_std_devs[i][t] for t in range(len(ref_means[i]))]
         ax.fill_between(steps, ref_lower, ref_upper, alpha=0.1, color='green')
         
-        ax.plot(steps, attacked_series, 'r-', label='Attacked', linewidth=2)
-        ax.plot(steps, ref_means[i], 'g--', label='Mean', linewidth=2)
+        ax.plot(steps, attacked_series, 'r-', label='Under Attack', linewidth=2)
+        ax.plot(steps, ref_means[i], 'g--', label='Normal (Mean)', linewidth=2)
+        
+        # Mark attacked timesteps with vertical lines
+        if i == atk_agent_id and attacked_steps:
+            for attack_step in attacked_steps:
+                ax.axvline(x=attack_step, color='orange', linestyle=':', alpha=0.5, linewidth=1.5)
+            # Add legend entry for attack markers
+            ax.axvline(x=attacked_steps[0], color='orange', linestyle=':', alpha=0.5, linewidth=1.5, label='Attacked Steps')
         
         ax.set_xlabel('Step')
         ax.set_ylabel('Taylor Delta Error')
@@ -319,7 +345,99 @@ def plot_results(results_attacked, atk_agent_id, ref_means, ref_std_devs, logdir
     plt.show()
     print(f"Saved analysis plot to {logdir}")
 
-def save_matrix_to_files(matrix, attacked_agent_id, total_agents, logdir, suffix=""):
+
+def plot_frobs(frobs_normal, frobs_atk, attacked_steps, atk_agent_id, logdir):
+    n = len(frobs_normal[0])  # number of agents
+    t = len(frobs_normal)     # number of time steps
+    
+    # Create n subplots in a row
+    fig, axes = plt.subplots(1, n, figsize=(4*n, 4))
+    fig.suptitle(f'Frobenius Norms (Worst Action Attack | Attacked Agent ID: {atk_agent_id})', fontsize=16, y=0.95)
+    
+    # Ensure axes is iterable even for single agent case
+    if n == 1:
+        axes = [axes]
+    
+    for i in range(n):
+        ax = axes[i]
+        
+        # Extract time series for agent i
+        normal_series = [frobs_normal[t][i] for t in range(len(frobs_normal))]
+        attacked_series = [frobs_atk[t][i] for t in range(len(frobs_atk))]
+        
+        # Plot the curves
+        steps = range(len(normal_series))
+        ax.plot(steps, attacked_series, 'r-', label='Under Attack', linewidth=2)
+        ax.plot(steps, normal_series, 'g-', label='Normal', linewidth=2)
+        
+        # Mark attacked timesteps with vertical lines
+        if attacked_steps:
+            for attack_step in attacked_steps:
+                ax.axvline(x=attack_step, color='orange', linestyle=':', alpha=0.5, linewidth=1.5)
+            # Add legend entry for attack markers
+            ax.axvline(x=attacked_steps[0], color='orange', linestyle=':', alpha=0.5, linewidth=1.5, label='Attacked Steps')
+        
+        ax.set_xlabel('Step')
+        ax.set_ylabel('Frobenius Norm')
+        ax.set_title(f'Agent {i}')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
+    plt.savefig(os.path.join(logdir, f'plot_frobs_attacked_{atk_agent_id}.png'), dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved frobenius norms plot to {logdir}")
+
+
+def plot_sec_dir_derivatives(s_dir_derv_normal, s_dir_derv_atk, attacked_steps, atk_agent_id, logdir):
+    n = len(s_dir_derv_normal[0])  # number of agents
+    t = len(s_dir_derv_normal)     # number of time steps
+    
+    # Create n subplots in a row
+    fig, axes = plt.subplots(1, n, figsize=(4*n, 4))
+    fig.suptitle(f'2nd Ord. Dir. Derivatives (Worst Action Attack | Attacked Agent ID: {atk_agent_id})', fontsize=16, y=0.95)
+    
+    # Ensure axes is iterable even for single agent case
+    if n == 1:
+        axes = [axes]
+    
+    for i in range(n):
+        ax = axes[i]
+        
+        # Extract time series for agent i
+        normal_series = [s_dir_derv_normal[t][i] for t in range(len(s_dir_derv_normal))]
+        attacked_series = [s_dir_derv_atk[t][i] for t in range(len(s_dir_derv_atk))]
+        
+        # Plot the curves
+        steps = range(len(normal_series))
+        # ax.plot(steps, normal_series, 'g-', label='Normal', linewidth=2)
+        ax.plot(steps, attacked_series, 'r-', label='Under Attack', linewidth=2)
+        
+        # Highlight region under y < 0 in red
+        y_min = min(min(normal_series), min(attacked_series))
+        if y_min < 0:
+            ax.axhspan(y_min * 1.1, 0, alpha=0.2, color='red')
+        
+        # Mark attacked timesteps with vertical lines
+        if attacked_steps:
+            for attack_step in attacked_steps:
+                ax.axvline(x=attack_step, color='orange', linestyle=':', alpha=0.5, linewidth=1.5)
+            # Add legend entry for attack markers
+            ax.axvline(x=attacked_steps[0], color='orange', linestyle=':', alpha=0.5, linewidth=1.5, label='Attacked Steps')
+        
+        ax.set_xlabel('Step')
+        ax.set_ylabel('2nd Ord. Dir. Derivative')
+        ax.set_title(f'Agent {i}')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
+    plt.savefig(os.path.join(logdir, f'plot_sec_dir_derivatives_attacked_{atk_agent_id}.png'), dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved 2nd ord. dir. derivatives plot to {logdir}")
+
+
+def save_matrix_to_files(matrix, attacked_steps, attacked_agent_id, total_agents, logdir, filename):
     """
     Save matrix data to a CSV file for all timesteps.
     
@@ -329,15 +447,11 @@ def save_matrix_to_files(matrix, attacked_agent_id, total_agents, logdir, suffix
         total_agents: Total number of agents
         logdir: Directory to save the file
     """
-    if attacked_agent_id is None:
-        filename = f"maddpg_h_data_atk_free{suffix}.csv"
-    else:
-        filename = f"maddpg_h_data_atk_{attacked_agent_id}{suffix}.csv"
     filepath = os.path.join(logdir, filename)
     
     # Create header row
     # header = ["timestep", "attacked_agent"]
-    header = ["num", "attacked_agent"]
+    header = ["timestep", "is_attacked", "attacked_agent"]
     for i in range(total_agents):
         header.append(f"agent_{i}")
     
@@ -346,7 +460,8 @@ def save_matrix_to_files(matrix, attacked_agent_id, total_agents, logdir, suffix
         writer.writerow(header)
         
         for timestep, timestep_data in enumerate(matrix):
-            row = [timestep, attacked_agent_id]
+            is_attacked = 1 if timestep in attacked_steps else 0
+            row = [timestep, is_attacked, attacked_agent_id]
             for i in range(total_agents):
                 row.append(timestep_data[i])
             writer.writerow(row)
@@ -399,10 +514,16 @@ def run(config):
     attacked_agent_id = config.attack_agent_id  # specify the agent to attack
     seed = 42
 
-    results_attacked = get_episode_data(env, maddpg, config, logdir, ref_means, ref_std_devs, do_attack=True, atk_agent_id=attacked_agent_id, seed=seed)
-    save_matrix_to_files(results_attacked, attacked_agent_id, maddpg.nagents, logdir)
+    results_normal, _, frob_norms_normal, sec_dir_derivatives_normal = get_episode_data(env, maddpg, config, logdir, ref_means, ref_std_devs, do_attack=False, atk_agent_id=attacked_agent_id, seed=seed)
 
-    plot_results(results_attacked, attacked_agent_id, ref_means, ref_std_devs, logdir)
+    results_attacked, attacked_steps, frob_norms_atk, sec_dir_derivatives_atk = get_episode_data(env, maddpg, config, logdir, ref_means, ref_std_devs, do_attack=True, atk_agent_id=attacked_agent_id, seed=seed)
+    save_matrix_to_files(results_attacked, attacked_steps, attacked_agent_id, maddpg.nagents, logdir, f'maddpg_taylor_error_atk_{attacked_agent_id}.csv')
+    save_matrix_to_files(frob_norms_atk, attacked_steps, attacked_agent_id, maddpg.nagents, logdir, f'maddpg_frobenius_norms_atk_{attacked_agent_id}.csv')
+    save_matrix_to_files(sec_dir_derivatives_atk, attacked_steps, attacked_agent_id, maddpg.nagents, logdir, f'maddpg_sec_dir_derivatives_atk_{attacked_agent_id}.csv')
+
+    plot_results(results_attacked, attacked_steps, attacked_agent_id, ref_means, ref_std_devs, logdir)
+    plot_frobs(frob_norms_normal, frob_norms_atk, attacked_steps, attacked_agent_id, logdir)
+    plot_sec_dir_derivatives(sec_dir_derivatives_normal, sec_dir_derivatives_atk, attacked_steps, attacked_agent_id, logdir)
     env.close()
 
 if __name__ == '__main__':
