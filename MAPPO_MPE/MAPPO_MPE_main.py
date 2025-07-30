@@ -9,6 +9,7 @@ from mappo_mpe import MAPPO_MPE
 from make_env_pettingzoo import make_env
 from gym.spaces import Box, Discrete
 from gymnasium.spaces import Box, Discrete
+from datetime import datetime
 
 
 class Runner_MAPPO_MPE:
@@ -58,7 +59,7 @@ class Runner_MAPPO_MPE:
         print("action_dim_n={}".format(self.args.action_dim_n), flush=True)
 
         # Setup output directory structure
-        self.output_dir = self.args.output_dir
+        self.output_dir = os.path.join(args.output_dir, f"train_{env_name}_{datetime.now().strftime('%Y%m%d-%H%M%S')}")
         self.data_dir = os.path.join(self.output_dir, 'data')
         self.model_dir = os.path.join(self.output_dir, 'models')
         self.tensorboard_dir = os.path.join(self.output_dir, 'tensorboard')
@@ -133,15 +134,14 @@ class Runner_MAPPO_MPE:
             print(f"New best reward: {self.best_eval_reward:.2f} (improved by {improvement:.2f})! Saving model...", flush=True)
             
             try:
-                self.save_best_model()
-                print(f"Best model successfully saved at step {self.total_steps}", flush=True)
+                self.save_best_model(evaluate_reward)
             except Exception as e:
                 print(f"Error saving model: {e}", flush=True)
-    
-    def save_best_model(self):
+
+    def save_best_model(self, score):
         """Save the model with the best performance."""
         model_path = os.path.join(self.model_dir, 
-                                  f'MAPPO_env_{self.env_name}_number_{self.number}_seed_{self.seed}_best.pt')
+                                  f'MAPPO_seed_{self.seed}_score_{score:.2f}.pt')
         
         model_data = {
             'actor_state_dict': self.agent_n.actor.state_dict(),
@@ -151,6 +151,7 @@ class Runner_MAPPO_MPE:
         }
         
         torch.save(model_data, model_path)
+        print(f"Best model successfully saved at step {self.total_steps} at {model_path}", flush=True)
 
     def run_episode_mpe(self, evaluate=False):
         total_reward = 0
@@ -229,8 +230,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser("Hyperparameters Setting for MAPPO in MPE environment")
     parser.add_argument("--max_train_steps", type=int, default=int(3e6), help="Maximum number of training steps")
     parser.add_argument("--episode_limit", type=int, default=25, help="Maximum number of steps per episode")
-    parser.add_argument("--evaluate_freq", type=float, default=5000, help="Evaluate the policy every 'evaluate_freq' steps")
-    parser.add_argument("--evaluate_times", type=float, default=3, help="Evaluate times")
+    parser.add_argument("--evaluate_freq", type=int, default=5000, help="Evaluate the policy every 'evaluate_freq' steps")
+    parser.add_argument("--evaluate_times", type=int, default=3, help="Evaluate times")
 
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size (the number of episodes)")
     parser.add_argument("--mini_batch_size", type=int, default=8, help="Minibatch size (the number of episodes)")
@@ -255,7 +256,7 @@ if __name__ == '__main__':
     parser.add_argument("--use_value_clip", type=float, default=False, help="Whether to use value clip.")
     
     # Add output directory argument
-    parser.add_argument("--output_dir", type=str, default="./results", help="Directory to save all output files")
+    parser.add_argument("--output_dir", type=str, default="./runs", help="Directory to save all output files")
 
     args = parser.parse_args()
     runner = Runner_MAPPO_MPE(args, env_name="simple_spread_v3", number=1, seed=0)

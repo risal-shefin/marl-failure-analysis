@@ -20,8 +20,12 @@ module load nvidia/cuda11/cudnn/8.7.0.84
 cd /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/.mujoco/mujoco210/bin:/usr/lib/nvidia
 
+python MAPPO_MPE_main.py --evaluate_freq 1 --evaluate_times 5
+
 # TESTING COMMANDS
-python test_detection.py --attack_agent_id=2 --atk_step_start=0 --atk_step_end=10
-python test_cross_agent.py --attacked_agent_id=2 --atk_step_start=0 --atk_step_end=10
+# python test_detection.py --attack_agent_id=2 --atk_step_start=0 --atk_step_end=10
+# python test_cross_agent.py --attacked_agent_id=2 --atk_step_start=0 --atk_step_end=10
+
+# python test_detection.py --attack_agent_id=2 --ref_val_dir /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE/data/simple_spread/20250724-233738_ref_taylor_error
 
 exit 0
