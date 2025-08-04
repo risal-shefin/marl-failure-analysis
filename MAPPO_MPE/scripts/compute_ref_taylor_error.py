@@ -176,14 +176,15 @@ if __name__ == '__main__':
     # Add output directory argument
     parser.add_argument("--output_dir", type=str, default="./results", help="Directory to save all output files")
     parser.add_argument("--env_id", type=str, default="simple_spread_v3", help="Environment ID")
-    parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducibility")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--discrete_action", type=bool, default=True, help="Whether the action space is discrete or continuous")
+    parser.add_argument("--model_dir", type=str, required=True, help="Directory from load the trained model")
 
     args = parser.parse_args()
     env = make_env(env_name=args.env_id, discrete=True)
     runner = Runner_MAPPO_MPE(args, env_name=args.env_id, number=1, seed=args.seed)
-    
-    runner.agent_n.load_model_from_directory("/deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE/model/MAPPO_actor_env_simple_spread_number_1_seed_0_step_1215k.pth")
+
+    runner.agent_n.load_model_from_directory(args.model_dir)
     main(runner, env, args)
     # runner = Runner_MAPPO_MPE(args, env_name="simple_spread_v3", number=1, seed=0)
     # runner.run()
