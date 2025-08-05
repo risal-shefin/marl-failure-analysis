@@ -91,8 +91,8 @@ def compute_2nd_ord_dir_derivatives(runner: Runner_MAPPO_MPE, states, vulnerable
         )[0]
 
         # Compute u^T * H * v (quadratic form)
-        grad_j = torch.autograd.grad(-values[i], states_tensors[vulnerable_agent_id], create_graph=True, retain_graph=True)[0]
-        u = grad_j / torch.max(grad_j.norm(p=2), torch.tensor(1e-6))
+        grad_j = torch.autograd.grad(values[i], states_tensors[vulnerable_agent_id], create_graph=True, retain_graph=True)[0]
+        u = -grad_j / torch.max(grad_j.norm(p=2), torch.tensor(1e-6))
         curvature_val = torch.dot(u.flatten(), hvp.flatten())
         results.append(curvature_val.item())
 
@@ -183,8 +183,8 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_means, ref_std_devs, do_
 
     # initialize deque buffers for last batch_size observations
     result_deques = [deque(maxlen=5) for _ in range(runner.args.N)]
-    frob_norms_deques = [deque(maxlen=1) for _ in range(runner.args.N)]
-    sec_dir_derivatives_deques = [deque(maxlen=1) for _ in range(runner.args.N)]
+    frob_norms_deques = [deque(maxlen=5) for _ in range(runner.args.N)]
+    sec_dir_derivatives_deques = [deque(maxlen=5) for _ in range(runner.args.N)]
     metric_vals = []
     vulnerable_agent_id = None
     attacked_steps = []
@@ -206,7 +206,7 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_means, ref_std_devs, do_
             # action space attack
             # if do_attack and id == attacked_agent_id and np.random.rand() < args.attack_rate:
             # if do_attack and id == attacked_agent_id and dist.entropy() < 0.5:
-            if do_attack and id == attacked_agent_id and dist.entropy() < 0.2:
+            if do_attack and id == attacked_agent_id and dist.entropy() < 0.05:
                 do_start_attack = True
             # if do_attack and id == attacked_agent_id and runner.args.atk_step_start <= iter_count <= runner.args.atk_step_end:
             if do_start_attack and id == attacked_agent_id and attack_step_remaining > 0:
@@ -313,6 +313,103 @@ def plot_results(results_attacked, attacked_steps, atk_agent_id, ref_means, ref_
     plt.show()
     print(f"Saved analysis plot to {logdir}")
 
+def plot_frobs(frobs_normal, frobs_atk, attacked_steps, atk_agent_id, logdir):
+    n = len(frobs_normal[0])  # number of agents
+    t = len(frobs_normal)     # number of time steps
+    
+    # Create n subplots in a row
+    fig, axes = plt.subplots(1, n, figsize=(4*n, 4))
+    fig.suptitle(f'Frobenius Norms (Worst Action Attack | Attacked Agent ID: {atk_agent_id})', fontsize=16, y=0.95)
+    
+    # Ensure axes is iterable even for single agent case
+    if n == 1:
+        axes = [axes]
+    
+    for i in range(n):
+        ax = axes[i]
+        
+        # Extract time series for agent i
+        normal_series = [frobs_normal[t][i] for t in range(len(frobs_normal))]
+        attacked_series = [frobs_atk[t][i] for t in range(len(frobs_atk))]
+        
+        # Plot the curves
+        steps = range(len(normal_series))
+        ax.plot(steps, attacked_series, 'r-', label='Under Attack', linewidth=2)
+        ax.plot(steps, normal_series, 'g-', label='Normal', linewidth=2)
+        
+        # Mark attacked timesteps with vertical lines
+        if attacked_steps:
+            for attack_step in attacked_steps:
+                ax.axvline(x=attack_step, color='orange', linestyle=':', alpha=0.5, linewidth=1.5)
+            # Add legend entry for attack markers
+            ax.axvline(x=attacked_steps[0], color='orange', linestyle=':', alpha=0.5, linewidth=1.5, label='Attacked Steps')
+        
+        ax.set_xlabel('Step')
+        ax.set_ylabel('Frobenius Norm')
+        ax.set_title(f'Agent {i}')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
+    plt.savefig(os.path.join(logdir, f'plot_frobs_attacked_{atk_agent_id}.png'), dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved frobenius norms plot to {logdir}")
+
+
+def plot_sec_dir_derivatives(s_dir_derv_normal, s_dir_derv_atk, attacked_steps, atk_agent_id, ref_means, ref_std_devs, logdir):
+    n = len(s_dir_derv_normal[0])  # number of agents
+    t = len(s_dir_derv_normal)     # number of time steps
+    
+    # Create n subplots in a row
+    fig, axes = plt.subplots(1, n, figsize=(4*n, 4))
+    fig.suptitle(f'2nd Ord. Dir. Derivatives (Worst Action Attack | Attacked Agent ID: {atk_agent_id})', fontsize=16, y=0.95)
+    
+    # Ensure axes is iterable even for single agent case
+    if n == 1:
+        axes = [axes]
+    
+    for i in range(n):
+        ax = axes[i]
+        
+        # Extract time series for agent i
+        normal_series = [s_dir_derv_normal[t][i] for t in range(len(s_dir_derv_normal))]
+        attacked_series = [s_dir_derv_atk[t][i] for t in range(len(s_dir_derv_atk))]
+        
+        # Plot the curves
+        steps = range(len(normal_series))
+
+        # ref_lower = [ref_means[i][t] - ref_std_devs[i][t] for t in range(len(ref_means[i]))]
+        # ref_upper = [ref_means[i][t] + ref_std_devs[i][t] for t in range(len(ref_means[i]))]
+        ref_lower = ref_means[i]
+        ref_upper = ref_std_devs[i]
+        ax.fill_between(steps, ref_lower, ref_upper, alpha=0.1, color='green')
+        
+        ax.plot(steps, attacked_series, 'r-', label='Under Attack', linewidth=2)
+        ax.plot(steps, normal_series, 'g-', label='Normal', linewidth=2)
+        ax.plot(steps, ref_means[i], 'g--', label='Normal (Mean)', linewidth=2)
+        
+        # Highlight region under y < 0 in red
+        y_min = min(min(normal_series), min(attacked_series))
+        # if y_min < 0:
+        #     ax.axhspan(y_min * 1.1, 0, alpha=0.2, color='red')
+        
+        # Mark attacked timesteps with vertical lines
+        if attacked_steps:
+            for attack_step in attacked_steps:
+                ax.axvline(x=attack_step, color='orange', linestyle=':', alpha=0.5, linewidth=1.5)
+            # Add legend entry for attack markers
+            ax.axvline(x=attacked_steps[0], color='orange', linestyle=':', alpha=0.5, linewidth=1.5, label='Attacked Steps')
+        
+        ax.set_xlabel('Step')
+        ax.set_ylabel('2nd Ord. Dir. Derivative')
+        ax.set_title(f'Agent {i}')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
+    plt.savefig(os.path.join(logdir, f'plot_sec_dir_derivatives_attacked_{atk_agent_id}.png'), dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved 2nd ord. dir. derivatives plot to {logdir}")
 
 def save_matrix_to_files(matrix, attacked_steps, attacked_agent_id, total_agents, logdir, filename):
     """
@@ -372,12 +469,16 @@ def main(runner: Runner_MAPPO_MPE, env, args):
     # episode_data_unattacked = get_episode_data(env, runner, False, None)
     # save_matrix_to_files(episode_data_unattacked, None, runner.args.N, logdir)
 
+    results_normal, _, frob_norms_normal, sec_dir_derivatives_normal = get_episode_data(env, runner, ref_means, ref_std_devs, False, attacked_agent_id)
+
     results_attacked, attacked_steps, frob_norms_atk, sec_dir_derivatives_atk = get_episode_data(env, runner, ref_means, ref_std_devs, True, attacked_agent_id)
     save_matrix_to_files(results_attacked, attacked_steps, attacked_agent_id, runner.args.N, logdir, f'mappo_taylor_error_atk_{attacked_agent_id}.csv')
     save_matrix_to_files(frob_norms_atk, attacked_steps, attacked_agent_id, runner.args.N, logdir, f'mappo_frobenius_norms_atk_{attacked_agent_id}.csv')
     save_matrix_to_files(sec_dir_derivatives_atk, attacked_steps, attacked_agent_id, runner.args.N, logdir, f'mappo_sec_dir_derivatives_atk_{attacked_agent_id}.csv')
 
     plot_results(results_attacked, attacked_steps, attacked_agent_id, ref_means, ref_std_devs, logdir)
+    plot_frobs(frob_norms_normal, frob_norms_atk, attacked_steps, attacked_agent_id, logdir)
+    plot_sec_dir_derivatives(sec_dir_derivatives_normal, sec_dir_derivatives_atk, attacked_steps, attacked_agent_id, ref_sdd_means, ref_sdd_std_devs, logdir)
     env.close()
 
 
@@ -419,13 +520,16 @@ if __name__ == '__main__':
     parser.add_argument("--discrete_action", type=bool, default=True, help="Whether the action space is discrete or continuous")
     parser.add_argument("--atk_step_start", type=int, default=-math.inf, help="Attack start step")
     parser.add_argument("--atk_step_end", type=int, default=math.inf, help="Attack end step")
+    parser.add_argument("--model_dir", type=str, required=True, help="Directory from load the trained model")
     parser.add_argument("--ref_val_dir", type=str, required=True, help="Directory to fetch reference value files")
 
     args = parser.parse_args()
     env = make_env(env_name=args.env_id, discrete=True)
     runner = Runner_MAPPO_MPE(args, env_name=args.env_id, number=1, seed=args.seed)
     
-    runner.agent_n.load_model_from_directory("/deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE/model/MAPPO_actor_env_simple_spread_number_1_seed_0_step_1215k.pth")
+    # runner.agent_n.load_model_from_directory("/deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE/model/MAPPO_actor_env_simple_spread_number_1_seed_0_step_1215k.pth")
+    # runner.agent_n.load_model_from_directory("/deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE/runs/train_simple_spread_v3_20250729-203446/models/MAPPO_seed_0_score_-30.94.pt")
+    runner.agent_n.load_model_from_directory(args.model_dir)
     main(runner, env, args)
     # runner = Runner_MAPPO_MPE(args, env_name="simple_spread_v3", number=1, seed=0)
     # runner.run()
