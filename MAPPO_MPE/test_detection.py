@@ -62,8 +62,45 @@ def compute_frob_norms(runner: Runner_MAPPO_MPE, states, vulnerable_agent_id):
         # Convert to tensor and compute eigenvalues
         H = torch.stack(hessian_matrix)
 
-        # Frobenius norm of the Hessian matrix
-        results.append(H.norm(p='fro').item()) 
+        # eigenvals = torch.linalg.eigvals(H)
+        # eigenval = torch.max(eigenvals.real).item()
+        # results.append(eigenval)
+        # # results.append(torch.trace(H).item())  # Trace of the Hessian matrix
+        # continue
+        # # Compute Frobenius norm of the Hessian matrix
+        results.append(H.norm(p='fro').item())
+
+    return results
+
+def compute_pairwise_frob_norms(runner: Runner_MAPPO_MPE, states):
+    """
+    Compute Frobenius norms of cross-agent Hessian blocks for all (i, j).
+    Returns an N x N list where entry [i][j] approximates || \partial^2 v_i / (\partial obs_i \partial obs_j) ||_F.
+    """
+    states_tensors = [torch.tensor(state, dtype=torch.float32, requires_grad=True) for state in states]
+    states_tensor = torch.cat(states_tensors, dim=0)
+    values = runner.agent_n.compute_value(states_tensor).squeeze(-1)  # shape: (N,)
+
+    N = runner.args.N
+    results = [[0.0 for _ in range(N)] for _ in range(N)]
+
+    for i in range(N):
+        # Gradient wrt agent i's observation
+        grad_i = torch.autograd.grad(values[i], states_tensors[i], create_graph=True, retain_graph=True)[0]
+
+        for j in range(N):
+            hessian_matrix = []
+            for k in range(grad_i.shape[0]):
+                second_grad = torch.autograd.grad(
+                    grad_i[k],
+                    states_tensors[j],
+                    retain_graph=True,
+                    allow_unused=True
+                )[0]
+                hessian_matrix.append(second_grad.flatten())
+
+            H = torch.stack(hessian_matrix)
+            results[i][j] = H.norm(p='fro').item()
 
     return results
 
@@ -91,6 +128,7 @@ def compute_2nd_ord_dir_derivatives(runner: Runner_MAPPO_MPE, states, vulnerable
         )[0]
 
         # Compute u^T * H * v (quadratic form)
+        # grad_j = torch.autograd.grad(values[i], states_tensors[vulnerable_agent_id], create_graph=True, retain_graph=True)[0]
         grad_j = torch.autograd.grad(values[i], states_tensors[vulnerable_agent_id], create_graph=True, retain_graph=True)[0]
         u = -grad_j / torch.max(grad_j.norm(p=2), torch.tensor(1e-6))
         curvature_val = torch.dot(u.flatten(), hvp.flatten())
@@ -100,12 +138,14 @@ def compute_2nd_ord_dir_derivatives(runner: Runner_MAPPO_MPE, states, vulnerable
 
 
 def compute_taylor_error_policy(runner: Runner_MAPPO_MPE, states, epsilon):
-    states_tensor = torch.stack([torch.tensor(state, dtype=torch.float32, requires_grad=True) for state in states])
+    states_tensors = [torch.tensor(state, dtype=torch.float32, requires_grad=True) for state in states]
+    states_tensor = torch.cat(states_tensors, dim=0)
+    values = runner.agent_n.compute_value(states_tensor).squeeze(-1)  # shape: (N,)
 
     delta_errors = []
 
     for i in range(runner.args.N):
-        obs = states_tensor[i].unsqueeze(0)  # shape: (1, obs_dim)
+        obs = states_tensors[i].unsqueeze(0)  # shape: (1, obs_dim)
         action, dist = runner.agent_n.compute_action(obs, i, evaluate=True, return_dist=True)
         target_val = dist.log_prob(action)
         grad_i = torch.autograd.grad(target_val, obs, create_graph=True, retain_graph=True)[0]
@@ -191,7 +231,12 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_means, ref_std_devs, do_
     frob_norms_list = []
     sec_dir_derivatives = []
     do_start_attack = False
-    attack_step_remaining = 10
+    attack_step_remaining = 15
+
+    # Fault detection tracking
+    fault_first_detected = {}  # agent_id -> timestep first detected
+    fault_timeline = []  # list of dicts: {agent, t, contribs: {f: c}}
+    frob_norms_matrix_history = []  # list over timesteps of N x N frob norm matrices
 
     while not all(done):
         # Get actions from the agent (in evaluation mode, training=False)
@@ -206,7 +251,7 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_means, ref_std_devs, do_
             # action space attack
             # if do_attack and id == attacked_agent_id and np.random.rand() < args.attack_rate:
             # if do_attack and id == attacked_agent_id and dist.entropy() < 0.5:
-            if do_attack and id == attacked_agent_id and dist.entropy() < 0.05:
+            if do_attack and id == attacked_agent_id and dist.entropy() < 0.5 and iter_count >= 5:
                 do_start_attack = True
             # if do_attack and id == attacked_agent_id and runner.args.atk_step_start <= iter_count <= runner.args.atk_step_end:
             if do_start_attack and id == attacked_agent_id and attack_step_remaining > 0:
@@ -217,19 +262,41 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_means, ref_std_devs, do_
                 # print(" >> attacked")
                 attacked_steps.append(iter_count)
                 attack_step_remaining -= 1
-            
+            # if id > 2 and iter_count >= 3:
+            #     action = torch.argmin(dist.probs).item()
             actions.append(action)
 
-        
         results = compute_taylor_error_policy(runner, state, 0.01)
         results_frob_norms = compute_frob_norms(runner, state, attacked_agent_id)
+        # Pairwise Frobenius norms across all agent pairs for cascading impact analysis
+        pairwise_frobs = compute_pairwise_frob_norms(runner, state)
+        frob_norms_matrix_history.append(pairwise_frobs)
         results_sec_dir_derivatives = compute_2nd_ord_dir_derivatives(runner, state, attacked_agent_id)
         # results = compute_eigen_policy(runner, state)
         for i in range(runner.args.N):
             result_deques[i].append(results[i])
             taylor_approx_error = np.mean(result_deques[i])
-            if abs(taylor_approx_error) > ref_means[i][iter_count] + ref_std_devs[i][iter_count] and vulnerable_agent_id is None:
-                print(f" [!!!] Anomaly detected for agent {i} at timestep: {iter_count}. Taylor Appx. Error: {taylor_approx_error}")
+            if abs(taylor_approx_error - ref_means[i][iter_count]) > 1.5*ref_std_devs[i][iter_count]:
+                if i not in fault_first_detected:
+                    print(f" [!!!] Anomaly detected for agent {i} at timestep: {iter_count}. Taylor Appx. Error: {taylor_approx_error}")
+                    fault_first_detected[i] = iter_count
+                    # Cascading Impact Analysis
+                    prev_faults = [(f, tf) for f, tf in fault_first_detected.items() if f != i and tf < iter_count]
+                    contribs = {}
+                    if len(prev_faults) > 0:
+                        for f, tf in prev_faults:
+                            # Mean Frobenius norm from t_f to current t for H_{i,f}
+                            values_over_time = [frob_norms_matrix_history[tau][i][f] for tau in range(tf, iter_count + 1) if tau < len(frob_norms_matrix_history)]
+                            if len(values_over_time) > 0:
+                                contribs[f] = float(np.mean(values_over_time))
+                        if len(contribs) > 0:
+                            ranked = sorted(contribs.items(), key=lambda x: x[1], reverse=True)
+                            print(f"     >> Potential contributors to fault in agent {i} (mean ||H_{{i,f}}||_F from t_f to {iter_count}): {ranked}")
+                    fault_timeline.append({
+                        'agent': i,
+                        't': iter_count,
+                        'contribs': contribs
+                    })
                 vulnerable_agent_id = i
             frob_norms_deques[i].append(results_frob_norms[i])
             sec_dir_derivatives_deques[i].append(results_sec_dir_derivatives[i])
@@ -251,7 +318,6 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_means, ref_std_devs, do_
                 if i == vulnerable_agent_id or s_dir_derivatives[i] >= 0.0:
                     continue
                 print(f"\t >> Potential Vulnerability for agent {i}. 2nd Dir Derivative: {s_dir_derivatives[i]}")
-        
 
         next_state, reward, done, info = env.step(actions)
         
@@ -262,7 +328,7 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_means, ref_std_devs, do_
         iter_count += 1
     
     print("Episode finished. Rewards:", episode_reward, " Steps:", iter_count)
-    return metric_vals, attacked_steps, frob_norms_list, sec_dir_derivatives
+    return metric_vals, attacked_steps, frob_norms_list, sec_dir_derivatives, frob_norms_matrix_history, fault_timeline
 
 
 def plot_results(results_attacked, attacked_steps, atk_agent_id, ref_means, ref_std_devs, logdir):
@@ -270,7 +336,13 @@ def plot_results(results_attacked, attacked_steps, atk_agent_id, ref_means, ref_
     t = len(results_attacked)     # number of time steps
     
     # Create n subplots in a row
-    fig, axes = plt.subplots(1, n, figsize=(4*n, 4))
+    # fig, axes = plt.subplots(1, n, figsize=(4*n, 4))
+    # --- Instead of: fig, axes = plt.subplots(1, n, figsize=(4*n, 4)) ---
+    max_per_row = 3
+    rows = math.ceil(n / max_per_row)
+    cols = min(n, max_per_row)
+    fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 4*rows))
+    axes = axes.flatten()  # so you can index axes[i] easily
     fig.suptitle(f'Taylor Error (Worst Action Attack | Attacked Agent ID: {atk_agent_id})', fontsize=16, y=0.95)
     
     # Ensure axes is iterable even for single agent case
@@ -288,25 +360,32 @@ def plot_results(results_attacked, attacked_steps, atk_agent_id, ref_means, ref_
         
         # Add green region using ref_means and ref_std_devs
         ref_steps = range(len(ref_means[i]))
-        ref_lower = [ref_means[i][t] - ref_std_devs[i][t] for t in range(len(ref_means[i]))]
-        ref_upper = [ref_means[i][t] + ref_std_devs[i][t] for t in range(len(ref_means[i]))]
+        ref_lower = [ref_means[i][t] - 1.5*ref_std_devs[i][t] for t in range(len(ref_means[i]))]
+        ref_upper = [ref_means[i][t] + 1.5*ref_std_devs[i][t] for t in range(len(ref_means[i]))]
         ax.fill_between(steps, ref_lower, ref_upper, alpha=0.1, color='green')
         
-        ax.plot(steps, attacked_series, 'r-', label='Under Attack', linewidth=2)
-        ax.plot(steps, ref_means[i], 'g--', label='Normal (Mean)', linewidth=2)
+        ax.plot(steps, attacked_series, 'r-', label='Observed', linewidth=2)
+        ax.plot(steps, ref_means[i], 'g--', label='Reference (Mean)', linewidth=2)
         
         # Mark attacked timesteps with vertical lines
         if i == atk_agent_id and attacked_steps:
-            for attack_step in attacked_steps:
-                ax.axvline(x=attack_step, color='orange', linestyle=':', alpha=0.5, linewidth=1.5)
-            # Add legend entry for attack markers
-            ax.axvline(x=attacked_steps[0], color='orange', linestyle=':', alpha=0.5, linewidth=1.5, label='Attacked Steps')
+            # for attack_step in attacked_steps:
+            #     ax.axvline(x=attack_step, color='orange', linestyle=':', alpha=0.5, linewidth=1.5)
+            # # Add legend entry for attack markers
+            # ax.axvline(x=attacked_steps[0], color='orange', linestyle=':', alpha=0.5, linewidth=1.5, label='Attacked Steps')
+            start = min(attacked_steps)
+            end = max(attacked_steps)
+            ax.axvspan(start, end, color='red', alpha=0.1, label='Attacked Region')
         
         ax.set_xlabel('Step')
         ax.set_ylabel('Taylor Delta Error')
         ax.set_title(f'Agent {i}')
         ax.legend()
         ax.grid(True, alpha=0.3)
+    
+    # hide the unused axes
+    for j in range(n, len(axes)):
+        fig.delaxes(axes[j])
     
     plt.tight_layout(rect=[0, 0, 1, 0.93])
     plt.savefig(os.path.join(logdir, f'plot_analysis_attacked_{atk_agent_id}.png'), dpi=300, bbox_inches='tight')
@@ -382,16 +461,16 @@ def plot_sec_dir_derivatives(s_dir_derv_normal, s_dir_derv_atk, attacked_steps, 
         # ref_upper = [ref_means[i][t] + ref_std_devs[i][t] for t in range(len(ref_means[i]))]
         ref_lower = ref_means[i]
         ref_upper = ref_std_devs[i]
-        ax.fill_between(steps, ref_lower, ref_upper, alpha=0.1, color='green')
+        # ax.fill_between(steps, ref_lower, ref_upper, alpha=0.1, color='green')
         
         ax.plot(steps, attacked_series, 'r-', label='Under Attack', linewidth=2)
-        ax.plot(steps, normal_series, 'g-', label='Normal', linewidth=2)
-        ax.plot(steps, ref_means[i], 'g--', label='Normal (Mean)', linewidth=2)
+        # ax.plot(steps, normal_series, 'g-', label='Normal', linewidth=2)
+        # ax.plot(steps, ref_means[i], 'g--', label='Normal (Mean)', linewidth=2)
         
         # Highlight region under y < 0 in red
         y_min = min(min(normal_series), min(attacked_series))
-        # if y_min < 0:
-        #     ax.axhspan(y_min * 1.1, 0, alpha=0.2, color='red')
+        if y_min < 0:
+            ax.axhspan(y_min * 1.1, 0, alpha=0.2, color='red')
         
         # Mark attacked timesteps with vertical lines
         if attacked_steps:
@@ -410,6 +489,209 @@ def plot_sec_dir_derivatives(s_dir_derv_normal, s_dir_derv_atk, attacked_steps, 
     plt.savefig(os.path.join(logdir, f'plot_sec_dir_derivatives_attacked_{atk_agent_id}.png'), dpi=300, bbox_inches='tight')
     plt.show()
     print(f"Saved 2nd ord. dir. derivatives plot to {logdir}")
+
+from matplotlib.patches import Patch
+
+def plot_fault_timeline(fault_timeline, total_agents, logdir):
+    if len(fault_timeline) == 0:
+        print("No faults detected; skipping fault timeline plot.")
+        return
+
+    k = len(fault_timeline)
+    fig = plt.figure(figsize=(max(6, 3*k), 5))  # reduce height from 6 → 5
+    gs = fig.add_gridspec(
+        3, k,
+        height_ratios=[0.8, 2, 0.1],  # smaller top & bottom rows
+        hspace=0.1  # tighter vertical spacing
+    )
+
+    cmap = plt.get_cmap('tab20')
+    agent_colors = {i: cmap(i % 20) for i in range(total_agents)}
+
+    # --- Timeline axis (top row) ---
+    ax_timeline = fig.add_subplot(gs[0, :])
+    ax_timeline.axis('off')
+
+    # Horizontal arrow for timeline
+    arrow_y = 0.5
+    ax_timeline.annotate(
+        '', xy=(1, arrow_y), xytext=(0, arrow_y),
+        arrowprops=dict(arrowstyle='-|>', lw=2, color='gray'),
+        xycoords='axes fraction', textcoords='axes fraction'
+    )
+
+    # Milestones
+    for i, event in enumerate(fault_timeline):
+        frac_x = (i + 0.5) / k  # evenly spaced
+
+        # Circle marker
+        ax_timeline.plot(frac_x, arrow_y, 'o', color='darkred', markersize=10, transform=ax_timeline.transAxes)
+
+        # Faulty agent label above
+        ax_timeline.text(frac_x, arrow_y + 0.15,
+                         f"Faulty agent {event['agent']}",
+                         ha='center', va='bottom',
+                         fontsize=11, fontweight='bold',
+                         transform=ax_timeline.transAxes)
+
+        # Timestep label below
+        ax_timeline.text(frac_x, arrow_y - 0.15,
+                         f"t = {event['t']}",
+                         ha='center', va='top',
+                         fontsize=10, color='darkblue',
+                         transform=ax_timeline.transAxes)
+
+    # --- Contributor charts (middle row) ---
+    for col, event in enumerate(fault_timeline):
+        ax = fig.add_subplot(gs[1, col])
+        contribs = event.get('contribs', {})
+
+        if len(contribs) == 0:
+            ax.axis('off')
+            ax.text(0.5, 0.5, 'No prior faults',
+                    ha='center', va='center', fontsize=10, style='italic')
+        else:
+            vals = np.array(list(contribs.values()), dtype=float)
+            if vals.sum() > 0:
+                vals /= vals.sum()
+            colors = [agent_colors[a] for a in contribs.keys()]
+
+            wedges, _, autotexts = ax.pie(
+                vals, autopct='%1.1f%%', startangle=90, colors=colors,
+                wedgeprops=dict(width=0.35, edgecolor='w')
+            )
+            for at in autotexts:
+                at.set_fontsize(9)
+                at.set_fontweight('bold')
+            ax.set_title('Contributors', fontsize=11, pad=5)
+            ax.set_aspect('equal')
+
+    # --- Legend row (bottom row) ---
+    ax_legend = fig.add_subplot(gs[2, :])
+    ax_legend.axis('off')
+    legend_elements = [Patch(facecolor=agent_colors[i], label=f"Agent {i}") for i in range(total_agents)]
+    ax_legend.legend(handles=legend_elements, loc='center', ncol=total_agents,
+                     fontsize=9, frameon=False)
+
+    fig.suptitle('Fault Detection Timeline and Contributors',
+                 fontsize=14, fontweight='bold', y=0.96)
+
+    out_path = os.path.join(logdir, 'fault_timeline.png')
+    plt.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved fault timeline plot to {out_path}")
+
+def plot_contributor_barchart(fault_timeline, total_agents, logdir):
+    if len(fault_timeline) == 0:
+        print("No faults detected; skipping contributor bar chart.")
+        return
+
+    k = len(fault_timeline)
+    # Increase figure width for better spacing, especially with many events
+    fig = plt.figure(figsize=(max(8, 4*k), 6))  # Increased from 3*k to 4*k width and 5 to 6 height
+    gs = fig.add_gridspec(
+        3, k,
+        height_ratios=[0.8, 2.5, 0.2],  # Give more space to the middle row
+        hspace=0.15,  # Increase vertical spacing
+        wspace=0.3    # Add horizontal spacing between subplots
+    )
+
+    cmap = plt.get_cmap('tab20')
+    agent_colors = {i: cmap(i % 20) for i in range(total_agents)}
+
+    # --- Timeline axis (top row) ---
+    ax_timeline = fig.add_subplot(gs[0, :])
+    ax_timeline.axis('off')
+
+    arrow_y = 0.5
+    ax_timeline.annotate(
+        '', xy=(1, arrow_y), xytext=(0, arrow_y),
+        arrowprops=dict(arrowstyle='-|>', lw=2, color='gray'),
+        xycoords='axes fraction', textcoords='axes fraction'
+    )
+
+    for i, event in enumerate(fault_timeline):
+        frac_x = (i + 0.5) / k
+        ax_timeline.plot(frac_x, arrow_y, 'o', color='darkred', markersize=10, transform=ax_timeline.transAxes)
+        ax_timeline.text(frac_x, arrow_y + 0.15,
+                         f"Faulty agent {event['agent']}",
+                         ha='center', va='bottom',
+                         fontsize=11, fontweight='bold',
+                         transform=ax_timeline.transAxes)
+        ax_timeline.text(frac_x, arrow_y - 0.15,
+                         f"t = {event['t']}",
+                         ha='center', va='top',
+                         fontsize=10, color='darkblue',
+                         transform=ax_timeline.transAxes)
+
+    # --- Contributor bar charts (middle row) ---
+    for col, event in enumerate(fault_timeline):
+        ax = fig.add_subplot(gs[1, col])
+        contribs = event.get('contribs', {})
+
+        if len(contribs) == 0:
+            ax.axis('off')
+            ax.text(0.5, 0.5, 'No prior faults',
+                    ha='center', va='center', fontsize=10, style='italic')
+        else:
+            agents = list(contribs.keys())
+            scores = np.array(list(contribs.values()), dtype=float)
+
+            colors = [agent_colors[a] for a in agents]
+
+            # Use narrower bars with proper spacing
+            bar_width = 0.6  # Make bars narrower
+            x_positions = range(len(agents))
+            bars = ax.bar(x_positions, scores, color=colors, width=bar_width, 
+                         edgecolor='black', linewidth=0.5, alpha=0.8)
+
+            # Set appropriate x limits with padding
+            if len(agents) > 1:
+                ax.set_xlim(-0.8, len(agents) - 0.2)
+            else:
+                ax.set_xlim(-0.8, 0.8)
+
+            # Improved label handling
+            ax.set_xticks(x_positions)
+            if len(agents) <= 3:
+                # For few agents, use normal labels
+                ax.set_xticklabels([f"Agent {i}" for i in agents], fontsize=9)
+            else:
+                # For many agents, use abbreviated labels with rotation
+                ax.set_xticklabels([f"A{i}" for i in agents], rotation=45, ha='right', fontsize=8)
+
+            # Add value labels on top of bars for clarity
+            for bar, score in zip(bars, scores):
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height + max(scores)*0.01,
+                       f'{score:.3f}', ha='center', va='bottom', fontsize=7)
+
+            ax.set_ylabel("Contribution", fontsize=9)
+            ax.set_title('Contributors', fontsize=11, pad=10)
+
+            # Grid for readability
+            ax.grid(axis='y', linestyle='--', alpha=0.3)
+            
+            # Set y-axis to start from 0 for better visual comparison
+            ax.set_ylim(bottom=0)
+
+    # --- Legend row (bottom row) ---
+    ax_legend = fig.add_subplot(gs[2, :])
+    ax_legend.axis('off')
+    legend_elements = [Patch(facecolor=agent_colors[i], label=f"Agent {i}") for i in range(total_agents)]
+    ax_legend.legend(handles=legend_elements, loc='center', ncol=total_agents,
+                     fontsize=9, frameon=False)
+
+    fig.suptitle('Fault Detection Timeline and Contributor Scores',
+                 fontsize=14, fontweight='bold', y=0.97)
+
+    plt.tight_layout(rect=[0, 0.08, 1, 0.95])  # Adjusted margins for better label visibility
+
+    out_path = os.path.join(logdir, 'fault_contributor_barchart.png')
+    plt.savefig(out_path, dpi=300, bbox_inches='tight', pad_inches=0.2)  # Added padding
+    plt.show()
+    print(f"Saved contributor bar chart to {out_path}")
+
 
 def save_matrix_to_files(matrix, attacked_steps, attacked_agent_id, total_agents, logdir, filename):
     """
@@ -454,6 +736,8 @@ def main(runner: Runner_MAPPO_MPE, env, args):
     # Read reference values from CSV files if provided
     ref_means = [[] for _ in range(runner.args.N)]
     ref_std_devs = [[] for _ in range(runner.args.N)]
+    ref_sdd_means = [[] for _ in range(runner.args.N)]
+    ref_sdd_std_devs = [[] for _ in range(runner.args.N)]
 
     for agent_id in range(runner.args.N):
         csv_filename = f"mappo_taylor_error_atk_free_agent_{agent_id}.csv"
@@ -465,13 +749,37 @@ def main(runner: Runner_MAPPO_MPE, env, args):
             for row in reader:
                 ref_means[agent_id].append(float(row[2]))
                 ref_std_devs[agent_id].append(float(row[4]))
-    
+                # mean, mad
+                # ref_means[agent_id].append(float(row[7]))
+                # ref_std_devs[agent_id].append(float(row[8]))
+
+        # Load 2nd order directional derivative reference data
+        # sdd_csv_filename = f"mappo_sdd_agent_{agent_id}_vs_all_episodes_10000.csv"
+        # sdd_csv_path = os.path.join(args.ref_val_dir, sdd_csv_filename)
+
+        # with open(sdd_csv_path, 'r') as csvfile:
+        #     reader = csv.reader(csvfile)
+        #     header = next(reader)  # Read header to find the right columns
+            
+        #     # Find the column for agent_id vs atk_agent_id
+        #     # mean_col_name = f"agent_{agent_id}_vs_{attacked_agent_id}_mean"
+        #     # std_col_name = f"agent_{agent_id}_vs_{attacked_agent_id}_std_dev"
+        #     mean_col_name = f"agent_{agent_id}_vs_{attacked_agent_id}_q1"
+        #     std_col_name = f"agent_{agent_id}_vs_{attacked_agent_id}_q3"
+            
+        #     mean_col_idx = header.index(mean_col_name)
+        #     std_col_idx = header.index(std_col_name)
+            
+        #     for row in reader:
+        #         ref_sdd_means[agent_id].append(float(row[mean_col_idx]))
+        #         ref_sdd_std_devs[agent_id].append(float(row[std_col_idx]))
+
     # episode_data_unattacked = get_episode_data(env, runner, False, None)
     # save_matrix_to_files(episode_data_unattacked, None, runner.args.N, logdir)
 
-    results_normal, _, frob_norms_normal, sec_dir_derivatives_normal = get_episode_data(env, runner, ref_means, ref_std_devs, False, attacked_agent_id)
+    results_normal, _, frob_norms_normal, sec_dir_derivatives_normal, _, _ = get_episode_data(env, runner, ref_means, ref_std_devs, False, attacked_agent_id)
 
-    results_attacked, attacked_steps, frob_norms_atk, sec_dir_derivatives_atk = get_episode_data(env, runner, ref_means, ref_std_devs, True, attacked_agent_id)
+    results_attacked, attacked_steps, frob_norms_atk, sec_dir_derivatives_atk, frob_norms_matrix_history, fault_timeline = get_episode_data(env, runner, ref_means, ref_std_devs, True, attacked_agent_id)
     save_matrix_to_files(results_attacked, attacked_steps, attacked_agent_id, runner.args.N, logdir, f'mappo_taylor_error_atk_{attacked_agent_id}.csv')
     save_matrix_to_files(frob_norms_atk, attacked_steps, attacked_agent_id, runner.args.N, logdir, f'mappo_frobenius_norms_atk_{attacked_agent_id}.csv')
     save_matrix_to_files(sec_dir_derivatives_atk, attacked_steps, attacked_agent_id, runner.args.N, logdir, f'mappo_sec_dir_derivatives_atk_{attacked_agent_id}.csv')
@@ -479,6 +787,8 @@ def main(runner: Runner_MAPPO_MPE, env, args):
     plot_results(results_attacked, attacked_steps, attacked_agent_id, ref_means, ref_std_devs, logdir)
     plot_frobs(frob_norms_normal, frob_norms_atk, attacked_steps, attacked_agent_id, logdir)
     plot_sec_dir_derivatives(sec_dir_derivatives_normal, sec_dir_derivatives_atk, attacked_steps, attacked_agent_id, ref_sdd_means, ref_sdd_std_devs, logdir)
+    plot_fault_timeline(fault_timeline, runner.args.N, logdir)
+    plot_contributor_barchart(fault_timeline, runner.args.N, logdir)
     env.close()
 
 
@@ -515,8 +825,8 @@ if __name__ == '__main__':
     parser.add_argument("--attack_agent_id", type=int, default=0, help="Whether to add agent_id. Here, we do not use it.")
     # Add output directory argument
     parser.add_argument("--output_dir", type=str, default="./results", help="Directory to save all output files")
-    parser.add_argument("--env_id", type=str, default="simple_spread_v3", help="Environment ID")
-    parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducibility")
+    parser.add_argument("--env_id", type=str, required=True, help="Environment ID")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--discrete_action", type=bool, default=True, help="Whether the action space is discrete or continuous")
     parser.add_argument("--atk_step_start", type=int, default=-math.inf, help="Attack start step")
     parser.add_argument("--atk_step_end", type=int, default=math.inf, help="Attack end step")
@@ -524,9 +834,9 @@ if __name__ == '__main__':
     parser.add_argument("--ref_val_dir", type=str, required=True, help="Directory to fetch reference value files")
 
     args = parser.parse_args()
-    env = make_env(env_name=args.env_id, discrete=True)
+    env = make_env(env_name=args.env_id)
     runner = Runner_MAPPO_MPE(args, env_name=args.env_id, number=1, seed=args.seed)
-    
+
     # runner.agent_n.load_model_from_directory("/deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE/model/MAPPO_actor_env_simple_spread_number_1_seed_0_step_1215k.pth")
     # runner.agent_n.load_model_from_directory("/deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE/runs/train_simple_spread_v3_20250729-203446/models/MAPPO_seed_0_score_-30.94.pt")
     runner.agent_n.load_model_from_directory(args.model_dir)

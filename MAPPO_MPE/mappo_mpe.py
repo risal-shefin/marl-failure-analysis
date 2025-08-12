@@ -316,7 +316,8 @@ class MAPPO_MPE:
         self.actor.load_state_dict(torch.load("./model/MAPPO_actor_env_{}_number_{}_seed_{}_step_{}k.pth".format(env_name, number, seed, step)))
     
     def load_model_from_directory(self, path):
-        self.actor.load_state_dict(torch.load(path))
+        # self.actor.load_state_dict(torch.load(path))
+        self.actor.load_state_dict(torch.load(path)["actor_state_dict"])
 
     def select_action(self, obs, agent_id, evaluate=False, return_dist=False):
         """

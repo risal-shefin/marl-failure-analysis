@@ -1,19 +1,44 @@
 import numpy as np
-from pettingzoo.mpe import simple_spread_v3
 from gymnasium.spaces import Box, Discrete
 import torch
+import pettingzoo.mpe as mpe
+import pettingzoo.sisl as sisl
+import pettingzoo.atari as atari
+import supersuit
 
+def preprocess_env_atari(env):
+    # as per openai baseline's MaxAndSKip wrapper, maxes over the last 2 frames
+    # to deal with frame flickering
+    env = supersuit.max_observation_v0(env, 2)
+    # skip frames for faster processing and less control
+    # to be compatible with gym, use frame_skip(env, (2,5))
+    env = supersuit.frame_skip_v0(env, 4)
+    # downscale observation for faster processing
+    env = supersuit.resize_v1(env, 84, 84)
+    # allow agent to see everything on the screen despite Atari's flickering screen problem
+    env = supersuit.frame_stack_v1(env, 4)
+    return env
 
 class PettingZooWrapper:
     """
     Wrapper for PettingZoo environments to match the interface expected by MAPPO
     """
     def __init__(self, env_name="simple_spread_v3", continuous=False):
-        if env_name == "simple_spread_v3":
-            self.env = simple_spread_v3.parallel_env(N=3, max_cycles=25, continuous_actions=continuous)
-        else:
-            raise ValueError(f"Unsupported environment: {env_name}")
-        
+        try:
+            env_func = getattr(mpe, env_name)
+            if env_name == "simple_spread_v3":
+                self.env = env_func.parallel_env(continuous_actions=continuous, render_mode='rgb_array', N=5)
+            else:
+                self.env = env_func.parallel_env(continuous_actions=continuous, render_mode='rgb_array')
+        except:
+            try:
+                self.env_func = getattr(sisl, env_name)
+                self.env = env_func.parallel_env(n_pursuers=5, render_mode='rgb_array') if env_name == 'waterworld_v4' else env_func.parallel_env(render_mode='rgb_array')
+            except:
+                env_func = getattr(atari, env_name)
+                self.env = env_func.parallel_env(render_mode='rgb_array')
+                self.env = preprocess_env_atari(self.env)
+
         obs, _ = self.env.reset(seed=42)  # Initialize with a seed for reproducibility
         self.n = len(self.env.agents)  # Number of agents
         self.agent_ids = list(self.env.agents)
@@ -57,7 +82,7 @@ class PettingZooWrapper:
         self.env.close()
 
 
-def make_env(env_name="simple_spread_v3", discrete=True):
+def make_env(env_name, discrete=True):
     """
     Create a wrapped PettingZoo environment.
     

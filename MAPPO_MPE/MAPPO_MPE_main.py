@@ -254,10 +254,11 @@ if __name__ == '__main__':
     parser.add_argument("--use_rnn", type=bool, default=False, help="Whether to use RNN")
     parser.add_argument("--add_agent_id", type=float, default=False, help="Whether to add agent_id. Here, we do not use it.")
     parser.add_argument("--use_value_clip", type=float, default=False, help="Whether to use value clip.")
+    parser.add_argument("--env_id", type=str, required=True, help="The name of the environment to run")
     
     # Add output directory argument
     parser.add_argument("--output_dir", type=str, default="./runs", help="Directory to save all output files")
 
     args = parser.parse_args()
-    runner = Runner_MAPPO_MPE(args, env_name="simple_spread_v3", number=1, seed=0)
+    runner = Runner_MAPPO_MPE(args, env_name=args.env_id, number=1, seed=42)
     runner.run()

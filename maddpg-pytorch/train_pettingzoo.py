@@ -37,7 +37,10 @@ def preprocess_env_atari(env):
 def eval(env_func, is_discrete_action, maddpg, n_episodes):
     # Check if env_func exists in mpe
     if 'mpe' in env_func.__name__:
-        env = env_func.parallel_env(continuous_actions=not is_discrete_action)
+        if "simple_spread_v3" in env_func.__name__:
+            env = env_func.parallel_env(continuous_actions=not is_discrete_action, N=5)
+        else:
+            env = env_func.parallel_env(continuous_actions=not is_discrete_action)
     elif 'waterworld' in env_func.__name__:
         env = env_func.parallel_env(n_pursuers=5)   # it's a sisl env
     else:
@@ -99,7 +102,10 @@ def run(config):
     #                         config.discrete_action)
     try:
         env_func = getattr(mpe, config.env_id)
-        env = env_func.parallel_env(continuous_actions= not config.discrete_action)
+        if config.env_id == 'simple_spread_v3':
+            env = env_func.parallel_env(continuous_actions= not config.discrete_action, N=5)
+        else:
+            env = env_func.parallel_env(continuous_actions= not config.discrete_action)
     except:
         try:
             env_func = getattr(sisl, config.env_id)
@@ -181,7 +187,7 @@ def run(config):
         print(f"Ep#{ep_i+1},rew:{np.mean(ep_rews):.3f}", flush=True)
 
         if ep_i % config.save_interval < config.n_rollout_threads:
-            eval_reward = eval(env_func, config.discrete_action, maddpg, n_episodes=5)
+            eval_reward = eval(env_func, config.discrete_action, maddpg, n_episodes=10)
             if eval_reward >= best_eval_reward:
                 maddpg.save(run_dir / f'model_{eval_reward}.pt')
                 best_eval_reward = eval_reward

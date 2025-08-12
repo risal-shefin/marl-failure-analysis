@@ -85,15 +85,17 @@ def save_matrix_to_files(matrix, agent_id, logdir, suffix=""):
     Save matrix data to a CSV file for all timesteps.
     
     Args:
-        matrix: List of timesteps, where each timestep contains n_agent data
+        matrix: List of timesteps, where each timestep contains metrics data including:
+                mean, variance, std_dev, q1, q3, median, and MAD
         agent_id: ID of the agent
         logdir: Directory to save the file
+        suffix: Optional suffix for the filename
     """
     filename = f"mappo_taylor_error_atk_free_agent_{suffix}.csv"
     filepath = os.path.join(logdir, filename)
     
     # Create header row
-    header = ["agent", "timestep", "mean", "variance", "std_dev", "q1", "q3"]
+    header = ["agent", "timestep", "mean", "variance", "std_dev", "q1", "q3", "median", "mad"]
     
     with open(filepath, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
@@ -136,8 +138,11 @@ def main(runner: Runner_MAPPO_MPE, env, args):
             var_val = np.var(timestep_values)
             std_dev_val = np.std(timestep_values)
             q1, q3 = np.percentile(timestep_values, [25, 75])
-            print(f"Agent {agent_id}: mean = {mean_val:.4f}, variance = {var_val:.4f}, std_dev = {std_dev_val:.4f}, IQR = {q3 - q1:.4f}")
-            metrics = [mean_val, var_val, std_dev_val, q1, q3]
+            median_val = np.median(timestep_values)
+            # Compute MAD (Median Absolute Deviation)
+            mad_val = np.median(np.abs(np.array(timestep_values) - median_val))
+            print(f"Agent {agent_id}: mean = {mean_val:.4f}, variance = {var_val:.4f}, std_dev = {std_dev_val:.4f}, IQR = {q3 - q1:.4f}, median = {median_val:.4f}, MAD = {mad_val:.4f}")
+            metrics = [mean_val, var_val, std_dev_val, q1, q3, median_val, mad_val]
             metrics_mat.append(metrics)
 
         save_matrix_to_files(metrics_mat, agent_id, logdir, suffix=f"{agent_id}")
@@ -175,7 +180,7 @@ if __name__ == '__main__':
     parser.add_argument("--use_value_clip", type=float, default=False, help="Whether to use value clip.")
     # Add output directory argument
     parser.add_argument("--output_dir", type=str, default="./results", help="Directory to save all output files")
-    parser.add_argument("--env_id", type=str, default="simple_spread_v3", help="Environment ID")
+    parser.add_argument("--env_id", type=str, required=True, help="Environment ID")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--discrete_action", type=bool, default=True, help="Whether the action space is discrete or continuous")
     parser.add_argument("--model_dir", type=str, required=True, help="Directory from load the trained model")

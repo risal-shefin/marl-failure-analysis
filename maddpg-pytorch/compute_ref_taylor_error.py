@@ -130,16 +130,17 @@ def save_matrix_to_files(matrix, agent_id, logdir, suffix=""):
     Save matrix data to a CSV file for all timesteps.
     
     Args:
-        matrix: List of timesteps, where each timestep contains n_agent data
-        attacked_agent_id: ID of the attacked agent
-        total_agents: Total number of agents
+        matrix: List of timesteps, where each timestep contains metrics data including:
+                mean, variance, std_dev, q1, q3, median, and MAD
+        agent_id: ID of the agent
         logdir: Directory to save the file
+        suffix: Optional suffix for the filename
     """
     filename = f"maddpg_taylor_error_atk_free_agent_{suffix}.csv"
     filepath = os.path.join(logdir, filename)
     
     # Create header row
-    header = ["agent", "timestep", "mean", "variance", "std_dev", "q1", "q3"]
+    header = ["agent", "timestep", "mean", "variance", "std_dev", "q1", "q3", "median", "mad"]
     
     with open(filepath, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
@@ -162,11 +163,14 @@ def run(config):
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     logdir = os.path.join(cwd, 'runs', f"{config.env_id}_{'discrete' if maddpg.discrete_action else 'continuous'}", f"{timestamp}_metrics_taylor_error")
     os.makedirs(logdir, exist_ok=True)
-    total_episodes = 5000
+    total_episodes = 10000
 
     try:
         env_func = getattr(mpe, config.env_id)
-        env = env_func.parallel_env(continuous_actions= not maddpg.discrete_action, render_mode='rgb_array')
+        if config.env_id == 'simple_spread_v3':
+            env = env_func.parallel_env(continuous_actions= not maddpg.discrete_action, render_mode='rgb_array', N=5)
+        else:
+            env = env_func.parallel_env(continuous_actions= not maddpg.discrete_action, render_mode='rgb_array')
     except:
         try:
             env_func = getattr(sisl, config.env_id)
@@ -202,8 +206,11 @@ def run(config):
             var_val = np.var(timestep_values)
             std_dev_val = np.std(timestep_values)
             q1, q3 = np.percentile(timestep_values, [25, 75])
-            print(f"Agent {agent_id}: mean = {mean_val:.4f}, variance = {var_val:.4f}, std_dev = {std_dev_val:.4f}, IQR = {q3 - q1:.4f}")
-            metrics = [mean_val, var_val, std_dev_val, q1, q3]
+            median_val = np.median(timestep_values)
+            # Compute MAD (Median Absolute Deviation)
+            mad_val = np.median(np.abs(np.array(timestep_values) - median_val))
+            print(f"Agent {agent_id}: mean = {mean_val:.4f}, variance = {var_val:.4f}, std_dev = {std_dev_val:.4f}, IQR = {q3 - q1:.4f}, median = {median_val:.4f}, MAD = {mad_val:.4f}")
+            metrics = [mean_val, var_val, std_dev_val, q1, q3, median_val, mad_val]
             metrics_mat.append(metrics)
 
         save_matrix_to_files(metrics_mat, agent_id, logdir, suffix=f"{agent_id}")

@@ -346,3 +346,7 @@ AgileRL/logs
 **/baselines/
 **/assets/
 **/MADDPG_Simple_Ref_V3_results/
+
+maddpg-pytorch/runs/
+MAPPO_MPE/runs/
+MAPPO_MPE/model/
