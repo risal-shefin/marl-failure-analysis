@@ -25,6 +25,7 @@ class PettingZooMPEEnv:
         else:
             self.max_cycles = 25
             self.args["max_cycles"] = 26
+        # self.args["N"] = 5 # for simple spread
         self.cur_step = 0
         self.module = importlib.import_module("pettingzoo.mpe." + self.scenario)
         self.env = ss.pad_action_space_v0(
@@ -64,11 +65,12 @@ class PettingZooMPEEnv:
             self.get_avail_actions(),
         )
 
-    def reset(self):
+    def reset(self, seed=None):
         """Returns initial observations and states"""
+        print("%%%% SEED is ", seed)
         self._seed += 1
         self.cur_step = 0
-        obs = self.unwrap(self.env.reset(seed=self._seed))
+        obs = self.unwrap(self.env.reset(seed=seed if seed is not None else self._seed))
         s_obs = self.repeat(self.env.state())
         return obs, s_obs, self.get_avail_actions()
 

@@ -79,20 +79,11 @@ def save_matrix_to_files(matrix, agent_id, logdir, suffix=""):
     
     print(f"Saved {len(matrix)} timestep matrices to {filepath}")
 
-def compute_taylor_policy(runner, eval_obs, eval_available_actions):
+def compute_taylor_policy(runner, eval_obs, eval_available_actions, eval_rnn_states):
         # states_tensor = torch.stack([torch.tensor(state_dict[k], dtype=torch.float32, requires_grad=True) for k in state_dict.keys()])
         eval_obs = torch.tensor(eval_obs, dtype=torch.float32, requires_grad=True)
         delta_errors = []
         eval_actions_collector = []
-        eval_rnn_states = np.zeros(
-        (
-            runner.algo_args["eval"]["n_eval_rollout_threads"],
-            runner.num_agents,
-            runner.recurrent_n,
-            runner.rnn_hidden_size,
-        ),
-            dtype=np.float32,
-        )
         eval_masks = np.ones(
             (runner.algo_args["eval"]["n_eval_rollout_threads"], runner.num_agents, 1),
             dtype=np.float32,
@@ -109,7 +100,7 @@ def compute_taylor_policy(runner, eval_obs, eval_available_actions):
                 else None,
                 deterministic=True,
             )
-            eval_rnn_states[:, agent_id] = _t2n(temp_rnn_state)
+            # eval_rnn_states[:, agent_id] = _t2n(temp_rnn_state)
             eval_actions_collector.append(_t2n(eval_actions))
 
             eval_actions = np.array(eval_actions_collector).transpose(1, 0, 2)
@@ -170,6 +161,7 @@ def eval(runner, attack_status=False, attack_agent_id=0):
 
     while True:
         eval_actions_collector = []
+        eval_rnn_states_backup = np.copy(eval_rnn_states)
         for agent_id in range(runner.num_agents):
             eval_actions, temp_rnn_state = runner.actor[agent_id].act(
                 eval_obs[:, agent_id],
@@ -190,7 +182,7 @@ def eval(runner, attack_status=False, attack_agent_id=0):
 
 
         # calculating taylor policy
-        delta_errors = compute_taylor_policy(runner, eval_obs, eval_available_actions)
+        delta_errors = compute_taylor_policy(runner, eval_obs, eval_available_actions, eval_rnn_states_backup)
         for j in range(runner.num_agents):
             result_deque[j].append(delta_errors[j])
         results.append([np.mean(list(result_deque[j])) for j in range(runner.num_agents)])
