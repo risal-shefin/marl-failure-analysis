@@ -328,33 +328,12 @@ def get_episode_data(env, maddpg, config, logdir, ref_means, ref_std_devs, do_at
                         't': cnt,
                         'contribs': contribs
                     })
-                    vulnerable_agent_id = i
             frob_norms_deques[i].append(results_frob_norms[i])
             sec_dir_derivatives_deques[i].append(results_sec_dir_derivatives[i])
 
         metric_vals.append([np.mean(result_deques[i]) for i in range(maddpg.nagents)])
         frob_norms_list.append([np.mean(frob_norms_deques[i]) for i in range(maddpg.nagents)])
         sec_dir_derivatives.append([np.mean(sec_dir_derivatives_deques[i]) for i in range(maddpg.nagents)])
-
-        if vulnerable_agent_id is not None:
-            print(f"\n --- Timestep: {cnt} ------")
-            frob_norms = frob_norms_list[-1]
-            # Rank frob_norm values from largest to smallest
-            frob_norms_with_indices = [(i, frob_norms[i]) for i in range(len(frob_norms)) if i != vulnerable_agent_id]
-            frob_norms_ranked = sorted(frob_norms_with_indices, key=lambda x: x[1], reverse=True)
-            print(f" --- Frob norm ranking: {frob_norms_ranked}")
-
-            s_dir_derivatives = sec_dir_derivatives[-1]
-
-            for i in range(maddpg.nagents):
-                frob_norms_wrt_i = compute_frob_norms(maddpg, obs, list(actions.values()), env.action_space, i)
-                print(f" ~ [Frob Norms] w.r.t. agent {i}: {frob_norms_wrt_i}")
-                sod_wrt_i = compute_2nd_ord_dir_derivatives(maddpg, obs, list(actions.values()), env.action_space, i)
-                print(f" ~ [2nd Order Derivatives] w.r.t. agent {i}: {sod_wrt_i}\n")
-
-                if i == vulnerable_agent_id or s_dir_derivatives[i] >= 0.0:
-                    continue
-                print(f" >> Potential Vulnerable Position for agent {i} wrt faulty agent. 2nd Dir Derivative: {s_dir_derivatives[i]}")
 
         next_obs, rewards, dones, infos = env.step(actions)
         episode_reward += np.sum([rewards[:,i] if env.agent_types[i] != 'adversary' else np.zeros_like(rewards[:,i]) for i in range(maddpg.nagents)])
@@ -401,15 +380,18 @@ def plot_results(results_attacked, attacked_steps, atk_agent_id, ref_means, ref_
         ref_upper = [ref_means[i][t] + ref_std_devs[i][t] for t in range(len(ref_means[i]))]
         ax.fill_between(steps, ref_lower, ref_upper, alpha=0.1, color='green')
         
-        ax.plot(steps, attacked_series, 'r-', label='Under Attack', linewidth=2)
-        ax.plot(steps, ref_means[i], 'g--', label='Normal (Mean)', linewidth=2)
+        ax.plot(steps, attacked_series, 'r-', label='Observed', linewidth=2)
+        ax.plot(steps, ref_means[i], 'g--', label='Reference (Mean)', linewidth=2)
         
         # Mark attacked timesteps with vertical lines
         if i == atk_agent_id and attacked_steps:
-            for attack_step in attacked_steps:
-                ax.axvline(x=attack_step, color='orange', linestyle=':', alpha=0.5, linewidth=1.5)
-            # Add legend entry for attack markers
-            ax.axvline(x=attacked_steps[0], color='orange', linestyle=':', alpha=0.5, linewidth=1.5, label='Attacked Steps')
+            # for attack_step in attacked_steps:
+            #     ax.axvline(x=attack_step, color='orange', linestyle=':', alpha=0.5, linewidth=1.5)
+            # # Add legend entry for attack markers
+            # ax.axvline(x=attacked_steps[0], color='orange', linestyle=':', alpha=0.5, linewidth=1.5, label='Attacked Steps')
+            start = min(attacked_steps)
+            end = max(attacked_steps)
+            ax.axvspan(start, end, color='red', alpha=0.1, label='Attacked Region')
         
         ax.set_xlabel('Step')
         ax.set_ylabel('Taylor Delta Error')
@@ -749,7 +731,7 @@ def save_matrix_to_files(matrix, attacked_steps, attacked_agent_id, total_agents
 
 
 def run(config):
-    maddpg = MADDPG.init_from_save(config.model_path)
+    maddpg = MADDPG.init_from_save(config.model_path, test_mode=True)
 
     # create a log directory under runs/<env_id>/<timestamp> using os and getcwd
     cwd = os.getcwd()
@@ -797,7 +779,7 @@ def run(config):
                 # ref_std_devs[agent_id].append(float(row[8]))
 
     attacked_agent_id = config.attack_agent_id  # specify the agent to attack
-    seed = 42
+    seed = 23
 
     results_normal, _, frob_norms_normal, sec_dir_derivatives_normal, _, _ = get_episode_data(env, maddpg, config, logdir, ref_means, ref_std_devs, do_attack=False, atk_agent_id=attacked_agent_id, seed=seed)
 

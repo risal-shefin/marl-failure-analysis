@@ -11,7 +11,7 @@ class DDPGAgent(object):
     critic, exploration noise)
     """
     def __init__(self, num_in_pol, num_out_pol, num_in_critic, hidden_dim=64,
-                 lr=0.01, discrete_action=True):
+                 lr=0.01, discrete_action=True, test_mode=False):
         """
         Inputs:
             num_in_pol (int): number of dimensions for policy input
@@ -21,17 +21,21 @@ class DDPGAgent(object):
         self.policy = MLPNetwork(num_in_pol, num_out_pol,
                                  hidden_dim=hidden_dim,
                                  constrain_out=True,
-                                 discrete_action=discrete_action)
+                                 discrete_action=discrete_action,
+                                 test_mode=test_mode)
         self.critic = MLPNetwork(num_in_critic, 1,
                                  hidden_dim=hidden_dim,
-                                 constrain_out=False)
+                                 constrain_out=False,
+                                 test_mode=test_mode)
         self.target_policy = MLPNetwork(num_in_pol, num_out_pol,
                                         hidden_dim=hidden_dim,
                                         constrain_out=True,
-                                        discrete_action=discrete_action)
+                                        discrete_action=discrete_action,
+                                        test_mode=test_mode)
         self.target_critic = MLPNetwork(num_in_critic, 1,
                                         hidden_dim=hidden_dim,
-                                        constrain_out=False)
+                                        constrain_out=False,
+                                        test_mode=test_mode)
         hard_update(self.target_policy, self.policy)
         hard_update(self.target_critic, self.critic)
         self.policy_optimizer = Adam(self.policy.parameters(), lr=lr)
@@ -99,7 +103,7 @@ class DDPGImageAgent(object):
     """
     def __init__(self, num_in_pol, num_out_pol, 
                  obs_shapes_critic, total_action_dim, hidden_dim=64,
-                 lr=0.01, discrete_action=True, num_in_critic=None):
+                 lr=0.01, discrete_action=True, num_in_critic=None, test_mode=False):
         """
         Inputs:
             num_in_pol (tuple): Image Observation Shape
@@ -112,17 +116,21 @@ class DDPGImageAgent(object):
         self.policy = CNNNetwork(num_in_pol, num_out_pol,
                                  hidden_dim=hidden_dim,
                                  constrain_out=True,
-                                 discrete_action=discrete_action)
+                                 discrete_action=discrete_action,
+                                 test_mode=test_mode)
         self.critic = MultiAgentCriticNetwork(n_agents, obs_shapes_critic, 
                                  total_action_dim,
-                                 hidden_dim=hidden_dim)
+                                 hidden_dim=hidden_dim,
+                                 test_mode=test_mode)
         self.target_policy = CNNNetwork(num_in_pol, num_out_pol,
                                  hidden_dim=hidden_dim,
                                  constrain_out=True,
-                                 discrete_action=discrete_action)
+                                 discrete_action=discrete_action,
+                                 test_mode=test_mode)
         self.target_critic = MultiAgentCriticNetwork(n_agents, obs_shapes_critic, 
                                  total_action_dim,
-                                 hidden_dim=hidden_dim)
+                                 hidden_dim=hidden_dim,
+                                 test_mode=test_mode)
         hard_update(self.target_policy, self.policy)
         hard_update(self.target_critic, self.critic)
         self.policy_optimizer = Adam(self.policy.parameters(), lr=lr)

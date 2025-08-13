@@ -8,7 +8,7 @@ class MLPNetwork(nn.Module):
     MLP network (can be used as value or policy)
     """
     def __init__(self, input_dim, out_dim, hidden_dim=64, nonlin=F.relu,
-                 constrain_out=False, norm_in=True, discrete_action=True):
+                 constrain_out=False, norm_in=True, discrete_action=True, test_mode=False):
         """
         Inputs:
             input_dim (int): Number of dimensions in input
@@ -34,6 +34,8 @@ class MLPNetwork(nn.Module):
             self.out_fn = F.tanh
         else:  # logits for discrete action (will softmax later)
             self.out_fn = lambda x: x
+        
+        self.test_mode = test_mode
 
     def forward(self, X):
         """
@@ -45,8 +47,8 @@ class MLPNetwork(nn.Module):
         # h1 = self.nonlin(self.fc1(self.in_fn(X)))
         # h1 = self.nonlin(self.fc1(X))
         # h2 = self.nonlin(self.fc2(h1))
-        # h1 = F.tanh(self.fc1(self.in_fn(X)))
-        h1 = F.tanh(self.fc1(X))
+        
+        h1 = F.tanh(self.fc1(self.in_fn(X))) if not self.test_mode else F.tanh(self.fc1(X))
         h2 = F.tanh(self.fc2(h1))
         out = self.out_fn(self.fc3(h2))
         return out
@@ -57,7 +59,7 @@ class CNNNetwork(nn.Module):
     Processes image observations through convolutional layers then MLP
     """
     def __init__(self, input_shape, out_dim, hidden_dim=512, nonlin=F.relu,
-                 constrain_out=False, norm_in=True, discrete_action=True):
+                 constrain_out=False, norm_in=True, discrete_action=True, test_mode=False):
         """
         Inputs:
             input_shape (tuple): Shape of input images (height, width, channels) e.g., (210, 160, 3)
@@ -117,6 +119,8 @@ class CNNNetwork(nn.Module):
             self.out_fn = F.tanh
         else:  # logits for discrete action (will softmax later)
             self.out_fn = lambda x: x
+        
+        self.test_mode = test_mode
     
     def preprocess_image(self, x):
         """
@@ -155,7 +159,7 @@ class CNNNetwork(nn.Module):
         flattened = conv_out.reshape(conv_out.size(0), -1)
         
         # Pass through MLP layers with batch normalization
-        h1 = self.nonlin(self.fc1(self.in_fn(flattened)))
+        h1 = self.nonlin(self.fc1(self.in_fn(flattened))) if not self.test_mode else self.nonlin(self.fc1(flattened))
         h2 = self.nonlin(self.fc2(h1))
         out = self.out_fn(self.fc3(h2))
         

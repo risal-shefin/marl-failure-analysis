@@ -15,7 +15,7 @@ class MADDPG(object):
     def __init__(self, agent_init_params, alg_types,
                  gamma=0.95, tau=0.01, lr=0.01, hidden_dim=64,
                  discrete_action=False, obs_shapes=None,
-                 total_action_dim=None):
+                 total_action_dim=None, test_mode=False):
         """
         Inputs:
             agent_init_params (list of dict): List of dicts with parameters to
@@ -38,11 +38,13 @@ class MADDPG(object):
                  hidden_dim=hidden_dim,
                  obs_shapes_critic=obs_shapes,
                  total_action_dim=total_action_dim,
+                 test_mode=test_mode
                  **params)
                for params in agent_init_params]
         else:
             self.agents = [DDPGAgent(lr=lr, discrete_action=discrete_action,
                     hidden_dim=hidden_dim,
+                    test_mode=test_mode,
                     **params)
                 for params in agent_init_params]
         self.agent_init_params = agent_init_params
@@ -294,13 +296,13 @@ class MADDPG(object):
         return instance
 
     @classmethod
-    def init_from_save(cls, filename):
+    def init_from_save(cls, filename, test_mode=False):
         """
         Instantiate instance of this class from file created by 'save' method
         """
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         save_dict = torch.load(filename, map_location=device)
-        instance = cls(**save_dict['init_dict'])
+        instance = cls(test_mode=test_mode, **save_dict['init_dict'])
         instance.init_dict = save_dict['init_dict']
         for a, params in zip(instance.agents, save_dict['agent_params']):
             a.load_params(params)

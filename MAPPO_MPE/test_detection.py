@@ -276,7 +276,7 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_means, ref_std_devs, do_
         for i in range(runner.args.N):
             result_deques[i].append(results[i])
             taylor_approx_error = np.mean(result_deques[i])
-            if abs(taylor_approx_error - ref_means[i][iter_count]) > 1.5*ref_std_devs[i][iter_count]:
+            if abs(taylor_approx_error - ref_means[i][iter_count]) > 0.6*ref_std_devs[i][iter_count]:
                 if i not in fault_first_detected:
                     print(f" [!!!] Anomaly detected for agent {i} at timestep: {iter_count}. Taylor Appx. Error: {taylor_approx_error}")
                     fault_first_detected[i] = iter_count
@@ -297,27 +297,12 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_means, ref_std_devs, do_
                         't': iter_count,
                         'contribs': contribs
                     })
-                vulnerable_agent_id = i
             frob_norms_deques[i].append(results_frob_norms[i])
             sec_dir_derivatives_deques[i].append(results_sec_dir_derivatives[i])
 
         metric_vals.append([np.mean(result_deques[i]) for i in range(runner.args.N)])
         frob_norms_list.append([np.mean(frob_norms_deques[i]) for i in range(runner.args.N)])
         sec_dir_derivatives.append([np.mean(sec_dir_derivatives_deques[i]) for i in range(runner.args.N)])
-
-        if vulnerable_agent_id is not None:
-            print(f"\n --- Timestep: {iter_count} ------")
-            frob_norms = frob_norms_list[-1]
-            # Rank frob_norm values from largest to smallest
-            frob_norms_with_indices = [(i, frob_norms[i]) for i in range(len(frob_norms)) if i != vulnerable_agent_id]
-            frob_norms_ranked = sorted(frob_norms_with_indices, key=lambda x: x[1], reverse=True)
-            print(f" --- Frob norm ranking: {frob_norms_ranked}")
-
-            s_dir_derivatives = sec_dir_derivatives[-1]
-            for i in range(runner.args.N):
-                if i == vulnerable_agent_id or s_dir_derivatives[i] >= 0.0:
-                    continue
-                print(f"\t >> Potential Vulnerability for agent {i}. 2nd Dir Derivative: {s_dir_derivatives[i]}")
 
         next_state, reward, done, info = env.step(actions)
         
@@ -360,8 +345,8 @@ def plot_results(results_attacked, attacked_steps, atk_agent_id, ref_means, ref_
         
         # Add green region using ref_means and ref_std_devs
         ref_steps = range(len(ref_means[i]))
-        ref_lower = [ref_means[i][t] - 1.5*ref_std_devs[i][t] for t in range(len(ref_means[i]))]
-        ref_upper = [ref_means[i][t] + 1.5*ref_std_devs[i][t] for t in range(len(ref_means[i]))]
+        ref_lower = [ref_means[i][t] - 0.6*ref_std_devs[i][t] for t in range(len(ref_means[i]))]
+        ref_upper = [ref_means[i][t] + 0.6*ref_std_devs[i][t] for t in range(len(ref_means[i]))]
         ax.fill_between(steps, ref_lower, ref_upper, alpha=0.1, color='green')
         
         ax.plot(steps, attacked_series, 'r-', label='Observed', linewidth=2)
