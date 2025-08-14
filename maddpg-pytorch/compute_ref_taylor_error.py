@@ -57,22 +57,30 @@ def compute_taylor_delta_policy(maddpg, obs, actions, action_spaces, epsilon):
     delta_errors = []
 
     for i, agent_i in enumerate(maddpg.agents):
-        action_logits_i = agent_i.policy(torch_obs[i])
-        action_log_probs = torch.log_softmax(action_logits_i, dim=-1)
-        max_action_idx = torch.argmax(action_log_probs, dim=-1)
-        critic_val = action_log_probs.gather(-1, max_action_idx.unsqueeze(-1)).squeeze()
-        grad_i = torch.autograd.grad(critic_val, torch_obs[i], create_graph=True, retain_graph=True)[0]
+        if maddpg.discrete_action:
+            action_logits_i = agent_i.policy(torch_obs[i])
+            action_log_probs = torch.log_softmax(action_logits_i, dim=-1)
+            max_action_idx = torch.argmax(action_log_probs, dim=-1)
+            target_val = action_log_probs.gather(-1, max_action_idx.unsqueeze(-1)).squeeze()
+        else:
+            target_val = agent_i.policy(torch_obs[i]).sum()
+        grad_i = torch.autograd.grad(target_val, torch_obs[i], create_graph=True, retain_graph=True)[0]
         # grad_i = torch.autograd.grad(critic_val, actions[i], create_graph=True, retain_graph=True)[0]
 
         eta_i = 0.01 * grad_i.sign() / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
         
         # First-order Taylor approximation: f(x + η) ≈ f(x) + ∇f(x)^T η
-        j_tilde = critic_val + torch.dot(grad_i.flatten(), eta_i.flatten())
+        j_tilde = target_val + torch.dot(grad_i.flatten(), eta_i.flatten())
+
         p_torch_obs_i = torch_obs[i] + eta_i
-        p_action_logits_i = agent_i.policy(p_torch_obs_i)
-        p_action_log_probs = torch.log_softmax(p_action_logits_i, dim=-1)
-        p_max_action_idx = torch.argmax(p_action_log_probs, dim=-1)
-        j_perturbed = p_action_log_probs.gather(-1, p_max_action_idx.unsqueeze(-1)).squeeze()
+        if maddpg.discrete_action:
+            p_action_logits_i = agent_i.policy(p_torch_obs_i)
+            p_action_log_probs = torch.log_softmax(p_action_logits_i, dim=-1)
+            p_max_action_idx = torch.argmax(p_action_log_probs, dim=-1)
+            j_perturbed = p_action_log_probs.gather(-1, p_max_action_idx.unsqueeze(-1)).squeeze()
+        else:
+            j_perturbed = agent_i.policy(p_torch_obs_i).sum()
+            
         delta_error = abs(j_perturbed - j_tilde).item()
         delta_errors.append(delta_error)
 
@@ -98,12 +106,6 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
             actions = {agent_name: agent_actions[i].argmax() for i, agent_name in enumerate(env.possible_agents)}
         else:
             actions = {agent_name: agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)}
-        action_logits = maddpg.get_action_logits(torch_obs)
-        
-        # worst action attack
-        # Compute entropy of action logits
-        atk_agent_action_probs = torch.softmax(action_logits[atk_agent_id].squeeze(), dim=0)
-        atk_agent_log_probs = torch.log(atk_agent_action_probs)
         
         # results = compute_taylor_delta(maddpg, obs, list(actions.values()), env.action_space, 0.1)
         results = compute_taylor_delta_policy(maddpg, obs, list(actions.values()), env.action_space, 0.1)
@@ -156,7 +158,7 @@ def save_matrix_to_files(matrix, agent_id, logdir, suffix=""):
 
 
 def run(config):
-    maddpg = MADDPG.init_from_save(config.model_path)
+    maddpg = MADDPG.init_from_save(config.model_path, test_mode=True)
 
     # create a log directory under runs/<env_id>/<timestamp> using os and getcwd
     cwd = os.getcwd()

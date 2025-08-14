@@ -32,7 +32,7 @@ class PettingZooWrapper:
                 self.env = env_func.parallel_env(continuous_actions=continuous, render_mode='rgb_array')
         except:
             try:
-                self.env_func = getattr(sisl, env_name)
+                env_func = getattr(sisl, env_name)
                 self.env = env_func.parallel_env(n_pursuers=5, render_mode='rgb_array') if env_name == 'waterworld_v4' else env_func.parallel_env(render_mode='rgb_array')
             except:
                 env_func = getattr(atari, env_name)
