@@ -168,6 +168,10 @@ class OnPolicyBaseRunner:
         if self.algo_args["train"]["model_dir"] is not None:  # restore model
             self.restore()
 
+        # track best evaluation reward
+        self.best_reward = -np.inf
+        self.best_reward_episode = None
+
     def run(self):
         """Run the training (or rendering) pipeline."""
         if self.algo_args["render"]["use_render"] is True:
@@ -261,8 +265,17 @@ class OnPolicyBaseRunner:
             if episode % self.algo_args["train"]["eval_interval"] == 0:
                 if self.algo_args["eval"]["use_eval"]:
                     self.prep_rollout()
-                    self.eval()
-                self.save()
+                    avg_reward = self.eval_avg_reward()
+                    # save model if this is the best eval reward so far
+                    print(f"Average reward in episode {episode}: {avg_reward}")
+                    if avg_reward is not None and avg_reward > self.best_reward:
+                        self.best_reward = avg_reward
+                        self.best_reward_episode = episode
+                        # format reward for filename (limit decimals)
+                        self.save_with_reward(round(float(avg_reward), 3))
+                        print(f"Best reward updated: {self.best_reward} at episode {self.best_reward_episode}. Saving model.")
+                # still save latest checkpoint if desired
+                # self.save()
 
             self.after_update()
 
@@ -738,6 +751,24 @@ class OnPolicyBaseRunner:
                 self.value_normalizer.state_dict(),
                 str(self.save_dir) + "/value_normalizer" + ".pt",
             )
+    
+    def save_with_reward(self,reward):
+        """Save model parameters."""
+        for agent_id in range(self.num_agents):
+            policy_actor = self.actor[agent_id].actor
+            torch.save(
+                policy_actor.state_dict(),
+                str(self.save_dir) + "/actor_agent" + str(agent_id) + "_" + str(reward) + ".pt",
+            )
+        policy_critic = self.critic.critic
+        torch.save(
+            policy_critic.state_dict(), str(self.save_dir) + "/critic_agent"  + "_" + str(reward) + ".pt"
+        )
+        if self.value_normalizer is not None:
+            torch.save(
+                self.value_normalizer.state_dict(),
+                str(self.save_dir) + "/value_normalizer"  + "_" + str(reward) + ".pt",
+            )
 
     def restore(self):
         """Restore model parameters."""
@@ -773,3 +804,103 @@ class OnPolicyBaseRunner:
             self.writter.export_scalars_to_json(str(self.log_dir + "/summary.json"))
             self.writter.close()
             self.logger.close()
+    
+    # cloning the eval reward function to return the reward
+    @torch.no_grad()
+    def eval_avg_reward(self):
+        """Evaluate the model. Returns average episode reward across eval episodes."""
+        self.logger.eval_init()  # logger callback at the beginning of evaluation
+        eval_episode = 0
+
+        eval_obs, eval_share_obs, eval_available_actions = self.eval_envs.reset()
+
+        n_threads = self.algo_args["eval"]["n_eval_rollout_threads"]
+        eval_rnn_states = np.zeros(
+            (n_threads, self.num_agents, self.recurrent_n, self.rnn_hidden_size),
+            dtype=np.float32,
+        )
+        eval_masks = np.ones((n_threads, self.num_agents, 1), dtype=np.float32)
+
+        # cumulative rewards per environment thread and collected finished episode rewards
+        cum_rewards = np.zeros(n_threads, dtype=np.float32)
+        finished_episode_rewards = []
+
+        while True:
+            eval_actions_collector = []
+            for agent_id in range(self.num_agents):
+                eval_actions, temp_rnn_state = self.actor[agent_id].act(
+                    eval_obs[:, agent_id],
+                    eval_rnn_states[:, agent_id],
+                    eval_masks[:, agent_id],
+                    eval_available_actions[:, agent_id]
+                    if eval_available_actions[0] is not None
+                    else None,
+                    deterministic=True,
+                )
+                eval_rnn_states[:, agent_id] = _t2n(temp_rnn_state)
+                eval_actions_collector.append(_t2n(eval_actions))
+
+            eval_actions = np.array(eval_actions_collector).transpose(1, 0, 2)
+
+            (
+                eval_obs,
+                eval_share_obs,
+                eval_rewards,
+                eval_dones,
+                eval_infos,
+                eval_available_actions,
+            ) = self.eval_envs.step(eval_actions)
+
+            eval_data = (
+                eval_obs,
+                eval_share_obs,
+                eval_rewards,
+                eval_dones,
+                eval_infos,
+                eval_available_actions,
+            )
+            self.logger.eval_per_step(eval_data)  # logger callback at each step of evaluation
+
+            # Convert rewards to per-environment scalar reward by summing over agents
+            # handle shapes like (n_threads, n_agents, 1) or (n_threads, n_agents)
+            r = np.array(eval_rewards)
+            if r.ndim == 3 and r.shape[-1] == 1:
+                r = r.squeeze(-1)
+            per_env_reward = r.sum(axis=1)  # (n_threads,)
+
+            cum_rewards += per_env_reward
+
+            eval_dones_env = np.all(eval_dones, axis=1)
+
+            # reset rnn states for finished envs
+            eval_rnn_states[eval_dones_env == True] = np.zeros(
+                (
+                    (eval_dones_env == True).sum(),
+                    self.num_agents,
+                    self.recurrent_n,
+                    self.rnn_hidden_size,
+                ),
+                dtype=np.float32,
+            )
+
+            eval_masks = np.ones((n_threads, self.num_agents, 1), dtype=np.float32)
+            eval_masks[eval_dones_env == True] = np.zeros(
+                ((eval_dones_env == True).sum(), self.num_agents, 1), dtype=np.float32
+            )
+
+            # Collect finished episode rewards and reset cum_rewards for those threads
+            for i in range(n_threads):
+                if eval_dones_env[i]:
+                    finished_episode_rewards.append(float(cum_rewards[i]))
+                    cum_rewards[i] = 0.0
+                    eval_episode += 1
+                    self.logger.eval_thread_done(i)  # logger callback when an episode is done
+
+            if eval_episode >= self.algo_args["eval"]["eval_episodes"]:
+                self.logger.eval_log(eval_episode)  # logger callback at the end of evaluation
+                break
+
+        if len(finished_episode_rewards) == 0:
+            return None
+        avg_reward = float(np.mean(finished_episode_rewards))
+        return avg_reward
