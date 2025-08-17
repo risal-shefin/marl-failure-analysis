@@ -31,6 +31,11 @@ Delete lines regarding env.seed to avoid errors.
 
 You may need to run the training inside job. Head node might give errors.
 
+# MAPPO_MPE (source)
+```sh
+https://github.com/Lizhi-sjtu/MARL-code-pytorch/tree/main/1.MAPPO_MPE
+```
+
 # SKRL
 ```sh
 git clone https://github.com/Toni-SM/skrl.git
@@ -75,6 +80,10 @@ pip install -e .[extra]
 ```sh
 git clone https://github.com/shariqiqbal2810/maddpg-pytorch
 ```
+
+# ENVs
+- MPE: https://pettingzoo.farama.org/environments/mpe/
+- Multigrid: https://github.com/ArnaudFickinger/gym-multigrid
 
 ## Acknowledgements
 - AdvExRL (https://github.com/asifurrahman1/AdvEx-RL.git)

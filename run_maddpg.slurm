@@ -7,7 +7,7 @@
 #SBATCH --account=alqahtaniGrp
 #SBATCH --partition=gpu
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=64gb					#Change depending on how much Memory you need
+#SBATCH --mem=80gb					#Change depending on how much Memory you need
 #SBATCH --gres=gpu:A100_40:1
 #SBATCH --time=10-00:00:00				#4 days - change if you need more time
 
@@ -34,8 +34,10 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/.mujoco/mujoco210/bin:/usr/lib/nvidia
 # python train_pettingzoo.py simple_spread_v3 maddpg_continuous_tanh_activ --episode_length 100
 # python train_pettingzoo.py simple_spread_v3 maddpg_discrete_tanh_activ --discrete_action True --episode_length 100
 # python train_pettingzoo.py multiwalker_v9 maddpg_tanh_activ --episode_length 1000
-python train_pettingzoo.py simple_spread_v3 maddpg_discrete_n5_tanh_activ --discrete_action True --episode_length 100
+# python train_pettingzoo.py simple_spread_v3 maddpg_discrete_n5_tanh_activ --discrete_action True --episode_length 100
 
+# Reference Computation
+# python compute_ref_taylor_error.py multiwalker_v9 /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/maddpg-pytorch/models/multiwalker_v9/maddpg_tanh_activ/run2/model_24.50843327734619.pt
 
 # TESTING COMMANDS
 # python test_pettingzoo_by_act.py simple_speaker_listener_v4 /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/maddpg-pytorch/models/simple_speaker_listener_v4/maddpg_continuous/run1/model_-1.6530647514892638.pt --save_gifs
@@ -54,7 +56,13 @@ python train_pettingzoo.py simple_spread_v3 maddpg_discrete_n5_tanh_activ --disc
 # python test_pettingzoo_detection.py simple_spread_v3 /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/maddpg-pytorch/models/simple_spread_v3/maddpg_discrete_tanh_activ/run1/model_-24.24483667155664.pt --ref_val_dir /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/maddpg-pytorch/data/20250722_simple_spread_refs --attack_agent_id 0 --atk_start_step 0 --atk_end_step 10
 
 # N5
-# python compute_ref_taylor_error.py simple_spread_v3 /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/maddpg-pytorch/models/simple_spread_v3/maddpg_discrete_n5_tanh_activ/run1/model_-111.47935966899873.pt
+# python -m scripts.compute_ref_taylor_error.py simple_spread_v3 /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/maddpg-pytorch/models/simple_spread_v3/maddpg_discrete_n5_tanh_activ/run1/model_-111.47935966899873.pt
 # python test_pettingzoo_detection.py simple_spread_v3 /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/maddpg-pytorch/models/simple_spread_v3/maddpg_discrete_n5_tanh_activ/run1/model_-111.47935966899873.pt --ref_val_dir /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/maddpg-pytorch/data/20250810-193211_simple_spread_refs_n5 --attack_agent_id 4
+
+# multiwalker
+# python test_pettingzoo_detection.py multiwalker_v9 /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/maddpg-pytorch/models/multiwalker_v9/maddpg_tanh_activ/run2/model_24.50843327734619.pt --ref_val_dir /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/maddpg-pytorch/data/20250813-011645_multiwalker_v9_refs --attack_agent_id 1
+
+# detection metrics stats
+python -m scripts.compute_detection_metrics simple_spread_v3 /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/maddpg-pytorch/models/simple_spread_v3/maddpg_discrete_n5_tanh_activ/run1/model_-111.47935966899873.pt --ref_val_dir /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/maddpg-pytorch/data/20250814-210119_simple_spread_v3_refs_mmd_n5 --num_episodes 10000
 
 exit 0

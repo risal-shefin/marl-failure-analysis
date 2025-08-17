@@ -7,7 +7,7 @@
 #SBATCH --account=alqahtaniGrp
 #SBATCH --partition=gpu
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=32gb					#Change depending on how much Memory you need
+#SBATCH --mem=80gb					#Change depending on how much Memory you need
 #SBATCH --gres=gpu:A100_40:1
 #SBATCH --time=15-00:00:00				#4 days - change if you need more time
 
@@ -20,10 +20,11 @@ module load nvidia/cuda11/cudnn/8.7.0.84
 cd /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/.mujoco/mujoco210/bin:/usr/lib/nvidia
 
-python MAPPO_MPE_main.py --env_id simple_spread_v3 --evaluate_freq 1 --evaluate_times 10 --max_train_steps 500000000
+# python MAPPO_MPE_main.py --env_id simple_spread_v3 --evaluate_freq 1 --evaluate_times 10 --max_train_steps 500000000
+# python MAPPO_MPE_main.py --env_id multiwalker_v9 --evaluate_freq 1 --evaluate_times 10 --max_train_steps 500000000
 
 # Reference Val Computation
-# python -m scripts.compute_ref_taylor_error --model_dir /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE/runs/train_simple_spread_v3_N5_20250809-030114/models/MAPPO_seed_42_score_-102.64.pt
+# python -m scripts.compute_ref_taylor_error --env_id simple_spread_v3 --model_dir /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE/runs/train_simple_spread_v3_N5_20250809-030114/models/MAPPO_seed_42_score_-102.64.pt
 
 # TESTING COMMANDS
 # python test_detection.py --env_id simple_spread_v3 --model_dir /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE/runs/train_simple_spread_v3_20250730-025008/models/MAPPO_seed_42_score_-18.45.pt --ref_val_dir /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE/data/simple_spread/20250724-233738_refs --attack_agent_id=1 
@@ -33,5 +34,8 @@ python MAPPO_MPE_main.py --env_id simple_spread_v3 --evaluate_freq 1 --evaluate_
 
 # N5
 # python test_detection.py --env_id simple_spread_v3 --model_dir /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE/runs/train_simple_spread_v3_N5_20250809-030114/models/MAPPO_seed_42_score_-102.64.pt --ref_val_dir /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE/data/simple_spread/20250809-162515_N5_refs_mad --attack_agent_id=1
+
+# stats
+python -m scripts.compute_detection_metrics --env_id simple_spread_v3 --model_dir /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE/runs/train_simple_spread_v3_N5_20250809-030114/models/MAPPO_seed_42_score_-102.64.pt --ref_val_dir /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE/data/simple_spread/20250816-150325_refs_mmd_n5 --num_episodes 10000
 
 exit 0
