@@ -794,7 +794,7 @@ class Grid:
     #     return grid, vis_mask
 
     def process_vis(grid, agent_pos):
-        mask = np.zeros(shape=(grid.width, grid.height), dtype=np.bool)
+        mask = np.zeros(shape=(grid.width, grid.height), dtype=bool)
 
         mask[agent_pos[0], agent_pos[1]] = True
 
@@ -1078,7 +1078,7 @@ class MultiGridEnv(gym.Env):
         Generate random integer in [low,high[
         """
 
-        return self.np_random.randint(low, high)
+        return self.np_random.integers(low, high)
 
     def _rand_float(self, low, high):
         """

@@ -1,4 +1,4 @@
-from gym_multigrid.multigrid import *
+from ..multigrid import *
 
 class SoccerGameEnv(MultiGridEnv):
     """

@@ -1,4 +1,4 @@
-from gym_multigrid.multigrid import *
+from ..multigrid import *
 
 class CollectGameEnv(MultiGridEnv):
     """
@@ -87,12 +87,20 @@ class CollectGameEnv(MultiGridEnv):
         return obs, rewards, done, info
 
 
+# class CollectGame4HEnv10x10N2(CollectGameEnv):
+#     def __init__(self):
+#         super().__init__(size=10,
+#         num_balls=[5],
+#         agents_index = [1,2,3],
+#         balls_index=[0],
+#         balls_reward=[1],
+#         zero_sum=True)
+
 class CollectGame4HEnv10x10N2(CollectGameEnv):
     def __init__(self):
         super().__init__(size=10,
-        num_balls=[5],
-        agents_index = [1,2,3],
-        balls_index=[0],
-        balls_reward=[1],
+        num_balls=[2, 2, 1],
+        agents_index = [1, 1, 2, 2, 3, 3],
+        balls_index=[0, 1, 2],
+        balls_reward=[1, 1, 1],
         zero_sum=True)
-
