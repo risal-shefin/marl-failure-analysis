@@ -26,6 +26,7 @@ from matplotlib.patches import Patch
 USE_CUDA = torch.cuda.is_available()
 DEVICE = 'gpu' if USE_CUDA else 'cpu'
 torch_device = torch.device("cuda" if USE_CUDA else "cpu")
+K_SIGMA = 1.0
 
 def preprocess_env_atari(env):
     # as per openai baseline's MaxAndSKip wrapper, maxes over the last 2 frames
@@ -251,6 +252,8 @@ def get_episode_data(env, maddpg, config, logdir, ref_means, ref_std_devs, do_at
     fault_timeline = []  # list of dicts: {agent, t, contribs: {f: c}}
     frob_norms_matrix_history = []  # list over timesteps of N x N frob norm matrices
 
+    prev_errors = [0 for i in range(maddpg.nagents)]
+
     while True:
         # add Gaussian noise to an agent's observation
         # noise_scale = 0.0  # adjust the standard deviation of the noise as needed
@@ -271,26 +274,35 @@ def get_episode_data(env, maddpg, config, logdir, ref_means, ref_std_devs, do_at
             actions = {agent_name: agent_actions[i].argmax() for i, agent_name in enumerate(env.possible_agents)}
         else:
             actions = {agent_name: agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)}
-        action_logits = maddpg.get_action_logits(torch_obs)
 
         # random attack
         if do_attack and False:
             actions[env.possible_agents[atk_agent_id]] = env.action_spaces[env.possible_agents[atk_agent_id]].sample()
         
-        # worst action attack
-        # Compute entropy of action logits
-        atk_agent_action_probs = torch.softmax(action_logits[atk_agent_id].squeeze(), dim=0)
-        atk_agent_log_probs = torch.log(atk_agent_action_probs)
-        atk_agent_entropy = -torch.sum(atk_agent_action_probs * atk_agent_log_probs)
-        # if do_attack and np.random.rand() < 0.75:
-        if do_attack and atk_agent_entropy < 1.0 and cnt >= 5:
-            do_start_attack = True
-        # if do_attack and cnt >= config.atk_start_step and cnt <= config.atk_end_step:
-        if do_start_attack and attack_step_remaining > 0:
-            assert maddpg.discrete_action, "Worst action attack is only implemented for discrete action spaces."
-            actions[env.possible_agents[atk_agent_id]] = torch.argmin(action_logits[atk_agent_id]).item()
-            attacked_steps.append(cnt)
-            attack_step_remaining -= 1
+        # Action Space Attacks
+        if maddpg.discrete_action:
+            # Compute entropy of action logits
+            action_logits = maddpg.get_action_logits(torch_obs)
+            atk_agent_action_probs = torch.softmax(action_logits[atk_agent_id].squeeze(), dim=0)
+            atk_agent_log_probs = torch.log(atk_agent_action_probs)
+            atk_agent_entropy = -torch.sum(atk_agent_action_probs * atk_agent_log_probs)
+            if do_attack and atk_agent_entropy < 0.5 and cnt >= 5:
+                do_start_attack = True
+            # worst action attack for discrete action space
+            # if do_attack and np.random.rand() < 0.75:
+            # if do_attack and cnt >= config.atk_start_step and cnt <= config.atk_end_step:
+            if do_start_attack and attack_step_remaining > 0:
+                actions[env.possible_agents[atk_agent_id]] = torch.argmin(action_logits[atk_agent_id]).item()
+                attacked_steps.append(cnt)
+                attack_step_remaining -= 1
+        else:
+            if do_attack and cnt >= 5:
+                do_start_attack = True
+            # random action attack
+            if do_start_attack and attack_step_remaining > 0:
+                # actions[env.possible_agents[atk_agent_id]] = env.action_spaces[env.possible_agents[atk_agent_id]].sample()
+                # attacked_steps.append(cnt)
+                attack_step_remaining -= 1
 
         if config.save_gifs:
             frames.append(Image.fromarray(env.render()))
@@ -307,7 +319,8 @@ def get_episode_data(env, maddpg, config, logdir, ref_means, ref_std_devs, do_at
         for i in range(maddpg.nagents):
             result_deques[i].append(results[i])
             taylor_approx_error = np.mean(result_deques[i])
-            if abs(taylor_approx_error - ref_means[i][cnt]) > ref_std_devs[i][cnt]:
+            # if abs(taylor_approx_error - ref_means[i][cnt]) > K_SIGMA*ref_std_devs[i][cnt]:
+            if cnt > 0 and abs(results[i] - prev_errors[i]) > K_SIGMA * ref_std_devs[i][cnt]:
                 if i not in fault_first_detected:
                     print(f" [!!!] Anomaly detected for agent {i} at timestep: {cnt}. Taylor Appx. Error: {taylor_approx_error}")
                     fault_first_detected[i] = cnt
@@ -331,7 +344,12 @@ def get_episode_data(env, maddpg, config, logdir, ref_means, ref_std_devs, do_at
             frob_norms_deques[i].append(results_frob_norms[i])
             sec_dir_derivatives_deques[i].append(results_sec_dir_derivatives[i])
 
-        metric_vals.append([np.mean(result_deques[i]) for i in range(maddpg.nagents)])
+        # metric_vals.append([np.mean(result_deques[i]) for i in range(maddpg.nagents)])
+        if cnt == 0:
+            metric_vals.append([0 for i in range(maddpg.nagents)])
+        else:
+            metric_vals.append([results[i] - prev_errors[i] for i in range(maddpg.nagents)])
+        prev_errors = results
         frob_norms_list.append([np.mean(frob_norms_deques[i]) for i in range(maddpg.nagents)])
         sec_dir_derivatives.append([np.mean(sec_dir_derivatives_deques[i]) for i in range(maddpg.nagents)])
 
@@ -358,7 +376,11 @@ def plot_results(results_attacked, attacked_steps, atk_agent_id, ref_means, ref_
     t = len(results_attacked)     # number of time steps
     
     # Create n subplots in a row
-    fig, axes = plt.subplots(1, n, figsize=(4*n, 4))
+    max_per_row = 3
+    rows = math.ceil(n / max_per_row)
+    cols = min(n, max_per_row)
+    fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 4*rows))
+    axes = axes.flatten()  # so you can index axes[i] easily
     fig.suptitle(f'Taylor Error (Worst Action Attack | Attacked Agent ID: {atk_agent_id})', fontsize=16, y=0.95)
     
     # Ensure axes is iterable even for single agent case
@@ -372,12 +394,16 @@ def plot_results(results_attacked, attacked_steps, atk_agent_id, ref_means, ref_
         attacked_series = [results_attacked[t][i] for t in range(len(results_attacked))]
         
         # Plot the curves
-        steps = range(len(attacked_series))
-        
+        steps_length = len(attacked_series)
+        steps = range(steps_length)
+        ref_means[i] = ref_means[i][:steps_length]
+        ref_std_devs[i] = ref_std_devs[i][:steps_length]
+
         # Add green region using ref_means and ref_std_devs
-        ref_steps = range(len(ref_means[i]))
-        ref_lower = [ref_means[i][t] - ref_std_devs[i][t] for t in range(len(ref_means[i]))]
-        ref_upper = [ref_means[i][t] + ref_std_devs[i][t] for t in range(len(ref_means[i]))]
+        ref_lower = [ref_means[i][t] - K_SIGMA*ref_std_devs[i][t] for t in range(len(ref_means[i]))]
+        ref_upper = [ref_means[i][t] + K_SIGMA*ref_std_devs[i][t] for t in range(len(ref_means[i]))]
+        ref_lower = ref_lower[:steps_length]
+        ref_upper = ref_upper[:steps_length]
         ax.fill_between(steps, ref_lower, ref_upper, alpha=0.1, color='green')
         
         ax.plot(steps, attacked_series, 'r-', label='Observed', linewidth=2)
@@ -398,6 +424,10 @@ def plot_results(results_attacked, attacked_steps, atk_agent_id, ref_means, ref_
         ax.set_title(f'Agent {i}')
         ax.legend()
         ax.grid(True, alpha=0.3)
+
+    # hide the unused axes
+    for j in range(n, len(axes)):
+        fig.delaxes(axes[j])
     
     plt.tight_layout(rect=[0, 0, 1, 0.93])
     plt.savefig(os.path.join(logdir, f'plot_analysis_attacked_{atk_agent_id}.png'), dpi=300, bbox_inches='tight')
@@ -425,10 +455,11 @@ def plot_frobs(frobs_normal, frobs_atk, attacked_steps, atk_agent_id, logdir):
         attacked_series = [frobs_atk[t][i] for t in range(len(frobs_atk))]
         
         # Plot the curves
-        steps = range(len(normal_series))
-        ax.plot(steps, attacked_series, 'r-', label='Under Attack', linewidth=2)
-        ax.plot(steps, normal_series, 'g-', label='Normal', linewidth=2)
-        
+        normal_steps = range(len(normal_series))
+        attacked_steps = range(len(attacked_series))
+        ax.plot(attacked_steps, attacked_series, 'r-', label='Under Attack', linewidth=2)
+        ax.plot(normal_steps, normal_series, 'g-', label='Normal', linewidth=2)
+
         # Mark attacked timesteps with vertical lines
         if attacked_steps:
             for attack_step in attacked_steps:
@@ -468,9 +499,11 @@ def plot_sec_dir_derivatives(s_dir_derv_normal, s_dir_derv_atk, attacked_steps, 
         attacked_series = [s_dir_derv_atk[t][i] for t in range(len(s_dir_derv_atk))]
         
         # Plot the curves
-        steps = range(len(normal_series))
-        ax.plot(steps, normal_series, 'g-', label='Normal', linewidth=2)
-        ax.plot(steps, attacked_series, 'r-', label='Under Attack', linewidth=2)
+        normal_steps = range(len(normal_series))
+        attacked_steps = range(len(attacked_series))
+
+        ax.plot(normal_steps, normal_series, 'g-', label='Normal', linewidth=2)
+        ax.plot(attacked_steps, attacked_series, 'r-', label='Under Attack', linewidth=2)
         
         # Highlight region under y < 0 in red
         y_min = min(min(normal_series), min(attacked_series))
@@ -772,14 +805,17 @@ def run(config):
             reader = csv.reader(csvfile)
             next(reader)  # Skip header
             for row in reader:
-                ref_means[agent_id].append(float(row[2]))
-                ref_std_devs[agent_id].append(float(row[4]))
+                # ref_means[agent_id].append(float(row[2]))
+                # ref_std_devs[agent_id].append(float(row[4]))
                 # For MEDIAN+MAD
                 # ref_means[agent_id].append(float(row[7]))
                 # ref_std_devs[agent_id].append(float(row[8]))
+                # For diff mean+diff_std
+                ref_means[agent_id].append(float(row[9]))
+                ref_std_devs[agent_id].append(float(row[10]))
 
     attacked_agent_id = config.attack_agent_id  # specify the agent to attack
-    seed = 23
+    seed = 12345
 
     results_normal, _, frob_norms_normal, sec_dir_derivatives_normal, _, _ = get_episode_data(env, maddpg, config, logdir, ref_means, ref_std_devs, do_attack=False, atk_agent_id=attacked_agent_id, seed=seed)
 

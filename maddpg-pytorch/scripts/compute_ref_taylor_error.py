@@ -96,6 +96,7 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
     # initialize deque buffers for last batch_size observations
     result_deques = [deque(maxlen=5) for _ in range(maddpg.nagents)]
     metric_vals = []
+    raw_errors = []  # Store raw Taylor errors for difference computation
     cnt = 0
 
     while True:
@@ -113,6 +114,7 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
         for i in range(maddpg.nagents):
             result_deques[i].append(results[i])
         metric_vals.append([np.mean(result_deques[i]) for i in range(maddpg.nagents)])
+        raw_errors.append(results)  # Store raw errors for each timestep
 
         next_obs, rewards, dones, infos = env.step(actions)
         episode_reward += np.sum([rewards[:,i] if env.agent_types[i] != 'adversary' else np.zeros_like(rewards[:,i]) for i in range(maddpg.nagents)])
@@ -124,7 +126,7 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
 
     # print(f"Episode reward: {episode_reward}")
 
-    return metric_vals
+    return metric_vals, raw_errors
 
 
 def save_matrix_to_files(matrix, agent_id, logdir, suffix=""):
@@ -142,7 +144,7 @@ def save_matrix_to_files(matrix, agent_id, logdir, suffix=""):
     filepath = os.path.join(logdir, filename)
     
     # Create header row
-    header = ["agent", "timestep", "mean", "variance", "std_dev", "q1", "q3", "median", "mad"]
+    header = ["agent", "timestep", "mean", "variance", "std_dev", "q1", "q3", "median", "mad", "diff_mean", "diff_std"]
     
     with open(filepath, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
@@ -189,20 +191,26 @@ def run(config):
     maddpg.prep_training(device=DEVICE)
 
     result_dataset = [{} for _ in range(maddpg.nagents)]
+    raw_error_dataset = [{} for _ in range(maddpg.nagents)]
     for i in tqdm(range(total_episodes), desc="Processing episodes"):
-        results = get_episode_data(env, maddpg, config, logdir)
+        results, raw_errors = get_episode_data(env, maddpg, config, logdir)
         for timestep in range(len(results)):
             for agent_id in range(maddpg.nagents):
                 if timestep not in result_dataset[agent_id]:
                     result_dataset[agent_id][timestep] = []
+                    raw_error_dataset[agent_id][timestep] = []
                 result_dataset[agent_id][timestep].append(results[timestep][agent_id])
+                raw_error_dataset[agent_id][timestep].append(raw_errors[timestep][agent_id])
 
     for agent_id in range(maddpg.nagents):
         # Compute mean and variance for each agent pair across all episodes
         print(f"\n---- Agent {agent_id}:")
         metrics_mat = []
-        for timestep, timestep_values in result_dataset[agent_id].items():
+        sorted_timesteps = sorted(result_dataset[agent_id].keys())
+        
+        for i, timestep in enumerate(sorted_timesteps):
             print(f"\n ---- Timestep {timestep}:")
+            timestep_values = result_dataset[agent_id][timestep]
             # Extract values for agent pair (i,j) across all episodes
             mean_val = np.mean(timestep_values)
             var_val = np.var(timestep_values)
@@ -211,8 +219,21 @@ def run(config):
             median_val = np.median(timestep_values)
             # Compute MAD (Median Absolute Deviation)
             mad_val = np.median(np.abs(np.array(timestep_values) - median_val))
-            print(f"Agent {agent_id}: mean = {mean_val:.4f}, variance = {var_val:.4f}, std_dev = {std_dev_val:.4f}, IQR = {q3 - q1:.4f}, median = {median_val:.4f}, MAD = {mad_val:.4f}")
-            metrics = [mean_val, var_val, std_dev_val, q1, q3, median_val, mad_val]
+            
+            # Compute difference metrics (e_i - e_{i-1})
+            if i == 0:  # For timestep 0, differences are 0
+                diff_mean = 0.0
+                diff_std = 0.0
+            else:
+                prev_timestep = sorted_timesteps[i-1]
+                curr_errors = raw_error_dataset[agent_id][timestep]
+                prev_errors = raw_error_dataset[agent_id][prev_timestep]
+                differences = [curr - prev for curr, prev in zip(curr_errors, prev_errors)]
+                diff_mean = np.mean(differences)
+                diff_std = np.std(differences)
+            
+            print(f"Agent {agent_id}: mean = {mean_val:.4f}, variance = {var_val:.4f}, std_dev = {std_dev_val:.4f}, IQR = {q3 - q1:.4f}, median = {median_val:.4f}, MAD = {mad_val:.4f}, diff_mean = {diff_mean:.4f}, diff_std = {diff_std:.4f}")
+            metrics = [mean_val, var_val, std_dev_val, q1, q3, median_val, mad_val, diff_mean, diff_std]
             metrics_mat.append(metrics)
 
         save_matrix_to_files(metrics_mat, agent_id, logdir, suffix=f"{agent_id}")
