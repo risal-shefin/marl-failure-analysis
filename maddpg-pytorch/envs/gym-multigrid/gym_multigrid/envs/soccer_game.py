@@ -1,4 +1,5 @@
 from ..multigrid import *
+MAX_STEPS = 1000
 
 class SoccerGameEnv(MultiGridEnv):
     """
@@ -35,7 +36,8 @@ class SoccerGameEnv(MultiGridEnv):
             grid_size=size,
             width=width,
             height=height,
-            max_steps= 10000,
+            # max_steps= 10000,
+            max_steps=MAX_STEPS,
             # Set this to True for maximum speed
             see_through_walls=False,
             agents=agents,
@@ -105,6 +107,18 @@ class SoccerGameEnv(MultiGridEnv):
         return obs, rewards, done, info
 
 
+# class SoccerGame4HEnv10x15N2(SoccerGameEnv):
+#     def __init__(self):
+#         super().__init__(size=None,
+#         height=10,
+#         width=15,
+#         goal_pst = [[1,5], [13,5]],
+#         goal_index = [1,2],
+#         num_balls=[1],
+#         agents_index = [1,1,2,2],
+#         balls_index=[0],
+#         zero_sum=True)
+
 class SoccerGame4HEnv10x15N2(SoccerGameEnv):
     def __init__(self):
         super().__init__(size=None,
@@ -113,6 +127,6 @@ class SoccerGame4HEnv10x15N2(SoccerGameEnv):
         goal_pst = [[1,5], [13,5]],
         goal_index = [1,2],
         num_balls=[1],
-        agents_index = [1,1,2,2],
+        agents_index = [1,1,1,2,2,2],
         balls_index=[0],
         zero_sum=True)

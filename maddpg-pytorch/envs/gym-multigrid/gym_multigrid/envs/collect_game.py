@@ -1,4 +1,5 @@
 from ..multigrid import *
+MAX_STEPS = 1000
 
 class CollectGameEnv(MultiGridEnv):
     """
@@ -33,7 +34,8 @@ class CollectGameEnv(MultiGridEnv):
             grid_size=size,
             width=width,
             height=height,
-            max_steps= 10000,
+            # max_steps= 10000,
+            max_steps=MAX_STEPS,
             # Set this to True for maximum speed
             see_through_walls=False,
             agents=agents,
@@ -101,6 +103,6 @@ class CollectGame4HEnv10x10N2(CollectGameEnv):
         super().__init__(size=10,
         num_balls=[2, 2, 1],
         agents_index = [1, 1, 2, 2, 3, 3],
-        balls_index=[0, 1, 2],
+        balls_index=[1, 2, 3],
         balls_reward=[1, 1, 1],
-        zero_sum=True)
+        zero_sum=False)
