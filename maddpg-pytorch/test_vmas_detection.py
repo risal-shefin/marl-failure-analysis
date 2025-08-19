@@ -9,11 +9,8 @@ from utils.make_env import make_env
 from algorithms.maddpg import MADDPG
 import os
 from datetime import datetime
-from utils.pettingzoo_wrapper import PettingZooWrapper
+from utils.vmas_wrapper import VmasWrapper
 from utils.misc import gumbel_softmax
-import pettingzoo.mpe as mpe
-import pettingzoo.sisl as sisl
-import pettingzoo.atari as atari
 import matplotlib.pyplot as plt
 from PIL import Image
 from collections import deque
@@ -27,20 +24,6 @@ USE_CUDA = torch.cuda.is_available()
 DEVICE = 'gpu' if USE_CUDA else 'cpu'
 torch_device = torch.device("cuda" if USE_CUDA else "cpu")
 K_SIGMA = 0.9
-
-def preprocess_env_atari(env):
-    # as per openai baseline's MaxAndSKip wrapper, maxes over the last 2 frames
-    # to deal with frame flickering
-    env = supersuit.max_observation_v0(env, 2)
-    # skip frames for faster processing and less control
-    # to be compatible with gym, use frame_skip(env, (2,5))
-    env = supersuit.frame_skip_v0(env, 4)
-    # downscale observation for faster processing
-    env = supersuit.resize_v1(env, 84, 84)
-    # allow agent to see everything on the screen despite Atari's flickering screen problem
-    env = supersuit.frame_stack_v1(env, 4)
-    return env
-
 
 def fgsm_attack(maddpg, obs, actions, attacked_agent_id, epsilon):
     # Convert to tensors with gradient tracking
@@ -267,54 +250,40 @@ def get_episode_data(env, maddpg, config, logdir, ref_vals, ref_std_devs, detect
             temp_actions = [agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)]
             obs[atk_agent_id] = fgsm_attack(maddpg, obs, temp_actions, atk_agent_id, 0.1)
         
-        torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
+        torch_obs = [Variable(torch.Tensor(obs[i]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
         torch_agent_actions = maddpg.step(torch_obs, explore=False)
-        agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
-        if maddpg.discrete_action:
-            actions = {agent_name: agent_actions[i].argmax() for i, agent_name in enumerate(env.possible_agents)}
-        else:
-            actions = {agent_name: agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)}
+        actions = [np.array([ac.data.cpu().numpy().argmax()]) for ac in torch_agent_actions]
 
         # random attack
         if do_attack and False:
-            actions[env.possible_agents[atk_agent_id]] = env.action_spaces[env.possible_agents[atk_agent_id]].sample()
-        
-        # Action Space Attacks
-        if maddpg.discrete_action:
-            # Compute entropy of action logits
-            action_logits = maddpg.get_action_logits(torch_obs)
-            atk_agent_action_probs = torch.softmax(action_logits[atk_agent_id].squeeze(), dim=0)
-            atk_agent_log_probs = torch.log(atk_agent_action_probs)
-            atk_agent_entropy = -torch.sum(atk_agent_action_probs * atk_agent_log_probs)
-            if do_attack and atk_agent_entropy < 0.5 and cnt >= 5:
-                do_start_attack = True
-            # worst action attack for discrete action space
-            # if do_attack and np.random.rand() < 0.75:
-            # if do_attack and cnt >= config.atk_start_step and cnt <= config.atk_end_step:
-            if do_start_attack and attack_step_remaining > 0:
-                actions[env.possible_agents[atk_agent_id]] = torch.argmin(action_logits[atk_agent_id]).item()
-                attacked_steps.append(cnt)
-                attack_step_remaining -= 1
-        else:
-            if do_attack and cnt >= 5:
-                do_start_attack = True
-            # random action attack
-            if do_start_attack and attack_step_remaining > 0:
-                # actions[env.possible_agents[atk_agent_id]] = env.action_spaces[env.possible_agents[atk_agent_id]].sample()
-                # attacked_steps.append(cnt)
-                attack_step_remaining -= 1
+            actions[atk_agent_id] = env.action_spaces[atk_agent_id].sample()
+
+        # Compute entropy of action logits
+        action_logits = maddpg.get_action_logits(torch_obs)
+        atk_agent_action_probs = torch.softmax(action_logits[atk_agent_id].squeeze(), dim=0)
+        atk_agent_log_probs = torch.log(atk_agent_action_probs)
+        atk_agent_entropy = -torch.sum(atk_agent_action_probs * atk_agent_log_probs)
+        if do_attack and atk_agent_entropy < 0.5 and cnt >= 5:
+            do_start_attack = True
+        # worst action attack for discrete action space
+        # if do_attack and np.random.rand() < 0.75:
+        # if do_attack and cnt >= config.atk_start_step and cnt <= config.atk_end_step:
+        if do_start_attack and attack_step_remaining > 0:
+            actions[atk_agent_id] = torch.argmin(action_logits[atk_agent_id]).item()
+            attacked_steps.append(cnt)
+            attack_step_remaining -= 1
 
         if config.save_gifs:
             frames.append(Image.fromarray(env.render()))
         
         # results = compute_taylor_delta(maddpg, obs, list(actions.values()), env.action_space, 0.1)
-        results = compute_taylor_delta_policy(maddpg, obs, list(actions.values()), env.action_space, 0.01)
+        results = compute_taylor_delta_policy(maddpg, obs, actions, env.action_space, 0.01)
         # results = compute_eigen(maddpg, obs, list(actions.values()), env.action_space, 0.1)
-        results_frob_norms = compute_frob_norms(maddpg, obs, list(actions.values()), env.action_space, atk_agent_id)
+        results_frob_norms = compute_frob_norms(maddpg, obs, actions, env.action_space, atk_agent_id)
         # Pairwise Frobenius norms across all agent pairs for cascading impact analysis
-        pairwise_frobs = compute_pairwise_frob_norms(maddpg, obs, list(actions.values()), env.action_space)
+        pairwise_frobs = compute_pairwise_frob_norms(maddpg, obs, actions, env.action_space)
         frob_norms_matrix_history.append(pairwise_frobs)
-        results_sec_dir_derivatives = compute_2nd_ord_dir_derivatives(maddpg, obs, list(actions.values()), env.action_space, atk_agent_id)
+        results_sec_dir_derivatives = compute_2nd_ord_dir_derivatives(maddpg, obs, actions, env.action_space, atk_agent_id)
 
         for i in range(maddpg.nagents):
             result_deques[i].append(results[i])
@@ -799,23 +768,7 @@ def run(config):
     logdir = os.path.join(cwd, 'runs', f"{config.env_id}_{'discrete' if maddpg.discrete_action else 'continuous'}", timestamp)
     os.makedirs(logdir, exist_ok=True)
 
-    try:
-        env_func = getattr(mpe, config.env_id)
-        if config.env_id == "simple_spread_v3":
-            env = env_func.parallel_env(continuous_actions= not maddpg.discrete_action, render_mode='rgb_array', N=5)
-        else:
-            env = env_func.parallel_env(continuous_actions= not maddpg.discrete_action, render_mode='rgb_array')
-    except:
-        try:
-            env_func = getattr(sisl, config.env_id)
-            env = env_func.parallel_env(n_pursuers=5, render_mode='rgb_array') if config.env_id == 'waterworld_v4' else env_func.parallel_env(render_mode='rgb_array')
-        except:
-            env_func = getattr(atari, config.env_id)
-            env = env_func.parallel_env(render_mode='rgb_array')
-            env = preprocess_env_atari(env)
-
-    env = PettingZooWrapper.wrap_env(env)
-    env.reset()
+    env = VmasWrapper.make_and_wrap_env(config.env_id, max_steps=config.episode_length, is_discrete_action=config.discrete_action)
 
     # maddpg.prep_rollouts(device=DEVICE)
     maddpg.prep_training(device=DEVICE)

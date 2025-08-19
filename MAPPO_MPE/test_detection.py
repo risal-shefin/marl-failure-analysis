@@ -211,7 +211,7 @@ def compute_eigen_policy(runner: Runner_MAPPO_MPE, states):
     return results
 
 
-def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_means, ref_std_devs, do_attack: bool, attacked_agent_id: str):
+def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_vals, ref_std_devs, do_attack: bool, attacked_agent_id: str, detection_method='mean_std'):
 
     # Run one episode and perturb the observation of the "adversary" agent
     state = env.reset(seed=runner.seed)
@@ -237,6 +237,8 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_means, ref_std_devs, do_
     fault_first_detected = {}  # agent_id -> timestep first detected
     fault_timeline = []  # list of dicts: {agent, t, contribs: {f: c}}
     frob_norms_matrix_history = []  # list over timesteps of N x N frob norm matrices
+
+    prev_errors = [0 for i in range(runner.args.N)]
 
     while not all(done):
         # Get actions from the agent (in evaluation mode, training=False)
@@ -275,10 +277,28 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_means, ref_std_devs, do_
         # results = compute_eigen_policy(runner, state)
         for i in range(runner.args.N):
             result_deques[i].append(results[i])
-            taylor_approx_error = np.mean(result_deques[i])
-            if abs(taylor_approx_error - ref_means[i][iter_count]) > 0.6*ref_std_devs[i][iter_count]:
+            
+            # Apply different detection methods
+            if detection_method == 'mean_std':
+                detection_value = np.mean(result_deques[i])
+                threshold_exceeded = abs(detection_value - ref_vals[i][iter_count]) > 0.6 * ref_std_devs[i][iter_count]
+            elif detection_method == 'median_mad':
+                detection_value = np.mean(result_deques[i])
+                threshold_exceeded = abs(detection_value - ref_vals[i][iter_count]) > 0.6 * ref_std_devs[i][iter_count]
+            elif detection_method == 'diff':
+                if iter_count > 0:
+                    current_diff = results[i] - prev_errors[i]
+                    threshold_exceeded = abs(current_diff - ref_vals[i][iter_count]) > 0.6 * ref_std_devs[i][iter_count]
+                    detection_value = current_diff
+                else:
+                    threshold_exceeded = False
+                    detection_value = 0.0
+            else:
+                raise ValueError(f"Unknown detection method: {detection_method}")
+            
+            if threshold_exceeded:
                 if i not in fault_first_detected:
-                    print(f" [!!!] Anomaly detected for agent {i} at timestep: {iter_count}. Taylor Appx. Error: {taylor_approx_error}")
+                    print(f" [!!!] Anomaly detected for agent {i} at timestep: {iter_count}. Method: {detection_method}. Value: {detection_value:.6f}")
                     fault_first_detected[i] = iter_count
                     # Cascading Impact Analysis
                     prev_faults = [(f, tf) for f, tf in fault_first_detected.items() if f != i and tf < iter_count]
@@ -301,6 +321,7 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_means, ref_std_devs, do_
             sec_dir_derivatives_deques[i].append(results_sec_dir_derivatives[i])
 
         metric_vals.append([np.mean(result_deques[i]) for i in range(runner.args.N)])
+        prev_errors = results
         frob_norms_list.append([np.mean(frob_norms_deques[i]) for i in range(runner.args.N)])
         sec_dir_derivatives.append([np.mean(sec_dir_derivatives_deques[i]) for i in range(runner.args.N)])
 
@@ -316,7 +337,7 @@ def get_episode_data(env, runner: Runner_MAPPO_MPE, ref_means, ref_std_devs, do_
     return metric_vals, attacked_steps, frob_norms_list, sec_dir_derivatives, frob_norms_matrix_history, fault_timeline
 
 
-def plot_results(results_attacked, attacked_steps, atk_agent_id, ref_means, ref_std_devs, logdir):
+def plot_results(results_attacked, attacked_steps, atk_agent_id, ref_vals, ref_std_devs, logdir, detection_method='mean_std'):
     n = len(results_attacked[0])  # number of agents
     t = len(results_attacked)     # number of time steps
     
@@ -328,7 +349,7 @@ def plot_results(results_attacked, attacked_steps, atk_agent_id, ref_means, ref_
     cols = min(n, max_per_row)
     fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 4*rows))
     axes = axes.flatten()  # so you can index axes[i] easily
-    fig.suptitle(f'Taylor Error (Worst Action Attack | Attacked Agent ID: {atk_agent_id})', fontsize=16, y=0.95)
+    fig.suptitle(f'Taylor Error ({detection_method.upper().replace("_", "+")} | Worst Action Attack | Attacked Agent ID: {atk_agent_id})', fontsize=16, y=0.95)
     
     # Ensure axes is iterable even for single agent case
     if n == 1:
@@ -340,17 +361,34 @@ def plot_results(results_attacked, attacked_steps, atk_agent_id, ref_means, ref_
         # Extract time series for agent i
         attacked_series = [results_attacked[t][i] for t in range(len(results_attacked))]
         
-        # Plot the curves
-        steps = range(len(attacked_series))
+        # For 'diff' detection method, plot the differences instead of raw values
+        if detection_method == 'diff':
+            # Calculate differences for plotting (skip first timestep as it has no previous value)
+            diff_series = []
+            for t in range(1, len(attacked_series)):
+                diff = attacked_series[t] - attacked_series[t-1]
+                diff_series.append(diff)
+            
+            # Update series to plot differences
+            attacked_series = diff_series
+            steps_length = len(attacked_series)
+            steps = range(1, steps_length + 1)  # Start from timestep 1
+        else:
+            # Plot the curves normally
+            steps_length = len(attacked_series)
+            steps = range(steps_length)
         
-        # Add green region using ref_means and ref_std_devs
-        ref_steps = range(len(ref_means[i]))
-        ref_lower = [ref_means[i][t] - 0.6*ref_std_devs[i][t] for t in range(len(ref_means[i]))]
-        ref_upper = [ref_means[i][t] + 0.6*ref_std_devs[i][t] for t in range(len(ref_means[i]))]
+        # Adjust reference data to match the series length
+        ref_vals[i] = ref_vals[i][:steps_length]
+        ref_std_devs[i] = ref_std_devs[i][:steps_length]
+        
+        # Add green region using ref_vals and ref_std_devs
+        ref_lower = [ref_vals[i][t] - 0.6*ref_std_devs[i][t] for t in range(len(ref_vals[i]))]
+        ref_upper = [ref_vals[i][t] + 0.6*ref_std_devs[i][t] for t in range(len(ref_vals[i]))]
         ax.fill_between(steps, ref_lower, ref_upper, alpha=0.1, color='green')
         
         ax.plot(steps, attacked_series, 'r-', label='Observed', linewidth=2)
-        ax.plot(steps, ref_means[i], 'g--', label='Reference (Mean)', linewidth=2)
+        ax.plot(steps, ref_vals[i], 'g--', label='Reference', linewidth=2)
         
         # Mark attacked timesteps with vertical lines
         if i == atk_agent_id and attacked_steps:
@@ -363,7 +401,10 @@ def plot_results(results_attacked, attacked_steps, atk_agent_id, ref_means, ref_
             ax.axvspan(start, end, color='red', alpha=0.1, label='Attacked Region')
         
         ax.set_xlabel('Step')
-        ax.set_ylabel('Taylor Delta Error')
+        if detection_method == 'diff':
+            ax.set_ylabel('Taylor Error Difference')
+        else:
+            ax.set_ylabel('Taylor Delta Error')
         ax.set_title(f'Agent {i}')
         ax.legend()
         ax.grid(True, alpha=0.3)
@@ -420,7 +461,7 @@ def plot_frobs(frobs_normal, frobs_atk, attacked_steps, atk_agent_id, logdir):
     print(f"Saved frobenius norms plot to {logdir}")
 
 
-def plot_sec_dir_derivatives(s_dir_derv_normal, s_dir_derv_atk, attacked_steps, atk_agent_id, ref_means, ref_std_devs, logdir):
+def plot_sec_dir_derivatives(s_dir_derv_normal, s_dir_derv_atk, attacked_steps, atk_agent_id, ref_vals, ref_std_devs, logdir):
     n = len(s_dir_derv_normal[0])  # number of agents
     t = len(s_dir_derv_normal)     # number of time steps
     
@@ -442,15 +483,15 @@ def plot_sec_dir_derivatives(s_dir_derv_normal, s_dir_derv_atk, attacked_steps, 
         # Plot the curves
         steps = range(len(normal_series))
 
-        # ref_lower = [ref_means[i][t] - ref_std_devs[i][t] for t in range(len(ref_means[i]))]
-        # ref_upper = [ref_means[i][t] + ref_std_devs[i][t] for t in range(len(ref_means[i]))]
-        ref_lower = ref_means[i]
+        # ref_lower = [ref_vals[i][t] - ref_std_devs[i][t] for t in range(len(ref_vals[i]))]
+        # ref_upper = [ref_vals[i][t] + ref_std_devs[i][t] for t in range(len(ref_vals[i]))]
+        ref_lower = ref_vals[i]
         ref_upper = ref_std_devs[i]
         # ax.fill_between(steps, ref_lower, ref_upper, alpha=0.1, color='green')
         
         ax.plot(steps, attacked_series, 'r-', label='Under Attack', linewidth=2)
         # ax.plot(steps, normal_series, 'g-', label='Normal', linewidth=2)
-        # ax.plot(steps, ref_means[i], 'g--', label='Normal (Mean)', linewidth=2)
+        # ax.plot(steps, ref_vals[i], 'g--', label='Normal (Mean)', linewidth=2)
         
         # Highlight region under y < 0 in red
         y_min = min(min(normal_series), min(attacked_series))
@@ -719,9 +760,9 @@ def main(runner: Runner_MAPPO_MPE, env, args):
     print(f"Logging directory: {logdir}")
 
     # Read reference values from CSV files if provided
-    ref_means = [[] for _ in range(runner.args.N)]
+    ref_vals = [[] for _ in range(runner.args.N)]
     ref_std_devs = [[] for _ in range(runner.args.N)]
-    ref_sdd_means = [[] for _ in range(runner.args.N)]
+    ref_sdd_vals = [[] for _ in range(runner.args.N)]
     ref_sdd_std_devs = [[] for _ in range(runner.args.N)]
 
     for agent_id in range(runner.args.N):
@@ -732,11 +773,20 @@ def main(runner: Runner_MAPPO_MPE, env, args):
             reader = csv.reader(csvfile)
             next(reader)  # Skip header
             for row in reader:
-                ref_means[agent_id].append(float(row[2]))
-                ref_std_devs[agent_id].append(float(row[4]))
-                # mean, mad
-                # ref_means[agent_id].append(float(row[7]))
-                # ref_std_devs[agent_id].append(float(row[8]))
+                if args.detection_method == 'mean_std':
+                    # Use mean and std_dev columns
+                    ref_vals[agent_id].append(float(row[2]))  # mean
+                    ref_std_devs[agent_id].append(float(row[4]))  # std_dev
+                elif args.detection_method == 'median_mad':
+                    # Use median and MAD columns
+                    ref_vals[agent_id].append(float(row[7]))  # median
+                    ref_std_devs[agent_id].append(float(row[8]))  # MAD
+                elif args.detection_method == 'diff':
+                    # Use diff_mean and diff_std columns
+                    ref_vals[agent_id].append(float(row[9]))  # diff_mean
+                    ref_std_devs[agent_id].append(float(row[10]))  # diff_std
+                else:
+                    raise ValueError(f"Unknown detection method: {args.detection_method}")
 
         # Load 2nd order directional derivative reference data
         # sdd_csv_filename = f"mappo_sdd_agent_{agent_id}_vs_all_episodes_10000.csv"
@@ -762,16 +812,16 @@ def main(runner: Runner_MAPPO_MPE, env, args):
     # episode_data_unattacked = get_episode_data(env, runner, False, None)
     # save_matrix_to_files(episode_data_unattacked, None, runner.args.N, logdir)
 
-    results_normal, _, frob_norms_normal, sec_dir_derivatives_normal, _, _ = get_episode_data(env, runner, ref_means, ref_std_devs, False, attacked_agent_id)
+    results_normal, _, frob_norms_normal, sec_dir_derivatives_normal, _, _ = get_episode_data(env, runner, ref_vals, ref_std_devs, False, attacked_agent_id, args.detection_method)
 
-    results_attacked, attacked_steps, frob_norms_atk, sec_dir_derivatives_atk, frob_norms_matrix_history, fault_timeline = get_episode_data(env, runner, ref_means, ref_std_devs, True, attacked_agent_id)
+    results_attacked, attacked_steps, frob_norms_atk, sec_dir_derivatives_atk, frob_norms_matrix_history, fault_timeline = get_episode_data(env, runner, ref_vals, ref_std_devs, True, attacked_agent_id, args.detection_method)
     save_matrix_to_files(results_attacked, attacked_steps, attacked_agent_id, runner.args.N, logdir, f'mappo_taylor_error_atk_{attacked_agent_id}.csv')
     save_matrix_to_files(frob_norms_atk, attacked_steps, attacked_agent_id, runner.args.N, logdir, f'mappo_frobenius_norms_atk_{attacked_agent_id}.csv')
     save_matrix_to_files(sec_dir_derivatives_atk, attacked_steps, attacked_agent_id, runner.args.N, logdir, f'mappo_sec_dir_derivatives_atk_{attacked_agent_id}.csv')
 
-    plot_results(results_attacked, attacked_steps, attacked_agent_id, ref_means, ref_std_devs, logdir)
+    plot_results(results_attacked, attacked_steps, attacked_agent_id, ref_vals, ref_std_devs, logdir, args.detection_method)
     plot_frobs(frob_norms_normal, frob_norms_atk, attacked_steps, attacked_agent_id, logdir)
-    plot_sec_dir_derivatives(sec_dir_derivatives_normal, sec_dir_derivatives_atk, attacked_steps, attacked_agent_id, ref_sdd_means, ref_sdd_std_devs, logdir)
+    plot_sec_dir_derivatives(sec_dir_derivatives_normal, sec_dir_derivatives_atk, attacked_steps, attacked_agent_id, ref_sdd_vals, ref_sdd_std_devs, logdir)
     plot_fault_timeline(fault_timeline, runner.args.N, logdir)
     plot_contributor_barchart(fault_timeline, runner.args.N, logdir)
     env.close()
@@ -817,6 +867,7 @@ if __name__ == '__main__':
     parser.add_argument("--atk_step_end", type=int, default=math.inf, help="Attack end step")
     parser.add_argument("--model_dir", type=str, required=True, help="Directory from load the trained model")
     parser.add_argument("--ref_val_dir", type=str, required=True, help="Directory to fetch reference value files")
+    parser.add_argument("--detection_method", type=str, default="mean_std", choices=['mean_std', 'median_mad', 'diff'], help="Detection method to use")
 
     args = parser.parse_args()
     env = make_env(env_name=args.env_id)
