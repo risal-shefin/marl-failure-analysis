@@ -119,15 +119,29 @@ def init_weights(m: nn.Module):
 
 @torch.no_grad()
 def normalize_tensor(tensor: Tensor, eps: float = 1e-8, mask: Optional[Tensor] = None) -> Tensor:
-    unmasked = mask is None
-    if unmasked:
+    """Normalize a tensor using its mean and standard deviation.
+
+    If a boolean ``mask`` is provided, only the elements where ``mask`` is
+    ``True`` are considered when computing the statistics. The returned tensor
+    keeps the same shape as the input, with unmasked positions filled with
+    zeros.
+
+    Args:
+        tensor (Tensor): tensor to normalize.
+        eps (float): small value to avoid division by zero.
+        mask (Tensor, optional): boolean mask indicating the valid entries.
+
+    Returns:
+        Tensor: the normalized tensor with the same shape as ``tensor``.
+    """
+
+    if mask is None:
         mask = torch.ones_like(tensor, dtype=torch.bool)
     masked_tensor = tensor[mask]
     normalized = (masked_tensor - masked_tensor.mean()) / (masked_tensor.std() + eps)
-    if unmasked:
-        return normalized.reshape_as(mask)
-    else:
-        return normalized
+    result = torch.zeros_like(tensor)
+    result[mask] = normalized
+    return result
 
 
 def polynomial_decay(
