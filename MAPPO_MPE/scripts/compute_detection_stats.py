@@ -28,6 +28,8 @@ except ImportError:
 
 USE_CUDA = torch.cuda.is_available()
 DEVICE = 'cuda' if USE_CUDA else 'cpu'
+ATTACK_START_TS = 5
+ATTACK_STOP_TS = 15
 
 def compute_taylor_error_policy(runner: Runner_MAPPO_MPE, states, epsilon):
     """
@@ -87,7 +89,7 @@ def run_single_detection_episode(env, runner, ref_values, ref_stds, attacked_age
                 actions.append(action)
 
         # Attack logic
-        if cnt >= 10 and cnt <= 50:  # Attack window
+        if cnt >= ATTACK_START_TS and cnt <= ATTACK_STOP_TS:  # Attack window
             worst_action = np.random.choice(runner.args.action_dim)
             actions[attacked_agent_id] = worst_action
 
@@ -98,26 +100,25 @@ def run_single_detection_episode(env, runner, ref_values, ref_stds, attacked_age
         for i in range(runner.args.N):
             result_deques[i].append(results[i])
             
-            if cnt < len(ref_values[i]):
-                if detection_method == 'mean_std':
-                    taylor_approx_error = np.mean(result_deques[i])
-                    threshold_exceeded = abs(taylor_approx_error - ref_values[i][cnt]) > k_sigma * ref_stds[i][cnt]
-                elif detection_method == 'median_mad':
-                    taylor_approx_error = np.mean(result_deques[i])
-                    threshold_exceeded = abs(taylor_approx_error - ref_values[i][cnt]) > k_sigma * ref_stds[i][cnt]
-                elif detection_method == 'diff':
-                    if cnt > 0:
-                        current_diff = results[i] - prev_errors[i]
-                        threshold_exceeded = abs(current_diff - ref_values[i][cnt]) > k_sigma * ref_stds[i][cnt]
-                    else:
-                        threshold_exceeded = False
+            if detection_method == 'mean_std':
+                taylor_approx_error = np.mean(result_deques[i])
+                threshold_exceeded = abs(taylor_approx_error - ref_values[i][cnt]) > k_sigma * ref_stds[i][cnt]
+            elif detection_method == 'median_mad':
+                taylor_approx_error = np.mean(result_deques[i])
+                threshold_exceeded = abs(taylor_approx_error - ref_values[i][cnt]) > k_sigma * ref_stds[i][cnt]
+            elif detection_method == 'diff':
+                if cnt > 0:
+                    current_diff = results[i] - prev_errors[i]
+                    threshold_exceeded = abs(current_diff - ref_values[i][cnt]) > k_sigma * ref_stds[i][cnt]
                 else:
-                    raise ValueError(f"Unknown detection method: {detection_method}")
+                    threshold_exceeded = False
+            else:
+                raise ValueError(f"Unknown detection method: {detection_method}")
                 
-                if threshold_exceeded:
-                    detected_agents.append(i)
-                    if i == attacked_agent_id:
-                        attacked_detected = True
+            if threshold_exceeded:
+                detected_agents.append(i)
+                if i == attacked_agent_id and cnt >= ATTACK_START_TS:
+                    attacked_detected = True
         
         # Record patient 0 (first detection)
         if detected_agents and not patient_zeros:
@@ -172,9 +173,7 @@ def load_reference_data(ref_val_dir, nagents, method):
                     ref_values[agent_id].append(float(row[7]))
                     ref_stds[agent_id].append(float(row[8]))
                 elif method == 'diff':
-                    # For diff method, compute difference statistics from mean and std_dev
-                    # Since diff data is not in CSV, we'll use mean and std_dev as base
-                    # This will be the difference between current and previous values
+                    # Columns: 9=diff_mean, 8=diff_std
                     ref_values[agent_id].append(float(row[9]))  # Use mean as baseline
                     ref_stds[agent_id].append(float(row[10]))    # Use std_dev as baseline
                 else:
@@ -432,7 +431,7 @@ def run_detection_analysis(config):
     runner.agent_n.load_model_from_directory(config.model_dir)
     
     # Detection configurations
-    k_sigma_values = [0.5, 0.9, 1.0, 1.5, 2.0, 2.5, 3.0]
+    k_sigma_values = [0.1, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
     methods = ['mean_std', 'median_mad', 'diff']
     
     # Create output directory
@@ -486,7 +485,7 @@ def run_detection_analysis(config):
                     
                     # Count metrics for patient 0 scenario
                     if len(patient_zeros) > 0:
-                        if attacked_agent_id in patient_zeros:
+                        if attacked_agent_id in patient_zeros and detection_time >= ATTACK_START_TS:
                             tp_count += 1  # Correctly identified attacked agent as patient 0
                         else:
                             fp_count += 1  # Incorrectly identified wrong agent(s) as patient 0
@@ -587,7 +586,7 @@ def run_detection_analysis(config):
                 
                 all_results.append(result)
                 
-                print(f"Agent {attacked_agent_id}: Patient0 TP={tp_percentage:.1f}%, FP={fp_percentage:.1f}%, FN={fn_percentage:.1f}%, AttackedDetected={attacked_agent_detected_percentage:.1f}%, F1={f1_score:.3f}")
+                print(f"Agent {attacked_agent_id}: Patient0 TP={tp_percentage:.1f}%, FP={fp_percentage:.1f}%, FN={fn_percentage:.1f}%, AttackeAgentDetected={attacked_agent_detected_percentage:.1f}%, F1={f1_score:.3f}")
 
     # Save results to CSV
     output_csv = os.path.join(logdir, 'detection_metrics_results.csv')

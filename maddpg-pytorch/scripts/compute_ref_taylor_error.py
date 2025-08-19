@@ -67,7 +67,7 @@ def compute_taylor_delta_policy(maddpg, obs, actions, action_spaces, epsilon):
         grad_i = torch.autograd.grad(target_val, torch_obs[i], create_graph=True, retain_graph=True)[0]
         # grad_i = torch.autograd.grad(critic_val, actions[i], create_graph=True, retain_graph=True)[0]
 
-        eta_i = 0.01 * grad_i.sign() / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
+        eta_i = epsilon * grad_i.sign() / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
         
         # First-order Taylor approximation: f(x + η) ≈ f(x) + ∇f(x)^T η
         j_tilde = target_val + torch.dot(grad_i.flatten(), eta_i.flatten())
@@ -96,7 +96,6 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
     # initialize deque buffers for last batch_size observations
     result_deques = [deque(maxlen=5) for _ in range(maddpg.nagents)]
     metric_vals = []
-    raw_errors = []  # Store raw Taylor errors for difference computation
     cnt = 0
 
     while True:
@@ -109,12 +108,11 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
             actions = {agent_name: agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)}
         
         # results = compute_taylor_delta(maddpg, obs, list(actions.values()), env.action_space, 0.1)
-        results = compute_taylor_delta_policy(maddpg, obs, list(actions.values()), env.action_space, 0.1)
+        results = compute_taylor_delta_policy(maddpg, obs, list(actions.values()), env.action_space, 0.01)
         # results = compute_eigen(maddpg, obs, list(actions.values()), env.action_space, 0.1)
         for i in range(maddpg.nagents):
             result_deques[i].append(results[i])
         metric_vals.append([np.mean(result_deques[i]) for i in range(maddpg.nagents)])
-        raw_errors.append(results)  # Store raw errors for each timestep
 
         next_obs, rewards, dones, infos = env.step(actions)
         episode_reward += np.sum([rewards[:,i] if env.agent_types[i] != 'adversary' else np.zeros_like(rewards[:,i]) for i in range(maddpg.nagents)])
@@ -126,7 +124,7 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
 
     # print(f"Episode reward: {episode_reward}")
 
-    return metric_vals, raw_errors
+    return metric_vals
 
 
 def save_matrix_to_files(matrix, agent_id, logdir, suffix=""):
@@ -191,16 +189,13 @@ def run(config):
     maddpg.prep_training(device=DEVICE)
 
     result_dataset = [{} for _ in range(maddpg.nagents)]
-    raw_error_dataset = [{} for _ in range(maddpg.nagents)]
     for i in tqdm(range(total_episodes), desc="Processing episodes"):
-        results, raw_errors = get_episode_data(env, maddpg, config, logdir)
+        results = get_episode_data(env, maddpg, config, logdir)
         for timestep in range(len(results)):
             for agent_id in range(maddpg.nagents):
                 if timestep not in result_dataset[agent_id]:
                     result_dataset[agent_id][timestep] = []
-                    raw_error_dataset[agent_id][timestep] = []
                 result_dataset[agent_id][timestep].append(results[timestep][agent_id])
-                raw_error_dataset[agent_id][timestep].append(raw_errors[timestep][agent_id])
 
     for agent_id in range(maddpg.nagents):
         # Compute mean and variance for each agent pair across all episodes
@@ -226,9 +221,9 @@ def run(config):
                 diff_std = 0.0
             else:
                 prev_timestep = sorted_timesteps[i-1]
-                curr_errors = raw_error_dataset[agent_id][timestep]
-                prev_errors = raw_error_dataset[agent_id][prev_timestep]
-                differences = [curr - prev for curr, prev in zip(curr_errors, prev_errors)]
+                curr_metric_vals = result_dataset[agent_id][timestep]
+                prev_metric_vals = result_dataset[agent_id][prev_timestep]
+                differences = [curr - prev for curr, prev in zip(curr_metric_vals, prev_metric_vals)]
                 diff_mean = np.mean(differences)
                 diff_std = np.std(differences)
             
