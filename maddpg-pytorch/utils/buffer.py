@@ -19,8 +19,10 @@ class ReplayBuffer(object):
         self.num_agents = num_agents
         self.obs_buffs = []
         self.ac_buffs = []
+        self.avail_action_buffs = []
         self.rew_buffs = []
         self.next_obs_buffs = []
+        self.next_avail_action_buffs = []
         self.done_buffs = []
         for odim, adim in zip(obs_dims, ac_dims):
             if isinstance(odim, tuple):
@@ -32,8 +34,10 @@ class ReplayBuffer(object):
             
             self.obs_buffs.append(np.zeros(obs_shape))
             self.ac_buffs.append(np.zeros((max_steps, adim)))
+            self.avail_action_buffs.append(np.ones((max_steps, adim)))
             self.rew_buffs.append(np.zeros(max_steps))
             self.next_obs_buffs.append(np.zeros(next_obs_shape))
+            self.next_avail_action_buffs.append(np.ones((max_steps, adim)))
             self.done_buffs.append(np.zeros(max_steps))
 
 
@@ -43,7 +47,8 @@ class ReplayBuffer(object):
     def __len__(self):
         return self.filled_i
 
-    def push(self, observations, actions, rewards, next_observations, dones):
+    def push(self, observations, actions, rewards, next_observations, dones,
+             avail_actions=None, next_avail_actions=None):
         if isinstance(observations, (list, tuple)):
             nentries = len(observations)  # support lists of parallel envs
         else:
@@ -55,10 +60,14 @@ class ReplayBuffer(object):
                                                   rollover, axis=0)
                 self.ac_buffs[agent_i] = np.roll(self.ac_buffs[agent_i],
                                                  rollover, axis=0)
+                self.avail_action_buffs[agent_i] = np.roll(
+                    self.avail_action_buffs[agent_i], rollover, axis=0)
                 self.rew_buffs[agent_i] = np.roll(self.rew_buffs[agent_i],
                                                   rollover)
                 self.next_obs_buffs[agent_i] = np.roll(
                     self.next_obs_buffs[agent_i], rollover, axis=0)
+                self.next_avail_action_buffs[agent_i] = np.roll(
+                    self.next_avail_action_buffs[agent_i], rollover, axis=0)
                 self.done_buffs[agent_i] = np.roll(self.done_buffs[agent_i],
                                                    rollover)
             self.curr_i = 0
@@ -70,11 +79,19 @@ class ReplayBuffer(object):
                 self.obs_buffs[agent_i][self.curr_i:self.curr_i + nentries] = np.vstack(observations[:, agent_i])
             # actions are already batched by agent, so they are indexed differently
             self.ac_buffs[agent_i][self.curr_i:self.curr_i + nentries] = actions[agent_i]
+            if avail_actions is None:
+                self.avail_action_buffs[agent_i][self.curr_i:self.curr_i + nentries] = 1
+            else:
+                self.avail_action_buffs[agent_i][self.curr_i:self.curr_i + nentries] = avail_actions[agent_i]
             self.rew_buffs[agent_i][self.curr_i:self.curr_i + nentries] = rewards[:, agent_i]
             if isinstance(observations, (list, tuple)):
                 self.next_obs_buffs[agent_i][self.curr_i:self.curr_i + nentries] = np.vstack([next_observations[agent_i]])
             else:
                 self.next_obs_buffs[agent_i][self.curr_i:self.curr_i + nentries] = np.vstack(next_observations[:, agent_i])
+            if next_avail_actions is None:
+                self.next_avail_action_buffs[agent_i][self.curr_i:self.curr_i + nentries] = 1
+            else:
+                self.next_avail_action_buffs[agent_i][self.curr_i:self.curr_i + nentries] = next_avail_actions[agent_i]
             self.done_buffs[agent_i][self.curr_i:self.curr_i + nentries] = dones[:, agent_i]
         self.curr_i += nentries
         if self.filled_i < self.max_steps:
@@ -103,7 +120,9 @@ class ReplayBuffer(object):
                 [cast(self.ac_buffs[i][inds]) for i in range(self.num_agents)],
                 ret_rews,
                 [cast(self.next_obs_buffs[i][inds]) for i in range(self.num_agents)],
-                [cast(self.done_buffs[i][inds]) for i in range(self.num_agents)])
+                [cast(self.done_buffs[i][inds]) for i in range(self.num_agents)],
+                [cast(self.avail_action_buffs[i][inds]) for i in range(self.num_agents)],
+                [cast(self.next_avail_action_buffs[i][inds]) for i in range(self.num_agents)])
 
     def get_average_rewards(self, N):
         if self.filled_i == self.max_steps:

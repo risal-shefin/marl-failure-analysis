@@ -109,7 +109,7 @@ class MADDPG(object):
             logger (SummaryWriter from Tensorboard-Pytorch):
                 If passed in, important quantities will be logged
         """
-        obs, acs, rews, next_obs, dones = sample
+        obs, acs, rews, next_obs, dones = sample[:5]
         curr_agent = self.agents[agent_i]
         is_obs_image = len(obs[agent_i].shape) >= 3 # the first dimension can be the batch size
 
