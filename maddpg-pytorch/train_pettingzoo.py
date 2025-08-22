@@ -51,23 +51,25 @@ def eval(env_func, is_discrete_action, maddpg, n_episodes):
     total_reward = 0
 
     for ep_i in range(n_episodes):
-        obs = env.reset()
+        obs, action_masks = env.reset()
         episode_reward = 0
         with torch.no_grad():
             maddpg.prep_rollouts(device=DEVICE)
 
         while True:
             torch_obs = [Variable(torch.Tensor([obs[i]]).to('cuda' if USE_CUDA else 'cpu'), requires_grad=False) for i in range(maddpg.nagents)]
+            torch_masks = [Variable(torch.Tensor(action_masks[i]).to('cuda' if USE_CUDA else 'cpu'), requires_grad=False) if action_masks[i] is not None else None for i in range(maddpg.nagents)]
             with torch.no_grad():
-                torch_agent_actions = maddpg.step(torch_obs, explore=False)
+                torch_agent_actions = maddpg.step(torch_obs, explore=False, action_masks=torch_masks)
             agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
             if is_discrete_action:
                 actions = {agent_name: agent_actions[i].argmax() for i, agent_name in enumerate(env.possible_agents)}
             else:
                 actions = {agent_name: agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)}
-            next_obs, rewards, dones, infos = env.step(actions)
+            next_obs, rewards, dones, infos, next_action_masks = env.step(actions)
             episode_reward += np.sum([rewards[:,i] if env.agent_types[i] != 'adversary' else np.zeros_like(rewards[:,i]) for i in range(maddpg.nagents)])  # sum rewards for all agents except adversaries
             obs = next_obs
+            action_masks = next_action_masks
             if dones.all():
                 break
         total_reward += episode_reward
@@ -130,7 +132,7 @@ def run(config):
     t = 0
     best_eval_reward = -np.inf
     for ep_i in range(0, config.n_episodes, config.n_rollout_threads):
-        obs = env.reset()
+        obs, action_masks = env.reset()
         # obs.shape = (n_rollout_threads, nagent)(nobs), nobs differs per agent so not tensor
         maddpg.prep_rollouts(device=DEVICE)
 
@@ -145,8 +147,9 @@ def run(config):
             #                       requires_grad=False)
             #              for i in range(maddpg.nagents)]
             torch_obs = [Variable(torch.Tensor([obs[i]]).to('cuda' if USE_CUDA else 'cpu'), requires_grad=False) for i in range(maddpg.nagents)]
+            torch_masks = [Variable(torch.Tensor(action_masks[i]).to('cuda' if USE_CUDA else 'cpu'), requires_grad=False) if action_masks[i] is not None else None for i in range(maddpg.nagents)]
             # get actions as torch Variables
-            torch_agent_actions = maddpg.step(torch_obs, explore=True)
+            torch_agent_actions = maddpg.step(torch_obs, explore=True, action_masks=torch_masks)
             # convert actions to numpy arrays
             agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
             # rearrange actions to be per environment
@@ -157,9 +160,10 @@ def run(config):
                 actions = {agent_name: agent_actions[i].argmax() for i, agent_name in enumerate(env.possible_agents)}
             else:
                 actions = {agent_name: agent_actions[i].squeeze() for i, agent_name in enumerate(env.possible_agents)}
-            next_obs, rewards, dones, infos = env.step(actions)
-            replay_buffer.push(obs, agent_actions, rewards, next_obs, dones)
+            next_obs, rewards, dones, infos, next_action_masks = env.step(actions)
+            replay_buffer.push(obs, agent_actions, rewards, next_obs, dones, action_masks, next_action_masks)
             obs = next_obs
+            action_masks = next_action_masks
             t += config.n_rollout_threads
             if (len(replay_buffer) >= config.batch_size and
                 (t % config.steps_per_update) < config.n_rollout_threads):
