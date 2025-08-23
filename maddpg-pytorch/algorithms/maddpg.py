@@ -40,14 +40,14 @@ class MADDPG(object):
                  obs_shapes_critic=obs_shapes,
                  total_action_dim=total_action_dim,
                  test_mode=test_mode,
-                 use_local_q=local_q,
+                 has_local_q=local_q,
                  **params)
                for params in agent_init_params]
         else:
             self.agents = [DDPGAgent(lr=lr, discrete_action=discrete_action,
                     hidden_dim=hidden_dim,
                     test_mode=test_mode,
-                    use_local_q=local_q,
+                    has_local_q=local_q,
                     **params)
                 for params in agent_init_params]
         self.agent_init_params = agent_init_params
@@ -156,7 +156,7 @@ class MADDPG(object):
         torch.nn.utils.clip_grad_norm(curr_agent.critic.parameters(), 0.5)
         curr_agent.critic_optimizer.step()
 
-        if curr_agent.use_local_q:
+        if curr_agent.has_local_q:
             curr_agent.local_critic_optimizer.zero_grad()
             if is_obs_image:
                 local_obs = obs[agent_i].reshape(obs[agent_i].shape[0], -1)
@@ -205,7 +205,7 @@ class MADDPG(object):
         if logger is not None:
             losses = {'vf_loss': vf_loss,
                       'pol_loss': pol_loss}
-            if curr_agent.use_local_q:
+            if curr_agent.has_local_q:
                 losses['local_vf_loss'] = local_loss
             logger.add_scalars('agent%i/losses' % agent_i,
                                losses,
@@ -227,7 +227,7 @@ class MADDPG(object):
             a.critic.train()
             a.target_policy.train()
             a.target_critic.train()
-            if getattr(a, 'use_local_q', False):
+            if getattr(a, 'has_local_q', False):
                 a.local_critic.train()
         if device == 'gpu':
             fn = lambda x: x.cuda()
@@ -240,7 +240,7 @@ class MADDPG(object):
         if not self.critic_dev == device:
             for a in self.agents:
                 a.critic = fn(a.critic)
-                if getattr(a, 'use_local_q', False):
+                if getattr(a, 'has_local_q', False):
                     a.local_critic = fn(a.local_critic)
             self.critic_dev = device
         if not self.trgt_pol_dev == device:

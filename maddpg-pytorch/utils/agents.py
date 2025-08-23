@@ -13,7 +13,7 @@ class DDPGAgent(object):
     """
     def __init__(self, num_in_pol, num_out_pol, num_in_critic, hidden_dim=64,
                  lr=0.01, discrete_action=True, test_mode=False,
-                 use_local_q=False):
+                 has_local_q=False):
         """
         Inputs:
             num_in_pol (int): number of dimensions for policy input
@@ -38,8 +38,8 @@ class DDPGAgent(object):
                                         hidden_dim=hidden_dim,
                                         constrain_out=False,
                                         test_mode=test_mode)
-        self.use_local_q = use_local_q
-        if self.use_local_q:
+        self.has_local_q = has_local_q
+        if self.has_local_q:
             self.local_critic = MLPNetwork(num_in_pol + num_out_pol, 1,
                                            hidden_dim=hidden_dim,
                                            constrain_out=False,
@@ -96,7 +96,7 @@ class DDPGAgent(object):
                   'target_critic': self.target_critic.state_dict(),
                   'policy_optimizer': self.policy_optimizer.state_dict(),
                   'critic_optimizer': self.critic_optimizer.state_dict()}
-        if self.use_local_q:
+        if self.has_local_q:
             params.update({'local_critic': self.local_critic.state_dict(),
                            'local_critic_optimizer': self.local_critic_optimizer.state_dict()})
         return params
@@ -108,7 +108,7 @@ class DDPGAgent(object):
         self.target_critic.load_state_dict(params['target_critic'])
         self.policy_optimizer.load_state_dict(params['policy_optimizer'])
         self.critic_optimizer.load_state_dict(params['critic_optimizer'])
-        if self.use_local_q and 'local_critic' in params:
+        if self.has_local_q and 'local_critic' in params:
             self.local_critic.load_state_dict(params['local_critic'])
             self.local_critic_optimizer.load_state_dict(params['local_critic_optimizer'])
 
@@ -121,7 +121,7 @@ class DDPGImageAgent(object):
     def __init__(self, num_in_pol, num_out_pol,
                  obs_shapes_critic, total_action_dim, hidden_dim=64,
                  lr=0.01, discrete_action=True, num_in_critic=None, test_mode=False,
-                 use_local_q=False):
+                 has_local_q=False):
         """
         Inputs:
             num_in_pol (tuple): Image Observation Shape
@@ -149,8 +149,8 @@ class DDPGImageAgent(object):
                                  total_action_dim,
                                  hidden_dim=hidden_dim,
                                  test_mode=test_mode)
-        self.use_local_q = use_local_q
-        if self.use_local_q:
+        self.has_local_q = has_local_q
+        if self.has_local_q:
             local_in_dim = int(np.prod(num_in_pol)) + num_out_pol
             self.local_critic = MLPNetwork(local_in_dim, 1,
                                            hidden_dim=hidden_dim,
@@ -208,7 +208,7 @@ class DDPGImageAgent(object):
                   'target_critic': self.target_critic.state_dict(),
                   'policy_optimizer': self.policy_optimizer.state_dict(),
                   'critic_optimizer': self.critic_optimizer.state_dict()}
-        if self.use_local_q:
+        if self.has_local_q:
             params.update({'local_critic': self.local_critic.state_dict(),
                            'local_critic_optimizer': self.local_critic_optimizer.state_dict()})
         return params
@@ -220,6 +220,6 @@ class DDPGImageAgent(object):
         self.target_critic.load_state_dict(params['target_critic'])
         self.policy_optimizer.load_state_dict(params['policy_optimizer'])
         self.critic_optimizer.load_state_dict(params['critic_optimizer'])
-        if self.use_local_q and 'local_critic' in params:
+        if self.has_local_q and 'local_critic' in params:
             self.local_critic.load_state_dict(params['local_critic'])
             self.local_critic_optimizer.load_state_dict(params['local_critic_optimizer'])
