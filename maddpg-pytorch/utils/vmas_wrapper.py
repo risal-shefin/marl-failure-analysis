@@ -32,13 +32,7 @@ class VmasWrapper:
         rewards = np.array(rewards).T   # transfom shape (nagents, batch) to (batch, nagents)
         dones = np.array([dones for _ in range(self.nagents)]).T
         info = np.array([info])
-        masks = [None for _ in range(self.nagents)]
-        return obs, rewards, dones, info, masks
-
-    def reset(self, **kwargs):
-        obs = self.env.reset(**kwargs)
-        masks = [None for _ in range(self.nagents)]
-        return obs, masks
+        return obs, rewards, dones, info
 
     def __getattr__(self, name):
         # Delegate attribute access to the underlying env
