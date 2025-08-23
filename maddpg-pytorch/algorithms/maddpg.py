@@ -15,7 +15,8 @@ class MADDPG(object):
     def __init__(self, agent_init_params, alg_types,
                  gamma=0.95, tau=0.01, lr=0.01, hidden_dim=64,
                  discrete_action=False, obs_shapes=None,
-                 total_action_dim=None, test_mode=False):
+                 total_action_dim=None, test_mode=False,
+                 local_q=False):
         """
         Inputs:
             agent_init_params (list of dict): List of dicts with parameters to
@@ -38,13 +39,15 @@ class MADDPG(object):
                  hidden_dim=hidden_dim,
                  obs_shapes_critic=obs_shapes,
                  total_action_dim=total_action_dim,
-                 test_mode=test_mode
+                 test_mode=test_mode,
+                 use_local_q=local_q,
                  **params)
                for params in agent_init_params]
         else:
             self.agents = [DDPGAgent(lr=lr, discrete_action=discrete_action,
                     hidden_dim=hidden_dim,
                     test_mode=test_mode,
+                    use_local_q=local_q,
                     **params)
                 for params in agent_init_params]
         self.agent_init_params = agent_init_params
@@ -52,6 +55,7 @@ class MADDPG(object):
         self.tau = tau
         self.lr = lr
         self.discrete_action = discrete_action
+        self.local_q = local_q
         self.pol_dev = 'cpu'  # device for policies
         self.critic_dev = 'cpu'  # device for critics
         self.trgt_pol_dev = 'cpu'  # device for target policies
@@ -152,6 +156,19 @@ class MADDPG(object):
         torch.nn.utils.clip_grad_norm(curr_agent.critic.parameters(), 0.5)
         curr_agent.critic_optimizer.step()
 
+        if curr_agent.use_local_q:
+            curr_agent.local_critic_optimizer.zero_grad()
+            if is_obs_image:
+                local_obs = obs[agent_i].reshape(obs[agent_i].shape[0], -1)
+            else:
+                local_obs = obs[agent_i]
+            local_vf_in = torch.cat((local_obs, acs[agent_i]), dim=1)
+            local_value = curr_agent.local_critic(local_vf_in)
+            local_loss = MSELoss(local_value, target_value.detach())
+            local_loss.backward()
+            torch.nn.utils.clip_grad_norm(curr_agent.local_critic.parameters(), 0.5)
+            curr_agent.local_critic_optimizer.step()
+
         curr_agent.policy_optimizer.zero_grad()
 
         if self.discrete_action:
@@ -186,9 +203,12 @@ class MADDPG(object):
         torch.nn.utils.clip_grad_norm(curr_agent.policy.parameters(), 0.5)
         curr_agent.policy_optimizer.step()
         if logger is not None:
+            losses = {'vf_loss': vf_loss,
+                      'pol_loss': pol_loss}
+            if curr_agent.use_local_q:
+                losses['local_vf_loss'] = local_loss
             logger.add_scalars('agent%i/losses' % agent_i,
-                               {'vf_loss': vf_loss,
-                                'pol_loss': pol_loss},
+                               losses,
                                self.niter)
 
     def update_all_targets(self):
@@ -207,6 +227,8 @@ class MADDPG(object):
             a.critic.train()
             a.target_policy.train()
             a.target_critic.train()
+            if getattr(a, 'use_local_q', False):
+                a.local_critic.train()
         if device == 'gpu':
             fn = lambda x: x.cuda()
         else:
@@ -218,6 +240,8 @@ class MADDPG(object):
         if not self.critic_dev == device:
             for a in self.agents:
                 a.critic = fn(a.critic)
+                if getattr(a, 'use_local_q', False):
+                    a.local_critic = fn(a.local_critic)
             self.critic_dev = device
         if not self.trgt_pol_dev == device:
             for a in self.agents:
@@ -252,7 +276,8 @@ class MADDPG(object):
 
     @classmethod
     def init_from_env(cls, env, agent_alg="MADDPG", adversary_alg="MADDPG",
-                      gamma=0.95, tau=0.01, lr=0.01, hidden_dim=64):
+                      gamma=0.95, tau=0.01, lr=0.01, hidden_dim=64,
+                      local_q=False):
         """
         Instantiate instance of this class from multi-agent environment
         """
@@ -290,7 +315,8 @@ class MADDPG(object):
                      'agent_init_params': agent_init_params,
                      'discrete_action': discrete_action,
                      'obs_shapes': obs_shapes,
-                     'total_action_dim': total_action_dim}
+                     'total_action_dim': total_action_dim,
+                     'local_q': local_q}
         instance = cls(**init_dict)
         instance.init_dict = init_dict
         return instance

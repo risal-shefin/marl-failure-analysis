@@ -122,7 +122,8 @@ def run(config):
                                   adversary_alg=config.adversary_alg,
                                   tau=config.tau,
                                   lr=config.lr,
-                                  hidden_dim=config.hidden_dim)
+                                  hidden_dim=config.hidden_dim,
+                                  local_q=config.local_q)
     replay_buffer = ReplayBuffer(config.buffer_length, maddpg.nagents,
                                  [obsp.shape[0] if len(obsp.shape) == 1 else obsp.shape for obsp in env.observation_space],
                                  [acsp.shape[0] if isinstance(acsp, Box) or isinstance(acsp, gymnasium.spaces.Box) else acsp.n
@@ -233,6 +234,8 @@ if __name__ == '__main__':
     parser.add_argument("--discrete_action",
                         default=False,
                         help="Use discrete action space")
+    parser.add_argument("--local_q", action='store_true',
+                        help="Train additional decentralized Q functions")
 
     config = parser.parse_args()
     print("\n-- Configs: --")

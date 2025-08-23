@@ -1,6 +1,7 @@
 from torch import Tensor
 from torch.autograd import Variable
 from torch.optim import Adam
+import numpy as np
 from .networks import MLPNetwork, CNNNetwork, MultiAgentCriticNetwork
 from .misc import hard_update, gumbel_softmax, onehot_from_logits
 from .noise import OUNoise
@@ -11,7 +12,8 @@ class DDPGAgent(object):
     critic, exploration noise)
     """
     def __init__(self, num_in_pol, num_out_pol, num_in_critic, hidden_dim=64,
-                 lr=0.01, discrete_action=True, test_mode=False):
+                 lr=0.01, discrete_action=True, test_mode=False,
+                 use_local_q=False):
         """
         Inputs:
             num_in_pol (int): number of dimensions for policy input
@@ -36,6 +38,14 @@ class DDPGAgent(object):
                                         hidden_dim=hidden_dim,
                                         constrain_out=False,
                                         test_mode=test_mode)
+        self.use_local_q = use_local_q
+        if self.use_local_q:
+            self.local_critic = MLPNetwork(num_in_pol + num_out_pol, 1,
+                                           hidden_dim=hidden_dim,
+                                           constrain_out=False,
+                                           test_mode=test_mode)
+            self.local_critic_optimizer = Adam(self.local_critic.parameters(),
+                                               lr=lr)
         hard_update(self.target_policy, self.policy)
         hard_update(self.target_critic, self.critic)
         self.policy_optimizer = Adam(self.policy.parameters(), lr=lr)
@@ -80,12 +90,16 @@ class DDPGAgent(object):
         return action
 
     def get_params(self):
-        return {'policy': self.policy.state_dict(),
-                'critic': self.critic.state_dict(),
-                'target_policy': self.target_policy.state_dict(),
-                'target_critic': self.target_critic.state_dict(),
-                'policy_optimizer': self.policy_optimizer.state_dict(),
-                'critic_optimizer': self.critic_optimizer.state_dict()}
+        params = {'policy': self.policy.state_dict(),
+                  'critic': self.critic.state_dict(),
+                  'target_policy': self.target_policy.state_dict(),
+                  'target_critic': self.target_critic.state_dict(),
+                  'policy_optimizer': self.policy_optimizer.state_dict(),
+                  'critic_optimizer': self.critic_optimizer.state_dict()}
+        if self.use_local_q:
+            params.update({'local_critic': self.local_critic.state_dict(),
+                           'local_critic_optimizer': self.local_critic_optimizer.state_dict()})
+        return params
 
     def load_params(self, params):
         self.policy.load_state_dict(params['policy'])
@@ -94,6 +108,9 @@ class DDPGAgent(object):
         self.target_critic.load_state_dict(params['target_critic'])
         self.policy_optimizer.load_state_dict(params['policy_optimizer'])
         self.critic_optimizer.load_state_dict(params['critic_optimizer'])
+        if self.use_local_q and 'local_critic' in params:
+            self.local_critic.load_state_dict(params['local_critic'])
+            self.local_critic_optimizer.load_state_dict(params['local_critic_optimizer'])
 
 
 class DDPGImageAgent(object):
@@ -101,9 +118,10 @@ class DDPGImageAgent(object):
     General class for DDPG agents (policy, critic, target policy, target
     critic, exploration noise) for image inputs
     """
-    def __init__(self, num_in_pol, num_out_pol, 
+    def __init__(self, num_in_pol, num_out_pol,
                  obs_shapes_critic, total_action_dim, hidden_dim=64,
-                 lr=0.01, discrete_action=True, num_in_critic=None, test_mode=False):
+                 lr=0.01, discrete_action=True, num_in_critic=None, test_mode=False,
+                 use_local_q=False):
         """
         Inputs:
             num_in_pol (tuple): Image Observation Shape
@@ -118,7 +136,7 @@ class DDPGImageAgent(object):
                                  constrain_out=True,
                                  discrete_action=discrete_action,
                                  test_mode=test_mode)
-        self.critic = MultiAgentCriticNetwork(n_agents, obs_shapes_critic, 
+        self.critic = MultiAgentCriticNetwork(n_agents, obs_shapes_critic,
                                  total_action_dim,
                                  hidden_dim=hidden_dim,
                                  test_mode=test_mode)
@@ -127,10 +145,19 @@ class DDPGImageAgent(object):
                                  constrain_out=True,
                                  discrete_action=discrete_action,
                                  test_mode=test_mode)
-        self.target_critic = MultiAgentCriticNetwork(n_agents, obs_shapes_critic, 
+        self.target_critic = MultiAgentCriticNetwork(n_agents, obs_shapes_critic,
                                  total_action_dim,
                                  hidden_dim=hidden_dim,
                                  test_mode=test_mode)
+        self.use_local_q = use_local_q
+        if self.use_local_q:
+            local_in_dim = int(np.prod(num_in_pol)) + num_out_pol
+            self.local_critic = MLPNetwork(local_in_dim, 1,
+                                           hidden_dim=hidden_dim,
+                                           constrain_out=False,
+                                           test_mode=test_mode)
+            self.local_critic_optimizer = Adam(self.local_critic.parameters(),
+                                               lr=lr)
         hard_update(self.target_policy, self.policy)
         hard_update(self.target_critic, self.critic)
         self.policy_optimizer = Adam(self.policy.parameters(), lr=lr)
@@ -175,12 +202,16 @@ class DDPGImageAgent(object):
         return action
 
     def get_params(self):
-        return {'policy': self.policy.state_dict(),
-                'critic': self.critic.state_dict(),
-                'target_policy': self.target_policy.state_dict(),
-                'target_critic': self.target_critic.state_dict(),
-                'policy_optimizer': self.policy_optimizer.state_dict(),
-                'critic_optimizer': self.critic_optimizer.state_dict()}
+        params = {'policy': self.policy.state_dict(),
+                  'critic': self.critic.state_dict(),
+                  'target_policy': self.target_policy.state_dict(),
+                  'target_critic': self.target_critic.state_dict(),
+                  'policy_optimizer': self.policy_optimizer.state_dict(),
+                  'critic_optimizer': self.critic_optimizer.state_dict()}
+        if self.use_local_q:
+            params.update({'local_critic': self.local_critic.state_dict(),
+                           'local_critic_optimizer': self.local_critic_optimizer.state_dict()})
+        return params
 
     def load_params(self, params):
         self.policy.load_state_dict(params['policy'])
@@ -189,3 +220,6 @@ class DDPGImageAgent(object):
         self.target_critic.load_state_dict(params['target_critic'])
         self.policy_optimizer.load_state_dict(params['policy_optimizer'])
         self.critic_optimizer.load_state_dict(params['critic_optimizer'])
+        if self.use_local_q and 'local_critic' in params:
+            self.local_critic.load_state_dict(params['local_critic'])
+            self.local_critic_optimizer.load_state_dict(params['local_critic_optimizer'])
