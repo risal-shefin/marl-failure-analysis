@@ -17,10 +17,21 @@ class PettingZooWrapper:
         masks = []
         if hasattr(self.env, 'action_masks'):
             mask_dict = self.env.action_masks()
-            masks = [mask_dict.get(agent) for agent in self.env.possible_agents]
+            for agent in self.env.possible_agents:
+                masks.append(mask_dict.get(agent))
+        elif isinstance(infos, dict):
+            for agent in self.env.possible_agents:
+                info = infos.get(agent)
+                mask = None
+                if info:
+                    mask = info.get('action_mask')
+                    if mask is None:
+                        mask = info.get('avail_actions')
+                masks.append(mask)
         else:
-            masks = [info.get('action_mask') if info else None for info in infos.values()] if isinstance(infos, dict) else [None]*len(self.env.possible_agents)
-        return list(obs_dict.values()), masks
+            masks = [None] * len(self.env.possible_agents)
+        obs = [obs_dict[agent] for agent in self.env.possible_agents]
+        return obs, masks
 
     def step(self, actions):
         obs_dict, rewards_dict, termination, truncation, infos_dict = self.env.step(actions)
@@ -30,13 +41,16 @@ class PettingZooWrapper:
         dones = []
         masks = []
         for agent in self.env.possible_agents:
-            if agent in self.env.agents:    # Check if agent is still in the game
+            if agent in self.env.agents:  # Check if agent is still in the game
                 states.append(obs_dict[agent])
                 rewards.append(rewards_dict[agent])
                 info = infos_dict[agent]
                 infos.append(info)
                 dones.append(termination[agent] or truncation[agent])
-                masks.append(info.get('action_mask') or info.get('avail_actions'))
+                mask = info.get('action_mask')
+                if mask is None:
+                    mask = info.get('avail_actions')
+                masks.append(mask)
             else:
                 states.append(np.zeros(self.env.observation_space(agent).shape))  # Placeholder for dead agents
                 rewards.append(0.0)

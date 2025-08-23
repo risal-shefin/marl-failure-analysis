@@ -98,10 +98,10 @@ def run(config):
             torch_masks = [Variable(torch.Tensor(action_masks[i]).to('cuda' if USE_CUDA else 'cpu'), requires_grad=False) if action_masks[i] is not None else None for i in range(maddpg.nagents)]
             # get actions as torch Variables
             torch_agent_actions = maddpg.step(torch_obs, explore=True, action_masks=torch_masks)
-            # convert actions to numpy arrays
-            actions = [np.array([ac.data.cpu().numpy().argmax()]) for ac in torch_agent_actions]
+            agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
+            actions = [np.array([aa.argmax()]) for aa in agent_actions]
             next_obs, rewards, dones, infos, next_action_masks = env.step(actions)
-            replay_buffer.push(obs, actions, rewards, next_obs, dones, action_masks, next_action_masks)
+            replay_buffer.push(obs, agent_actions, rewards, next_obs, dones, action_masks, next_action_masks)
             obs = next_obs
             action_masks = next_action_masks
             t += config.n_rollout_threads
