@@ -29,6 +29,10 @@ from harl.utils.trans_tools import _t2n
 from harl.runners import RUNNER_REGISTRY
 from tqdm import tqdm
 
+import matplotlib.patches
+import math
+from collections import deque
+
 GIF_FRAMES=list()
 # ------------------------------- Utility Functions -------------------------------
 
@@ -57,6 +61,292 @@ def slice_avail(avail, agent_id):
     return avail[:, agent_id]
 
 
+
+def compute_pairwise_frob_norms_from_attack_test(runner, eval_obs, eval_rnn_states_critic, eval_masks):
+    """
+    Compute Frobenius norms of cross-agent Hessian blocks for all (i, j).
+    Returns an N x N matrix where entry [i][j] approximates || \partial^2 v_i / (\partial obs_i \partial obs_j) ||_F.
+    This is the version from attack_test.py
+    """
+    eval_obs = torch.tensor(eval_obs, dtype=torch.float32)
+
+    agent_obs_tensors = []
+    n_agents = runner.num_agents
+    # assume eval_obs shape (1, n_agents, obs_dim)
+    for i in range(n_agents):
+        agent_obs = eval_obs[0][i].clone().detach()
+        agent_obs_tensor = torch.tensor(agent_obs, dtype=torch.float32, requires_grad=True)
+        agent_obs_tensors.append(agent_obs_tensor)
+
+    concatenated_obs = torch.cat(agent_obs_tensors, dim=0)
+    share_obs = concatenated_obs.unsqueeze(0).unsqueeze(0)
+    share_obs = share_obs.expand(1, n_agents, -1)
+
+    values, temp_rnn_state_critic = runner.critic.get_values(
+        share_obs,
+        eval_rnn_states_critic,
+        eval_masks,
+    )
+    values = values.squeeze()
+
+    N = n_agents
+    results = [[0.0 for _ in range(N)] for _ in range(N)]
+
+    for i in range(N):
+        # gradient of v_i wrt agent i obs
+        try:
+            grad_i = torch.autograd.grad(values[i], agent_obs_tensors[i], create_graph=True, retain_graph=True)[0]
+        except Exception:
+            grad_i = torch.zeros_like(agent_obs_tensors[i])
+
+        for j in range(N):
+            # hessian_matrix = []
+            hessian_matrix = torch.autograd.grad(
+                grad_i.squeeze(),
+                agent_obs_tensors[j],
+                grad_outputs=torch.eye(grad_i.shape[0]),
+                retain_graph=True,
+                is_grads_batched=True,
+                allow_unused=True,
+            )[0]
+            # if second_grad is None:
+            #     second_grad = torch.zeros_like(agent_obs_tensors[j])
+            # hessian_matrix.append(second_grad.flatten())
+
+            # H = torch.stack(hessian_matrix) if len(hessian_matrix) > 0 else torch.zeros(1, 1)
+            results[i][j] = torch.norm(hessian_matrix, p='fro').item()
+
+        # for j in range(N):
+        #     hessian_matrix = []
+        #     for k in range(grad_i.shape[0]):
+        #         second_grad = torch.autograd.grad(
+        #             grad_i[k],
+        #             agent_obs_tensors[j],
+        #             retain_graph=True,
+        #             allow_unused=True,
+        #         )[0]
+        #         if second_grad is None:
+        #             second_grad = torch.zeros_like(agent_obs_tensors[j])
+        #         hessian_matrix.append(second_grad.flatten())
+
+        #     H = torch.stack(hessian_matrix) if len(hessian_matrix) > 0 else torch.zeros(1, 1)
+        #     results[i][j] = H.norm(p='fro').item()
+
+    return results
+
+def eval_frobenius_single_episode(runner, use_seed=False, seed=42):
+    """
+    Modified eval function from attack_test.py for calculating Frobenius norms in a single episode.
+    Returns the list of pairwise Frobenius norm matrices for each timestep.
+    """
+    if use_seed:
+        eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset(seed)
+    else:
+        eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset()
+
+    eval_rnn_states = np.zeros(
+        (
+            runner.algo_args["eval"]["n_eval_rollout_threads"],
+            runner.num_agents,
+            runner.recurrent_n,
+            runner.rnn_hidden_size,
+        ),
+        dtype=np.float32,
+    )
+    eval_rnn_states_critic = np.zeros(
+        (
+            runner.algo_args["eval"]["n_eval_rollout_threads"],
+            runner.num_agents,
+            runner.recurrent_n,
+            runner.rnn_hidden_size,
+        ),
+        dtype=np.float32,
+    )
+    eval_masks = np.ones(
+        (runner.algo_args["eval"]["n_eval_rollout_threads"], runner.num_agents, 1),
+        dtype=np.float32,
+    )
+
+    frob_norms_matrix_history = []  # list of N x N pairwise frob matrices per timestep
+
+    while True:
+        # Get actions for all agents
+        eval_actions_collector = []
+        for agent_id in range(runner.num_agents):
+            eval_actions, temp_rnn_state = runner.actor[agent_id].act(
+                eval_obs[:, agent_id],
+                eval_rnn_states[:, agent_id],
+                eval_masks[:, agent_id],
+                eval_available_actions[:, agent_id]
+                if eval_available_actions[0] is not None
+                else None,
+                deterministic=True,
+            )
+            eval_rnn_states[:, agent_id] = _t2n(temp_rnn_state)
+            eval_actions_collector.append(_t2n(eval_actions))
+
+        eval_actions = np.array(eval_actions_collector).transpose(1, 0, 2)
+        
+        # Calculate pairwise Frobenius norms for this timestep
+        pairwise_frobs = compute_pairwise_frob_norms_from_attack_test(
+            runner, eval_obs, eval_rnn_states_critic, eval_masks
+        )
+        frob_norms_matrix_history.append(pairwise_frobs)
+
+        # Step the environment
+        (
+            eval_obs,
+            eval_share_obs,
+            eval_rewards,
+            eval_dones,
+            eval_infos,
+            eval_available_actions,
+        ) = runner.eval_envs.step(eval_actions)
+
+        # Update critic states
+        value, eval_rnn_states_critic = runner.critic.get_values(
+            eval_share_obs,
+            eval_rnn_states_critic,
+            eval_masks,
+        )
+
+        eval_dones_env = np.all(eval_dones, axis=1)
+
+        eval_rnn_states[eval_dones_env == True] = np.zeros(
+            (
+                (eval_dones_env == True).sum(),
+                runner.num_agents,
+                runner.recurrent_n,
+                runner.rnn_hidden_size,
+            ),
+            dtype=np.float32,
+        )
+
+        eval_masks = np.ones(
+            (runner.algo_args["eval"]["n_eval_rollout_threads"], runner.num_agents, 1),
+            dtype=np.float32,
+        )
+        eval_masks[eval_dones_env == True] = np.zeros(
+            ((eval_dones_env == True).sum(), runner.num_agents, 1), dtype=np.float32
+        )
+
+        # Check if episode is done
+        if eval_dones_env[0]:
+            break
+
+    return frob_norms_matrix_history
+
+def calculate_average_frobenius_norms(runner, num_episodes=1, seed=42):
+    """
+    Calculate Frobenius norms over multiple episodes and return the average.
+    
+    Args:
+        runner: HARL runner instance
+        num_episodes: Number of episodes to run
+        seed: Random seed (only used if num_episodes == 1)
+        
+    Returns:
+        Average Frobenius norm matrix across all episodes and timesteps
+    """
+    all_episode_matrices = []
+    
+    for episode in tqdm(range(num_episodes), desc="Calculating Frobenius norms"):
+        use_seed = (num_episodes == 1)
+        print(f"use_seed={use_seed}, seed={seed}")
+        episode_matrices = eval_frobenius_single_episode(runner, use_seed=use_seed, seed=seed)
+        all_episode_matrices.extend(episode_matrices)
+    
+    if len(all_episode_matrices) == 0:
+        print("No Frobenius norm matrices calculated!")
+        return None
+    
+    # Calculate average across all timesteps from all episodes
+    n_agents = runner.num_agents
+    average_matrix = np.zeros((n_agents, n_agents))
+    
+    for matrix in all_episode_matrices:
+        average_matrix += np.array(matrix)
+    
+    average_matrix /= len(all_episode_matrices)
+    
+    print(f"Calculated Frobenius norms over {num_episodes} episode(s), "
+          f"total timesteps: {len(all_episode_matrices)}")
+    
+    return average_matrix.tolist()
+
+def plot_influence_pies(frob_matrix_history, attacked_agent_id, total_agents, save_path, is_attack_scenario=True):
+    """
+    For each agent i, plot a pie chart showing influence (mean frob_ij across episode) of other agents on i.
+    """
+    if len(frob_matrix_history) == 0:
+        print("No frobenius history; skipping influence pies.")
+        return
+
+    T = len(frob_matrix_history)
+    N = total_agents
+    
+    # Compute mean across time for each (i,j)
+    mean_matrix = np.zeros((N, N), dtype=float)
+    for t in range(T):
+        mean_matrix += np.array(frob_matrix_history[t])
+    mean_matrix /= float(T)
+
+    # Create subplots: one pie per agent
+    cols = min(4, N)
+    rows = int(math.ceil(N / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(2.8*cols, 4*rows))
+    axes = axes.flatten() if N > 1 else [axes]
+
+    cmap = plt.get_cmap('tab10')
+    agent_colors = [cmap(i % 10) for i in range(N)]
+
+    for i in range(N):
+        ax = axes[i]
+        vals = mean_matrix[i, :]
+        
+        if vals.sum() <= 0:
+            ax.text(0.5, 0.5, 'No influence data', ha='center', va='center')
+            ax.axis('off')
+            continue
+
+        vals_norm = vals / vals.sum()
+        colors = [agent_colors[j] for j in range(N)]
+        
+        if is_attack_scenario and attacked_agent_id is not None:
+            colors = [agent_colors[j] if j != attacked_agent_id else 'red' for j in range(N)]
+            explode = [0.1 if j == attacked_agent_id else 0 for j in range(N)]
+            wedges, texts, autotexts = ax.pie(vals_norm, colors=colors, autopct='%1.1f%%', 
+                                            startangle=90, explode=explode)
+        else:
+            wedges, texts, autotexts = ax.pie(vals_norm, colors=colors, autopct='%1.1f%%', 
+                                            startangle=90)
+        
+        ax.set_title(f'Influence on Agent {i}')
+        ax.axis('equal')
+
+    # Remove extra axes
+    for k in range(N, len(axes)):
+        fig.delaxes(axes[k])
+
+    # Create legend
+    legend_labels = [f'Agent {j}' for j in range(N)]
+    legend_colors = agent_colors.copy()
+    
+    if is_attack_scenario and attacked_agent_id is not None:
+        legend_labels[attacked_agent_id] = f'Agent {attacked_agent_id} (Attacked)'
+        legend_colors[attacked_agent_id] = 'red'
+    
+    legend_patches = [plt.matplotlib.patches.Patch(color=legend_colors[j], 
+                                                  label=legend_labels[j]) for j in range(N)]
+    fig.legend(handles=legend_patches, loc='lower center', ncol=min(N, 5), 
+               bbox_to_anchor=(0.5, -0.05), fontsize=10)
+
+    title = f'Inter-Agent Influence (Attacked Agent: {attacked_agent_id})' if is_attack_scenario and attacked_agent_id is not None else 'Inter-Agent Influence'
+    plt.suptitle(title)
+    plt.tight_layout(rect=[0, 0.1, 1, 0.96])
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved influence pies to {save_path}")
 # ------------------------------- Coalition Value Functions -------------------------------
 
 def sample_coalition(agents):
@@ -64,7 +354,7 @@ def sample_coalition(agents):
     Sample a random coalition from the list of agents
     Returns a frozenset representing the coalition
     """
-    coalition_size = random.randint(0, len(agents))
+    coalition_size = random.randint(1, len(agents))
     coalition = random.sample(agents, coalition_size)
     return frozenset(coalition)
 
@@ -138,22 +428,8 @@ def save_gif_from_frames(frames, filepath, duration=200):
     
 
 
-def rollout(runner, coalition, seed, episode_length=None, save_gif=False, gif_path=None):
-    """
-    Run a rollout episode with only agents in the coalition acting optimally
-    Agents not in coalition take random actions or remain inactive
-    
-    Args:
-        runner: HARL runner instance
-        coalition: frozenset of agent IDs that can act optimally
-        seed: random seed for reproducibility
-        episode_length: maximum episode length (None for until done)
-        save_gif: whether to save frames for GIF creation
-        gif_path: path to save the GIF file
-    
-    Returns:
-        Total reward obtained during the episode
-    """
+def rollout(runner, coalition, seed, episode_length=None, save_gif=False, gif_path=None, compute_frob=False):
+    """Modified rollout to optionally compute Frobenius norms"""
     # Reset environment with specified seed
     eval_obs, eval_share_obs, eval_avail = runner.eval_envs.reset(seed)
     
@@ -163,7 +439,8 @@ def rollout(runner, coalition, seed, episode_length=None, save_gif=False, gif_pa
     
     total_reward = 0.0
     step_count = 0
-    frames = []  # Store frames for GIF creation
+    frames = []
+    frob_history = [] if compute_frob else None
     
     while True:
         # Capture frame for GIF if requested
@@ -297,6 +574,17 @@ def rollout(runner, coalition, seed, episode_length=None, save_gif=False, gif_pa
         total_reward += float(eval_rewards.sum())
         step_count += 1
         
+        # # Compute pairwise Frobenius norms if requested
+        # if compute_frob:
+        #     # try:
+        #     current_obs = [eval_obs[0, i] for i in range(n_agents)] 
+        #     pairwise_frobs = compute_pairwise_frob_norms(runner, current_obs)
+        #     frob_history.append(pairwise_frobs)
+            # except Exception as e:
+            #     print(f"Warning: Could not compute Frobenius norms at step {step_count}: {e}")
+            #     pairwise_frobs = [[0.0 for _ in range(n_agents)] for _ in range(n_agents)]
+            #     frob_history.append(pairwise_frobs)
+        
         # Check termination conditions
         if np.all(eval_dones):
             break
@@ -310,10 +598,11 @@ def rollout(runner, coalition, seed, episode_length=None, save_gif=False, gif_pa
         masks[:] = 1.0
         masks[done_env == True] = 0.0
     
-    # Save GIF if requested and frames were captured
+    # Save GIF if requested
     if save_gif and gif_path and frames:
         save_gif_from_frames(frames, gif_path)
     
+    # Return both reward and Frobenius history
     return total_reward
 
 
@@ -336,10 +625,10 @@ def monte_carlo_shapley_values(runner, agents, M=1000, seed=42, save_gifs=False,
     """
     # Initialize Shapley values (line 1)
     shapley_values = {agent: 0.0 for agent in agents}
-    
-    # Set random seed for reproducible sampling
-    random.seed(seed)
-    np.random.seed(seed)
+    all_frob_matrices = []
+    # # Set random seed for reproducible sampling
+    # random.seed(seed)
+    # np.random.seed(seed)
     
     # Determine which episodes to save as GIFs (save first few and some spread throughout)
     gif_episodes = set()
@@ -355,30 +644,43 @@ def monte_carlo_shapley_values(runner, agents, M=1000, seed=42, save_gifs=False,
         marginal_contributions = {agent: 0.0 for agent in agents}
         
         # Line 5: Sample a random coalition
-        coal_i = sample_coalition(agents)
+        
         
         # Line 6: Remove coalition members from agents list
-        coal_no_i = remove_from_list(coal_i, agents)
+        # scoal_no_i = remove_from_list(coal_i, agents)
         
         # Line 7: Compute reward with coalition
-        current_seed = seed + m * 1000  # Different seed for each rollout
+        current_seed = seed  #+ m * 1000  # Different seed for each rollout
         
         # Determine if we should save GIF for this episode
-        should_save_gif = save_gifs and m in gif_episodes
-        gif_path = None
-        if should_save_gif:
-            coalition_str = "_".join(map(str, sorted(coal_i))) if coal_i else "empty"
-            gif_path = os.path.join(gif_dir, f"episode_{m:04d}_coalition_{coalition_str}.gif")
         
-        r_i = rollout(runner, coal_i, current_seed, save_gif=should_save_gif, gif_path=gif_path)
+        
+        # r_i = rollout(runner, coal_i, current_seed, save_gif=should_save_gif, gif_path=gif_path)
+        # Computing the rollout and Frobenius norms
+        
         
         # Lines 8-9: Compute marginal contribution for each agent
         for agent in agents:
-            # Compute reward without this agent
-            coal_without_agent = frozenset(coal_i - {agent}) if agent in coal_i else coal_i
             
+            should_save_gif = save_gifs and m in gif_episodes
+            gif_path = None
+            coal_i = sample_coalition(agents)
+            print(f"Sampled coalition (episode {m}): {sorted(coal_i)}")
+            if should_save_gif:
+                coalition_str = "_".join(map(str, sorted(coal_i))) if coal_i else "empty"
+                gif_path = os.path.join(gif_dir, f"episode_{m:04d}_coalition_{coalition_str}.gif")
+            # Compute reward with this agent
+            coal_with_agent = frozenset(coal_i | {agent})
+            print(f"  Evaluating coalition with Agent {agent}: {sorted(coal_with_agent)}")
+            r_i = rollout(runner, coal_with_agent, current_seed, 
+                                       save_gif=should_save_gif, gif_path=gif_path, 
+                                       compute_frob=True)
+        
+            # Compute reward without this agent
+            coal_without_agent = frozenset(coal_with_agent - {agent}) # if agent in coal_i else coal_i
+            print(f"  Evaluating coalition without Agent {agent}: {sorted(coal_without_agent)}")
             # Don't save GIF for marginal contribution rollouts (too many)
-            r_neg_i = rollout(runner, coal_without_agent, current_seed + agent + 1)
+            r_neg_i = rollout(runner, coal_without_agent, current_seed)   #+ agent + 1
             
             # Marginal contribution
             marginal_contributions[agent] = r_i - r_neg_i
@@ -427,7 +729,7 @@ def exact_shapley_values(runner, agents, seed=42, save_gifs=False, gif_dir=None)
         nonlocal coalition_counter
         coalition_frozen = frozenset(coalition_set)
         if coalition_frozen not in coalition_values:
-            current_seed = seed + hash(coalition_frozen) % 10000
+            current_seed = seed #+ hash(coalition_frozen) % 10000
             
             # Save GIF for some interesting coalitions in exact computation
             should_save_gif = (save_gifs and gif_dir and 
@@ -591,6 +893,12 @@ def main():
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed")
     
+    # Frobenius norm calculation parameters
+    parser.add_argument("--compute_frobenius", action="store_true",
+                        help="Compute and plot Frobenius norms for inter-agent influence analysis")
+    parser.add_argument("--frobenius_episodes", type=int, default=1,
+                        help="Number of episodes to run for Frobenius norm calculation")
+    
     # Output
     parser.add_argument("--save_dir", type=str, default="shapley_results",
                         help="Directory to save results")
@@ -661,6 +969,10 @@ def main():
     print(f"Monte Carlo samples (M): {args.M}")
     print(f"Random seed: {args.seed}")
     print(f"Save GIFs: {args.save_gifs}")
+    print(f"Compute Frobenius norms: {args.compute_frobenius}")
+    if args.compute_frobenius:
+        print(f"Frobenius episodes: {args.frobenius_episodes}")
+        print(f"Use seed for Frobenius: {args.frobenius_episodes == 1}")
     print(f"Results will be saved to: {log_path}")
     print("="*50)
     
@@ -755,10 +1067,46 @@ def main():
                        f"Monte Carlo Shapley Values (M={args.M})")
     
     # Save exact results if computed
-    if exact_shapley_values is not None:
-        save_shapley_to_csv(exact_shapley_values, os.path.join(log_path, "shapley_exact.csv"))
-        plot_shapley_values(exact_shapley_values, os.path.join(log_path, "shapley_exact.png"),
-                           "Exact Shapley Values")
+    # if exact_shapley_values is not None:
+    #     save_shapley_to_csv(exact_shapley_values, os.path.join(log_path, "shapley_exact.csv"))
+    #     plot_shapley_values(exact_shapley_values, os.path.join(log_path, "shapley_exact.png"),
+    #                        "Exact Shapley Values")
+    
+    # Compute and plot Frobenius norms if requested
+    frob_matrices_history = []
+    if args.compute_frobenius:
+        print(f"\nComputing Frobenius norms over {args.frobenius_episodes} episode(s)...")
+        average_frob_matrix = calculate_average_frobenius_norms(
+            runner, 
+            num_episodes=args.frobenius_episodes, 
+            seed=args.seed
+        )
+        
+        if average_frob_matrix is not None:
+            # Convert average matrix to the format expected by plot_influence_pies
+            frob_matrices_history = [average_frob_matrix]
+            
+            print("Generating influence pie charts...")
+            influence_pie_path = os.path.join(log_path, "influence_pies.png")
+            plot_influence_pies(
+                frob_matrices_history, 
+                None,  # No attacked agent in normal Shapley computation
+                len(agents), 
+                influence_pie_path, 
+                is_attack_scenario=False
+            )
+            
+            # Save Frobenius matrices to CSV for analysis
+            frob_csv_path = os.path.join(log_path, "frobenius_matrices.csv")
+            with open(frob_csv_path, 'w', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                header = ['metric'] + [f'agent_{i}_to_{j}' for i in range(len(agents)) for j in range(len(agents))]
+                writer.writerow(header)
+                row = ['average_frobenius'] + [average_frob_matrix[i][j] for i in range(len(agents)) for j in range(len(agents))]
+                writer.writerow(row)
+            print(f"Saved Frobenius matrices to {frob_csv_path}")
+        else:
+            print("Failed to compute Frobenius norms.")
     
     # Save configuration
     config_info = {
@@ -767,6 +1115,8 @@ def main():
             "M": args.M,
             "seed": args.seed,
             "save_gifs": args.save_gifs,
+            "compute_frobenius": args.compute_frobenius,
+            "frobenius_episodes": args.frobenius_episodes,
             "exact_computed": exact_shapley_values is not None,
             "num_agents": len(agents),
         },
@@ -798,7 +1148,7 @@ def main():
                 print("Note: PettingZoo MPE environments often require additional setup for visual output")
         except Exception as e:
             print(f"Could not check GIF directory: {e}")
-    
+
     # Close runner
     runner.close()
 
