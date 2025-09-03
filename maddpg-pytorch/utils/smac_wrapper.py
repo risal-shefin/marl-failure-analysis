@@ -59,6 +59,9 @@ class SmacWrapper:
 
     def close(self):
         return self.env.close()
+    
+    def render(self):
+        return self.env.env.render(mode="rgb_array")
 
     def __getattr__(self, name):
         return getattr(self.env, name)
