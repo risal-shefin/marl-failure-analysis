@@ -1,0 +1,171 @@
+import argparse
+import torch
+import time
+import os
+import numpy as np
+from gym.spaces import Box
+import gymnasium
+from pathlib import Path
+from torch.autograd import Variable
+from tensorboardX import SummaryWriter
+from utils.buffer import ReplayBuffer
+from algorithms.maddpg import MADDPG
+from utils.smac_wrapper import SmacWrapper
+
+USE_CUDA = torch.cuda.is_available()
+DEVICE = 'gpu' if USE_CUDA else 'cpu'
+
+
+def eval(env, maddpg, n_episodes):
+    total_reward = 0
+    for _ in range(n_episodes):
+        obs, action_masks = env.reset()
+        episode_reward = 0
+        with torch.no_grad():
+            maddpg.prep_rollouts(device=DEVICE)
+        while True:
+            torch_obs = [Variable(torch.Tensor([obs[i]]).to('cuda' if USE_CUDA else 'cpu'), requires_grad=False)
+                         for i in range(maddpg.nagents)]
+            torch_masks = [Variable(torch.Tensor(action_masks[i]).to('cuda' if USE_CUDA else 'cpu'), requires_grad=False)
+                           if action_masks[i] is not None else None for i in range(maddpg.nagents)]
+            with torch.no_grad():
+                torch_agent_actions = maddpg.step(torch_obs, explore=False, action_masks=torch_masks)
+            agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
+            actions = {agent_name: agent_actions[i].argmax() for i, agent_name in enumerate(env.possible_agents)}
+            next_obs, rewards, dones, infos, next_masks = env.step(actions)
+            episode_reward += np.sum(rewards)
+            obs = next_obs
+            action_masks = next_masks
+            if dones.all():
+                break
+        total_reward += episode_reward
+    env.close()
+    return total_reward / n_episodes
+
+
+def run(config):
+    model_dir = Path('./models') / config.map_name / config.model_name
+    if not model_dir.exists():
+        curr_run = 'run1'
+    else:
+        exst_run_nums = [int(str(folder.name).split('run')[1]) for folder in
+                         model_dir.iterdir() if str(folder.name).startswith('run')]
+        if len(exst_run_nums) == 0:
+            curr_run = 'run1'
+        else:
+            curr_run = 'run%i' % (max(exst_run_nums) + 1)
+    run_dir = model_dir / curr_run
+    log_dir = run_dir / 'logs'
+    os.makedirs(log_dir)
+    logger = SummaryWriter(str(log_dir))
+
+    torch.manual_seed(config.seed)
+    np.random.seed(config.seed)
+    if not USE_CUDA:
+        torch.set_num_threads(config.n_training_threads)
+
+    env = SmacWrapper.make_env(config.map_name)
+    env.reset()
+    eval_env = SmacWrapper.make_env(config.map_name)
+    eval_env.reset()
+
+    maddpg = MADDPG.init_from_env(env, agent_alg=config.agent_alg,
+                                  adversary_alg=config.adversary_alg,
+                                  tau=config.tau,
+                                  lr=config.lr,
+                                  hidden_dim=config.hidden_dim)
+    replay_buffer = ReplayBuffer(config.buffer_length, maddpg.nagents,
+                                 [obsp.shape[0] if len(obsp.shape) == 1 else obsp.shape for obsp in env.observation_space],
+                                 [acsp.shape[0] if isinstance(acsp, Box) or isinstance(acsp, gymnasium.spaces.Box) else acsp.n
+                                  for acsp in env.action_space])
+    t = 0
+    best_eval_reward = -np.inf
+    for ep_i in range(0, config.n_episodes, config.n_rollout_threads):
+        obs, action_masks = env.reset()
+        maddpg.prep_rollouts(device=DEVICE)
+
+        explr_pct_remaining = max(0, config.n_exploration_eps - ep_i) / config.n_exploration_eps
+        maddpg.scale_noise(config.final_noise_scale + (config.init_noise_scale - config.final_noise_scale) * explr_pct_remaining)
+        maddpg.reset_noise()
+
+        episode_length = 0
+        for _ in range(config.episode_length):
+            torch_obs = [Variable(torch.Tensor([obs[i]]).to('cuda' if USE_CUDA else 'cpu'), requires_grad=False)
+                         for i in range(maddpg.nagents)]
+            torch_masks = [Variable(torch.Tensor(action_masks[i]).to('cuda' if USE_CUDA else 'cpu'), requires_grad=False)
+                           if action_masks[i] is not None else None for i in range(maddpg.nagents)]
+            torch_agent_actions = maddpg.step(torch_obs, explore=True, action_masks=torch_masks)
+            agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
+            actions = {agent_name: agent_actions[i].argmax() for i, agent_name in enumerate(env.possible_agents)}
+            next_obs, rewards, dones, infos, next_masks = env.step(actions)
+            replay_buffer.push(obs, agent_actions, rewards, next_obs, dones, action_masks, next_masks)
+            obs = next_obs
+            action_masks = next_masks
+            t += config.n_rollout_threads
+            if (len(replay_buffer) >= config.batch_size and
+                (t % config.steps_per_update) < config.n_rollout_threads):
+                if USE_CUDA:
+                    maddpg.prep_training(device='gpu')
+                else:
+                    maddpg.prep_training(device='cpu')
+                for u_i in range(config.n_rollout_threads):
+                    for a_i in range(maddpg.nagents):
+                        sample = replay_buffer.sample(config.batch_size,
+                                                      to_gpu=USE_CUDA)
+                        maddpg.update(sample, a_i, logger=logger)
+                    maddpg.update_all_targets()
+                maddpg.prep_rollouts(device=DEVICE)
+
+            episode_length += 1
+            if dones.all():
+                break
+
+        ep_rews = replay_buffer.get_average_rewards(
+            episode_length * config.n_rollout_threads)
+        for a_i, a_ep_rew in enumerate(ep_rews):
+            logger.add_scalar('agent%i/mean_episode_rewards' % a_i, a_ep_rew, ep_i)
+
+        print(f"Ep#{ep_i+1},rew:{np.mean(ep_rews):.3f}", flush=True)
+
+        if ep_i % config.save_interval < config.n_rollout_threads:
+            eval_reward = eval(eval_env, maddpg, n_episodes=10)
+            if eval_reward >= best_eval_reward:
+                maddpg.save(run_dir / f'model_{eval_reward}.pt')
+                best_eval_reward = eval_reward
+                print(f"Model saved with eval reward: {eval_reward:.3f}", flush=True)
+
+    maddpg.save(run_dir / 'model_end.pt')
+    env.close()
+    logger.export_scalars_to_json(str(log_dir / 'summary.json'))
+    logger.close()
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("map_name", help="Name of SMAC map")
+    parser.add_argument("model_name", help="Name of directory to store model/training contents")
+    parser.add_argument("--seed", default=1, type=int, help="Random seed")
+    parser.add_argument("--n_rollout_threads", default=1, type=int)
+    parser.add_argument("--n_training_threads", default=6, type=int)
+    parser.add_argument("--buffer_length", default=int(1e6), type=int)
+    parser.add_argument("--n_episodes", default=10000000, type=int)
+    parser.add_argument("--episode_length", default=1000, type=int)
+    parser.add_argument("--steps_per_update", default=100, type=int)
+    parser.add_argument("--batch_size", default=1024, type=int, help="Batch size for model training")
+    parser.add_argument("--n_exploration_eps", default=100000, type=int)
+    parser.add_argument("--init_noise_scale", default=0.3, type=float)
+    parser.add_argument("--final_noise_scale", default=0.0, type=float)
+    parser.add_argument("--save_interval", default=100, type=int)
+    parser.add_argument("--hidden_dim", default=128, type=int)
+    parser.add_argument("--lr", default=0.01, type=float)
+    parser.add_argument("--tau", default=0.01, type=float)
+    parser.add_argument("--agent_alg", default="MADDPG", type=str, choices=['MADDPG', 'DDPG'])
+    parser.add_argument("--adversary_alg", default="MADDPG", type=str, choices=['MADDPG', 'DDPG'])
+    parser.add_argument("--discrete_action", default=True, help="Use discrete action space", action='store_true')
+
+    config = parser.parse_args()
+    print("\n-- Configs: --")
+    for key, value in vars(config).items():
+        print(f"{key}: {value}")
+    print("--------------")
+    run(config)

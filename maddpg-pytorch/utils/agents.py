@@ -66,7 +66,7 @@ class DDPGAgent(object):
         else:
             self.exploration.scale = scale
 
-    def step(self, obs, explore=False):
+    def step(self, obs, explore=False, action_mask = None):
         """
         Take a step forward in environment for a minibatch of observations
         Inputs:
@@ -76,6 +76,8 @@ class DDPGAgent(object):
             action (PyTorch Variable): Actions for this agent
         """
         action = self.policy(obs)
+        if action_mask is not None:
+            action = action.masked_fill(action_mask == 0, -1e9)
         if self.discrete_action:
             if explore:
                 action = gumbel_softmax(action, hard=True)
@@ -178,7 +180,7 @@ class DDPGImageAgent(object):
         else:
             self.exploration.scale = scale
 
-    def step(self, obs, explore=False):
+    def step(self, obs, explore=False, action_mask = None):
         """
         Take a step forward in environment for a minibatch of observations
         Inputs:
@@ -188,6 +190,8 @@ class DDPGImageAgent(object):
             action (PyTorch Variable): Actions for this agent
         """
         action = self.policy(obs)
+        if action_mask is not None:
+            action = action.masked_fill(action_mask == 0, -1e9)
         if self.discrete_action:
             if explore:
                 action = gumbel_softmax(action, hard=True)

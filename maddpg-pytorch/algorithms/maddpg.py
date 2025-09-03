@@ -83,21 +83,32 @@ class MADDPG(object):
         for a in self.agents:
             a.reset_noise()
 
-    def step(self, observations, explore=False):
+    def step(self, observations, explore=False, action_masks=None):
         """
         Take a step forward in environment with all agents
         Inputs:
             observations: List of observations for each agent
             explore (boolean): Whether or not to add exploration noise
+            action_masks: Optional list of masks for each agent
         Outputs:
             actions: List of actions for each agent
         """
-        return [a.step(obs, explore=explore) for a, obs in zip(self.agents,
-                                                                 observations)]
-    
-    def get_action_logits(self, observations):
+        if action_masks is None:
+            return [a.step(obs, explore=explore) for a, obs in zip(self.agents, observations)]
+        return [a.step(obs, explore=explore, action_mask=mask)
+                for a, obs, mask in zip(self.agents, observations, action_masks)]
+
+    def get_action_logits(self, observations, action_masks=None):
         assert self.discrete_action, "get_action_logits is only available for discrete action spaces"
-        return [a.policy(obs) for a, obs in zip(self.agents, observations)]
+        if action_masks is None:
+            return [a.policy(obs) for a, obs in zip(self.agents, observations)]
+        logits = []
+        for a, obs, mask in zip(self.agents, observations, action_masks):
+            logit = a.policy(obs)
+            if mask is not None:
+                logit = logit.masked_fill(mask == 0, float('-inf'))
+            logits.append(logit)
+        return logits
 
 
     def update(self, sample, agent_i, parallel=False, logger=None):
@@ -113,15 +124,19 @@ class MADDPG(object):
             logger (SummaryWriter from Tensorboard-Pytorch):
                 If passed in, important quantities will be logged
         """
-        obs, acs, rews, next_obs, dones = sample
+        obs, acs, rews, next_obs, dones, avail_actions, next_avail_actions = sample
         curr_agent = self.agents[agent_i]
         is_obs_image = len(obs[agent_i].shape) >= 3 # the first dimension can be the batch size
 
         curr_agent.critic_optimizer.zero_grad()
         if self.alg_types[agent_i] == 'MADDPG':
             if self.discrete_action: # one-hot encode action
-                all_trgt_acs = [onehot_from_logits(pi(nobs)) for pi, nobs in
-                                zip(self.target_policies, next_obs)]
+                all_trgt_acs = []
+                for pi, nobs, mask in zip(self.target_policies, next_obs, next_avail_actions):
+                    logits = pi(nobs)
+                    if mask is not None:
+                        logits = logits.masked_fill(mask == 0, float('-inf'))
+                    all_trgt_acs.append(onehot_from_logits(logits))
             else:
                 all_trgt_acs = [pi(nobs) for pi, nobs in zip(self.target_policies,
                                                              next_obs)]
@@ -178,17 +193,22 @@ class MADDPG(object):
             # correct since it removes the assumption of a deterministic policy for
             # DDPG. Regardless, discrete policies don't seem to learn properly without it.
             curr_pol_out = curr_agent.policy(obs[agent_i])
+            if avail_actions[agent_i] is not None:
+                curr_pol_out = curr_pol_out.masked_fill(avail_actions[agent_i] == 0, -1e9)
             curr_pol_vf_in = gumbel_softmax(curr_pol_out, hard=True)
         else:
             curr_pol_out = curr_agent.policy(obs[agent_i])
             curr_pol_vf_in = curr_pol_out
         if self.alg_types[agent_i] == 'MADDPG':
             all_pol_acs = []
-            for i, pi, ob in zip(range(self.nagents), self.policies, obs):
+            for i, pi, ob, mask in zip(range(self.nagents), self.policies, obs, avail_actions):
                 if i == agent_i:
                     all_pol_acs.append(curr_pol_vf_in)
                 elif self.discrete_action:
-                    all_pol_acs.append(onehot_from_logits(pi(ob)))
+                    logits = pi(ob)
+                    if mask is not None:
+                        logits = logits.masked_fill(mask == 0, float('-inf'))
+                    all_pol_acs.append(onehot_from_logits(logits))
                 else:
                     all_pol_acs.append(pi(ob))
             vf_in = torch.cat((*obs, *all_pol_acs), dim=1) if not is_obs_image else (obs, all_pol_acs)
