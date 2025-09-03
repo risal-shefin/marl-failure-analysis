@@ -16,8 +16,7 @@ USE_CUDA = torch.cuda.is_available()
 DEVICE = 'gpu' if USE_CUDA else 'cpu'
 
 
-def eval(map_name, maddpg, n_episodes):
-    env = SmacWrapper.make_env(map_name)
+def eval(env, maddpg, n_episodes):
     total_reward = 0
     for _ in range(n_episodes):
         obs, action_masks = env.reset()
@@ -66,8 +65,9 @@ def run(config):
         torch.set_num_threads(config.n_training_threads)
 
     env = SmacWrapper.make_env(config.map_name)
-    eval_env = SmacWrapper.make_env(config.map_name)
     env.reset()
+    eval_env = SmacWrapper.make_env(config.map_name)
+    eval_env.reset()
 
     maddpg = MADDPG.init_from_env(env, agent_alg=config.agent_alg,
                                   adversary_alg=config.adversary_alg,
@@ -128,7 +128,7 @@ def run(config):
         print(f"Ep#{ep_i+1},rew:{np.mean(ep_rews):.3f}", flush=True)
 
         if ep_i % config.save_interval < config.n_rollout_threads:
-            eval_reward = eval(config.map_name, maddpg, n_episodes=10)
+            eval_reward = eval(eval_env, maddpg, n_episodes=10)
             if eval_reward >= best_eval_reward:
                 maddpg.save(run_dir / f'model_{eval_reward}.pt')
                 best_eval_reward = eval_reward
@@ -149,14 +149,14 @@ if __name__ == '__main__':
     parser.add_argument("--n_training_threads", default=6, type=int)
     parser.add_argument("--buffer_length", default=int(1e6), type=int)
     parser.add_argument("--n_episodes", default=10000000, type=int)
-    parser.add_argument("--episode_length", default=25, type=int)
+    parser.add_argument("--episode_length", default=1000, type=int)
     parser.add_argument("--steps_per_update", default=100, type=int)
     parser.add_argument("--batch_size", default=1024, type=int, help="Batch size for model training")
     parser.add_argument("--n_exploration_eps", default=100000, type=int)
     parser.add_argument("--init_noise_scale", default=0.3, type=float)
     parser.add_argument("--final_noise_scale", default=0.0, type=float)
     parser.add_argument("--save_interval", default=100, type=int)
-    parser.add_argument("--hidden_dim", default=64, type=int)
+    parser.add_argument("--hidden_dim", default=128, type=int)
     parser.add_argument("--lr", default=0.01, type=float)
     parser.add_argument("--tau", default=0.01, type=float)
     parser.add_argument("--agent_alg", default="MADDPG", type=str, choices=['MADDPG', 'DDPG'])
