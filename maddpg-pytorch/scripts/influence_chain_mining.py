@@ -629,10 +629,10 @@ if __name__ == '__main__':
     # Episode and mining parameters
     parser.add_argument("--num_episodes", type=int, default=50,
                         help="Number of episodes to run (default: 50)")
-    parser.add_argument("--max_chain_length", type=int, default=4,
-                        help="Maximum length of influence chains (default: 4)")
-    parser.add_argument("--max_lookahead", type=int, default=2,
-                        help="Maximum timesteps ahead to look for next edge (default: 2)")
+    parser.add_argument("--max_chain_length", type=int, default=5,
+                        help="Maximum length of influence chains (default: 5)")
+    parser.add_argument("--max_lookahead", type=int, default=3,
+                        help="Maximum timesteps ahead to look for next edge (default: 3)")
     parser.add_argument("--decay_factor", type=float, default=0.9,
                         help="Decay factor for strength when timesteps are skipped (default: 0.9)")
     

@@ -38,7 +38,7 @@ def eval(env_func, is_discrete_action, maddpg, n_episodes):
     # Check if env_func exists in mpe
     if 'mpe' in env_func.__name__:
         if "simple_spread_v3" in env_func.__name__:
-            env = env_func.parallel_env(continuous_actions=not is_discrete_action, N=5)
+            env = env_func.parallel_env(continuous_actions=not is_discrete_action, N=3)
         else:
             env = env_func.parallel_env(continuous_actions=not is_discrete_action)
     elif 'waterworld' in env_func.__name__:
@@ -103,7 +103,7 @@ def run(config):
     try:
         env_func = getattr(mpe, config.env_id)
         if config.env_id == 'simple_spread_v3':
-            env = env_func.parallel_env(continuous_actions= not config.discrete_action, N=5)
+            env = env_func.parallel_env(continuous_actions= not config.discrete_action, N=3)
         else:
             env = env_func.parallel_env(continuous_actions= not config.discrete_action)
     except:
