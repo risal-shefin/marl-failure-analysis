@@ -9,7 +9,8 @@ class SmacWrapper:
     def __init__(self, env):
         self.env = env
         self.action_space = [env.action_space(agent) for agent in env.possible_agents]
-        self.observation_space = [env.observation_space(agent) for agent in env.possible_agents]
+        self.observation_space = [env.observation_space(agent)['observation'] for agent in env.possible_agents]
+        self.action_mask_space = [env.observation_space(agent)['action_mask'] for agent in env.possible_agents]
         self.agent_types = ["agent" for _ in env.possible_agents]
 
     @staticmethod

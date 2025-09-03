@@ -177,7 +177,7 @@ class MADDPG(object):
             # DDPG. Regardless, discrete policies don't seem to learn properly without it.
             curr_pol_out = curr_agent.policy(obs[agent_i])
             if avail_actions[agent_i] is not None:
-                curr_pol_out = curr_pol_out.masked_fill(avail_actions[agent_i] == 0, float('-inf'))
+                curr_pol_out = curr_pol_out.masked_fill(avail_actions[agent_i] == 0, -1e9)
             curr_pol_vf_in = gumbel_softmax(curr_pol_out, hard=True)
         else:
             curr_pol_out = curr_agent.policy(obs[agent_i])
