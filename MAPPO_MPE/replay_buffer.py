@@ -9,23 +9,26 @@ class ReplayBuffer:
         self.state_dim = args.state_dim
         self.episode_limit = args.episode_limit
         self.batch_size = args.batch_size
+        self.action_dim = args.action_dim
         self.episode_num = 0
         self.buffer = None
         self.reset_buffer()
         # create a buffer (dictionary)
 
     def reset_buffer(self):
-        self.buffer = {'obs_n': np.empty([self.batch_size, self.episode_limit, self.N, self.obs_dim]),
-                       's': np.empty([self.batch_size, self.episode_limit, self.state_dim]),
-                       'v_n': np.empty([self.batch_size, self.episode_limit + 1, self.N]),
-                       'a_n': np.empty([self.batch_size, self.episode_limit, self.N]),
-                       'a_logprob_n': np.empty([self.batch_size, self.episode_limit, self.N]),
-                       'r_n': np.empty([self.batch_size, self.episode_limit, self.N]),
-                       'done_n': np.empty([self.batch_size, self.episode_limit, self.N])
-                       }
+        self.buffer = {
+            'obs_n': np.empty([self.batch_size, self.episode_limit, self.N, self.obs_dim]),
+            's': np.empty([self.batch_size, self.episode_limit, self.state_dim]),
+            'v_n': np.empty([self.batch_size, self.episode_limit + 1, self.N]),
+            'a_n': np.empty([self.batch_size, self.episode_limit, self.N]),
+            'a_logprob_n': np.empty([self.batch_size, self.episode_limit, self.N]),
+            'r_n': np.empty([self.batch_size, self.episode_limit, self.N]),
+            'done_n': np.empty([self.batch_size, self.episode_limit, self.N]),
+            'action_mask_n': np.empty([self.batch_size, self.episode_limit, self.N, self.action_dim])
+        }
         self.episode_num = 0
 
-    def store_transition(self, episode_step, obs_n, s, v_n, a_n, a_logprob_n, r_n, done_n):
+    def store_transition(self, episode_step, obs_n, s, v_n, a_n, a_logprob_n, r_n, done_n, action_mask_n):
         self.buffer['obs_n'][self.episode_num][episode_step] = obs_n
         self.buffer['s'][self.episode_num][episode_step] = s
         self.buffer['v_n'][self.episode_num][episode_step] = v_n
@@ -33,6 +36,7 @@ class ReplayBuffer:
         self.buffer['a_logprob_n'][self.episode_num][episode_step] = a_logprob_n
         self.buffer['r_n'][self.episode_num][episode_step] = r_n
         self.buffer['done_n'][self.episode_num][episode_step] = done_n
+        self.buffer['action_mask_n'][self.episode_num][episode_step] = action_mask_n
 
     def store_last_value(self, episode_step, v_n):
         self.buffer['v_n'][self.episode_num][episode_step] = v_n

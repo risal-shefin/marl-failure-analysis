@@ -109,7 +109,7 @@ class Critic_MLP(nn.Module):
         return value
 
 
-class MAPPO_MPE:
+class MAPPO:
     def __init__(self, args):
         self.N = args.N
         self.action_dim = args.action_dim
@@ -158,35 +158,44 @@ class MAPPO_MPE:
         else:
             self.ac_optimizer = torch.optim.Adam(self.ac_parameters, lr=self.lr)
 
-    def choose_action(self, obs_n, evaluate):
+    @staticmethod
+    def _apply_action_mask(probs, mask):
+        if mask is None:
+            return probs
+        probs = probs * mask
+        probs_sum = probs.sum(dim=-1, keepdim=True)
+        probs = probs / (probs_sum + 1e-8)
+        return probs
+
+    def choose_action(self, obs_n, evaluate, action_masks=None):
         with torch.no_grad():
             actor_inputs = []
-            # Fix: Convert list of numpy arrays to a single numpy array before creating tensor
             if isinstance(obs_n, list) and isinstance(obs_n[0], np.ndarray):
                 obs_n = np.array(obs_n)
-            obs_n = torch.tensor(obs_n, dtype=torch.float32)  # obs_n.shape=(N，obs_dim)
+            obs_n = torch.tensor(obs_n, dtype=torch.float32)
             actor_inputs.append(obs_n)
             if self.add_agent_id:
-                """
-                    Add an one-hot vector to represent the agent_id
-                    For example, if N=3
-                    [obs of agent_1]+[1,0,0]
-                    [obs of agent_2]+[0,1,0]
-                    [obs of agent_3]+[0,0,1]
-                    So, we need to concatenate a N*N unit matrix(torch.eye(N))
-                """
                 actor_inputs.append(torch.eye(self.N))
 
-            actor_inputs = torch.cat([x for x in actor_inputs], dim=-1)  # actor_input.shape=(N, actor_input_dim)
-            
-            # Reset the RNN hidden state if using RNN
+            actor_inputs = torch.cat([x for x in actor_inputs], dim=-1)
+
             if self.use_rnn:
-                batch_size = actor_inputs.size(0)  # Should match N
-                self.actor.rnn_hidden = torch.zeros(batch_size, self.rnn_hidden_dim, 
+                batch_size = actor_inputs.size(0)
+                self.actor.rnn_hidden = torch.zeros(batch_size, self.rnn_hidden_dim,
                                                    device=actor_inputs.device)
-            
-            prob = self.actor(actor_inputs)  # prob.shape=(N,action_dim)
-            if evaluate:  # When evaluating the policy, we select the action with the highest probability
+
+            prob = self.actor(actor_inputs)
+            if action_masks is not None:
+                mask_list = []
+                for m in action_masks:
+                    if m is None:
+                        mask_list.append(torch.ones(self.action_dim, device=prob.device))
+                    else:
+                        mask_list.append(torch.tensor(m, dtype=torch.float32, device=prob.device))
+                mask = torch.stack(mask_list, dim=0)
+                prob = self._apply_action_mask(prob, mask)
+
+            if evaluate:
                 a_n = prob.argmax(dim=-1)
                 return a_n.numpy(), None
             else:
@@ -251,8 +260,10 @@ class MAPPO_MPE:
                     self.critic.rnn_hidden = None
                     probs_now, values_now = [], []
                     for t in range(self.episode_limit):
-                        prob = self.actor(actor_inputs[index, t].reshape(self.mini_batch_size * self.N, -1)) # prob.shape=(mini_batch_size*N, action_dim)
-                        probs_now.append(prob.reshape(self.mini_batch_size, self.N, -1))  # prob.shape=(mini_batch_size,N,action_dim）
+                        prob = self.actor(actor_inputs[index, t].reshape(self.mini_batch_size * self.N, -1))
+                        mask = batch['action_mask_n'][index, t].reshape(self.mini_batch_size * self.N, -1)
+                        prob = self._apply_action_mask(prob, mask)
+                        probs_now.append(prob.reshape(self.mini_batch_size, self.N, -1))
                         v = self.critic(critic_inputs[index, t].reshape(self.mini_batch_size * self.N, -1))  # v.shape=(mini_batch_size*N,1)
                         values_now.append(v.reshape(self.mini_batch_size, self.N))  # v.shape=(mini_batch_size,N)
                     # Stack them according to the time (dim=1)
@@ -260,6 +271,7 @@ class MAPPO_MPE:
                     values_now = torch.stack(values_now, dim=1)
                 else:
                     probs_now = self.actor(actor_inputs[index])
+                    probs_now = self._apply_action_mask(probs_now, batch['action_mask_n'][index])
                     values_now = self.critic(critic_inputs[index]).squeeze(-1)
 
                 dist_now = Categorical(probs_now)
@@ -319,7 +331,7 @@ class MAPPO_MPE:
         # self.actor.load_state_dict(torch.load(path))
         self.actor.load_state_dict(torch.load(path)["actor_state_dict"])
 
-    def select_action(self, obs, agent_id, evaluate=False, return_dist=False):
+    def select_action(self, obs, agent_id, evaluate=False, action_mask=None, return_dist=False):
         """
         Select an action for the specified agent based on the observation
         
@@ -351,6 +363,9 @@ class MAPPO_MPE:
             
             # Get action probabilities
             action_probs = self.actor(actor_input)  # shape: (1, action_dim)
+            if action_mask is not None:
+                mask_tensor = torch.tensor(action_mask, dtype=torch.float32, device=action_probs.device)
+                action_probs = self._apply_action_mask(action_probs, mask_tensor)
             dist = torch.distributions.Categorical(action_probs)
             if evaluate:  # Use deterministic policy for evaluation
                 action = torch.argmax(action_probs, dim=-1).item()  # Select the action with highest probability
@@ -362,7 +377,7 @@ class MAPPO_MPE:
             return action, dist
         return action
     
-    def compute_log_prob(self, obs, agent_id, action):
+    def compute_log_prob(self, obs, agent_id, action, action_mask=None):
         # Convert to tensor and add batch dimension
         obs = obs.unsqueeze(0)  # shape: (1, obs_dim)
         
@@ -382,6 +397,9 @@ class MAPPO_MPE:
         
         # Get action probabilities
         action_probs = self.actor(actor_input)  # shape: (1, action_dim)
+        if action_mask is not None:
+            mask_tensor = torch.tensor(action_mask, dtype=torch.float32, device=action_probs.device)
+            action_probs = self._apply_action_mask(action_probs, mask_tensor)
         dist = torch.distributions.Categorical(action_probs)
         return dist.log_prob(action)
     
@@ -405,7 +423,7 @@ class MAPPO_MPE:
         return v_n
     
     # gradient enabled version of select_action
-    def compute_action(self, obs, agent_id, evaluate=False, return_dist=False):
+    def compute_action(self, obs, agent_id, evaluate=False, action_mask=None, return_dist=False):
         """
         Select an action for the specified agent based on the observation
         
@@ -434,6 +452,9 @@ class MAPPO_MPE:
         
         # Get action probabilities
         action_probs = self.actor(actor_input)  # shape: (1, action_dim)
+        if action_mask is not None:
+            mask_tensor = torch.tensor(action_mask, dtype=torch.float32, device=action_probs.device)
+            action_probs = self._apply_action_mask(action_probs, mask_tensor)
         dist = torch.distributions.Categorical(action_probs)
         if evaluate:  # Use deterministic policy for evaluation
             action = torch.argmax(action_probs, dim=-1) # Select the action with highest probability
