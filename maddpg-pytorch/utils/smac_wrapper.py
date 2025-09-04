@@ -22,8 +22,8 @@ class SmacWrapper:
         env = StarCraft2PZEnv.parallel_env(map_name=map_name)
         return SmacWrapper.wrap_env(env)
 
-    def reset(self, seed=None):
-        obs_info = self.env.reset(seed=seed) if seed is not None else self.env.reset()
+    def reset(self):
+        obs_info = self.env.reset()
         obs = []
         masks = []
         for agent in self.env.possible_agents:
@@ -31,13 +31,15 @@ class SmacWrapper:
             obs.append(info["observation"])
             masks.append(info["action_mask"])
         return obs, masks
+    
+    def seed(self, seed):
+        self.env.seed(seed)
 
     def step(self, actions):
         obs_info, rewards, terminations, truncations, infos = self.env.step(actions)
         states = []
         rewards_list = []
         dones = []
-        infos_list = []
         masks = []
         for i, agent in enumerate(self.env.possible_agents):
             if agent in self.env.agents:
@@ -45,18 +47,15 @@ class SmacWrapper:
                 rewards_list.append(rewards[agent])
                 done = terminations[agent] or truncations[agent]
                 dones.append(done)
-                infos_list.append(infos[agent])
                 masks.append(obs_info[agent]["action_mask"])
             else:
                 states.append(np.zeros(self.observation_space[i].shape))
                 rewards_list.append(0.0)
                 dones.append(True)
-                infos_list.append({})
                 masks.append(None)
         rewards_arr = np.array([rewards_list])
         dones_arr = np.array([dones])
-        infos_arr = np.array([infos_list])
-        return states, rewards_arr, dones_arr, infos_arr, masks
+        return states, rewards_arr, dones_arr, infos, masks
 
     def close(self):
         return self.env.close()

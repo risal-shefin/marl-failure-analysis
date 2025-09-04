@@ -48,6 +48,7 @@ class MLPNetwork(nn.Module):
         # h1 = self.nonlin(self.fc1(X))
         # h2 = self.nonlin(self.fc2(h1))
         
+        # no batch normalization in test_mode since since the test batch may contain only a single sample.
         h1 = F.tanh(self.fc1(self.in_fn(X))) if not self.test_mode else F.tanh(self.fc1(X))
         h2 = F.tanh(self.fc2(h1))
         out = self.out_fn(self.fc3(h2))
