@@ -27,7 +27,7 @@ class PettingZooWrapper:
         try:
             env_func = getattr(mpe, env_name)
             if env_name == "simple_spread_v3":
-                self.env = env_func.parallel_env(continuous_actions=continuous, render_mode='rgb_array', N=5)
+                self.env = env_func.parallel_env(continuous_actions=continuous, render_mode='rgb_array', N=3)
             else:
                 self.env = env_func.parallel_env(continuous_actions=continuous, render_mode='rgb_array')
         except:
@@ -76,7 +76,7 @@ class PettingZooWrapper:
         return obs_list, reward_list, done_list, info_list
     
     def render(self):
-        self.env.render()
+        return self.env.render()
     
     def close(self):
         self.env.close()

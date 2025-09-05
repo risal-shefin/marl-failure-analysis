@@ -24,7 +24,7 @@ class ReplayBuffer:
             'a_logprob_n': np.empty([self.batch_size, self.episode_limit, self.N]),
             'r_n': np.empty([self.batch_size, self.episode_limit, self.N]),
             'done_n': np.empty([self.batch_size, self.episode_limit, self.N]),
-            'action_mask_n': np.empty([self.batch_size, self.episode_limit, self.N, self.action_dim])
+            'action_mask_n': np.ones([self.batch_size, self.episode_limit, self.N, self.action_dim])
         }
         self.episode_num = 0
 

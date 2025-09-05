@@ -58,7 +58,7 @@ class Runner_MAPPO_MPE:
         print("action_dim_n={}".format(self.args.action_dim_n), flush=True)
 
         # Setup output directory structure
-        self.output_dir = os.path.join(args.output_dir, f"train_{env_name}_{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+        self.output_dir = os.path.join(args.output_dir, "train", f"{env_name}", f"{datetime.now().strftime('%Y%m%d-%H%M%S')}")
         self.data_dir = os.path.join(self.output_dir, 'data')
         self.model_dir = os.path.join(self.output_dir, 'models')
         self.tensorboard_dir = os.path.join(self.output_dir, 'tensorboard')
@@ -154,12 +154,8 @@ class Runner_MAPPO_MPE:
 
     def run_episode_mpe(self, evaluate=False):
         total_reward = 0
-        reset_result = self.env.reset()  # Reset the environment
-        if isinstance(reset_result, tuple):
-            obs_n, action_masks = reset_result
-        else:
-            obs_n = reset_result
-            action_masks = [np.ones(self.args.action_dim) for _ in range(self.args.N)]
+        obs_n = self.env.reset()  # Reset the environment
+        action_masks = [np.ones(self.args.action_dim) for _ in range(self.args.N)]
         episode_steps = 0
         
         while True:
@@ -175,22 +171,18 @@ class Runner_MAPPO_MPE:
             
             for agent_id in range(self.args.N):
                 obs = obs_n[agent_id]
-                mask = action_masks[agent_id]
-                if evaluate:
-                    action = self.agent_n.select_action(obs, agent_id, evaluate=True, action_mask=mask)
+                if evaluate:  # When evaluating, we select the action with the highest probability
+                    action = self.agent_n.select_action(obs, agent_id, evaluate=True)
                     actions.append(action)
                 else:
-                    action, action_logprob = self.agent_n.choose_action([obs], False, [mask])
-                    actions.append(action[0])
-                    action_logprobs.append(action_logprob[0])
-
-            step_result = self.env.step(actions)
-            if isinstance(step_result, tuple) and len(step_result) == 5:
-                next_obs_n, reward_n, done_n, info_n, next_masks = step_result
-            else:
-                next_obs_n, reward_n, done_n, info_n = step_result
-                next_masks = [np.ones(self.args.action_dim) for _ in range(self.args.N)]
-
+                    # When training, we need both actions and their log probabilities
+                    action, action_logprob = self.agent_n.choose_action([obs], False)
+                    actions.append(action[0])  # choose_action returns a numpy array
+                    action_logprobs.append(action_logprob[0])  # choose_action returns a numpy array
+            
+            # Take a step in the environment
+            next_obs_n, reward_n, done_n, info_n = self.env.step(actions)
+            
             # Store transitions in the replay buffer if not evaluating
             if not evaluate:
                 self.replay_buffer.store_transition(
@@ -211,7 +203,6 @@ class Runner_MAPPO_MPE:
             
             # Update the observations
             obs_n = next_obs_n
-            action_masks = next_masks
             
             episode_steps += 1
             done = all(done_n) or episode_steps >= self.args.episode_limit

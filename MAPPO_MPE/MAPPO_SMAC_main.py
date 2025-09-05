@@ -22,7 +22,7 @@ class Runner_MAPPO_SMAC:
         torch.manual_seed(self.seed)
         # Create env
         self.env = SmacWrapper.make_env(env_name)
-        self.args.N = self.env.n  # The number of agents
+        self.args.N = self.env.num_agents  # The number of agents
 
         # Handle observation dimensions for each agent
         self.args.obs_dim_n = []
@@ -56,7 +56,7 @@ class Runner_MAPPO_SMAC:
         print("action_dim_n={}".format(self.args.action_dim_n), flush=True)
 
         # Setup output directory structure
-        self.output_dir = os.path.join(args.output_dir, f"train_{env_name}_{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+        self.output_dir = os.path.join(args.output_dir, "train", f"smac_{env_name}", f"{datetime.now().strftime('%Y%m%d-%H%M%S')}")
         self.data_dir = os.path.join(self.output_dir, 'data')
         self.model_dir = os.path.join(self.output_dir, 'models')
         self.tensorboard_dir = os.path.join(self.output_dir, 'tensorboard')
@@ -151,12 +151,7 @@ class Runner_MAPPO_SMAC:
 
     def run_episode_smac(self, evaluate=False):
         total_reward = 0
-        reset_result = self.env.reset()  # Reset the environment
-        if isinstance(reset_result, tuple):
-            obs_n, action_masks = reset_result
-        else:
-            obs_n = reset_result
-            action_masks = [np.ones(self.args.action_dim) for _ in range(self.args.N)]
+        obs_n, action_masks = self.env.reset()  # Reset the environment
         episode_steps = 0
 
         while True:
@@ -181,12 +176,8 @@ class Runner_MAPPO_SMAC:
                     actions.append(action[0])
                     action_logprobs.append(action_logprob[0])
 
-            step_result = self.env.step(actions)
-            if isinstance(step_result, tuple) and len(step_result) == 5:
-                next_obs_n, reward_n, done_n, info_n, next_masks = step_result
-            else:
-                next_obs_n, reward_n, done_n, info_n = step_result
-                next_masks = [np.ones(self.args.action_dim) for _ in range(self.args.N)]
+            actions_dict = {agent_name: actions[i] for i, agent_name in enumerate(self.env.possible_agents)}
+            next_obs_n, reward_n, done_n, info_n, next_masks = self.env.step(actions_dict)
 
             # Store transitions in the replay buffer if not evaluating
             if not evaluate:
@@ -203,7 +194,7 @@ class Runner_MAPPO_SMAC:
                 )
 
             # Calculate the total reward
-            reward = sum(reward_n)
+            reward = np.sum(reward_n)
             total_reward += reward
 
             # Update the observations
@@ -211,14 +202,14 @@ class Runner_MAPPO_SMAC:
             action_masks = next_masks
 
             episode_steps += 1
-            done = all(done_n) or episode_steps >= self.args.episode_limit
+            done = done_n.all() or episode_steps >= self.args.episode_limit
 
             # End the episode if done
             if done:
                 # If not evaluating, store the last value
                 if not evaluate:
                     # Get the value of the last state, or zero if terminal
-                    if all(done_n):  # If truly done (not just hitting episode limit)
+                    if done_n.all():  # If truly done (not just hitting episode limit)
                         v_last = np.zeros_like(v)
                     else:
                         # Calculate the next state for the critic and get its value
@@ -236,14 +227,14 @@ class Runner_MAPPO_SMAC:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser("Hyperparameters Setting for MAPPO in SMAC environment")
     parser.add_argument("--max_train_steps", type=int, default=int(3e6), help="Maximum number of training steps")
-    parser.add_argument("--episode_limit", type=int, default=25, help="Maximum number of steps per episode")
+    parser.add_argument("--episode_limit", type=int, default=1000, help="Maximum number of steps per episode")
     parser.add_argument("--evaluate_freq", type=int, default=5000, help="Evaluate the policy every 'evaluate_freq' steps")
     parser.add_argument("--evaluate_times", type=int, default=3, help="Evaluate times")
 
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size (the number of episodes)")
     parser.add_argument("--mini_batch_size", type=int, default=8, help="Minibatch size (the number of episodes)")
-    parser.add_argument("--rnn_hidden_dim", type=int, default=64, help="The number of neurons in hidden layers of the rnn")
-    parser.add_argument("--mlp_hidden_dim", type=int, default=64, help="The number of neurons in hidden layers of the mlp")
+    parser.add_argument("--rnn_hidden_dim", type=int, default=128, help="The number of neurons in hidden layers of the rnn")
+    parser.add_argument("--mlp_hidden_dim", type=int, default=128, help="The number of neurons in hidden layers of the mlp")
     parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
     parser.add_argument("--lamda", type=float, default=0.95, help="GAE parameter")
@@ -261,12 +252,12 @@ if __name__ == '__main__':
     parser.add_argument("--use_rnn", type=bool, default=False, help="Whether to use RNN")
     parser.add_argument("--add_agent_id", type=float, default=False, help="Whether to add agent_id. Here, we do not use it.")
     parser.add_argument("--use_value_clip", type=float, default=False, help="Whether to use value clip.")
-    parser.add_argument("--env_id", type=str, required=True, help="The name of the SMAC map to run")
+    parser.add_argument("--map_name", type=str, required=True, help="The name of the SMAC map to run")
 
     # Add output directory argument
     parser.add_argument("--output_dir", type=str, default="./runs", help="Directory to save all output files")
 
     args = parser.parse_args()
-    runner = Runner_MAPPO_SMAC(args, env_name=args.env_id, number=1, seed=42)
+    runner = Runner_MAPPO_SMAC(args, env_name=args.map_name, number=1, seed=42)
     runner.run()
 

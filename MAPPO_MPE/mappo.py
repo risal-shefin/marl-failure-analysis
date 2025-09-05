@@ -164,7 +164,7 @@ class MAPPO:
             return probs
         probs = probs * mask
         probs_sum = probs.sum(dim=-1, keepdim=True)
-        probs = probs / (probs_sum + 1e-8)
+        probs = probs / (probs_sum + 1e-9)
         return probs
 
     def choose_action(self, obs_n, evaluate, action_masks=None):
@@ -172,30 +172,36 @@ class MAPPO:
             actor_inputs = []
             if isinstance(obs_n, list) and isinstance(obs_n[0], np.ndarray):
                 obs_n = np.array(obs_n)
-            obs_n = torch.tensor(obs_n, dtype=torch.float32)
+            obs_n = torch.tensor(obs_n, dtype=torch.float32)    # obs_n.shape=(N，obs_dim)
             actor_inputs.append(obs_n)
             if self.add_agent_id:
+                """
+                    Add an one-hot vector to represent the agent_id
+                    For example, if N=3
+                    [obs of agent_1]+[1,0,0]
+                    [obs of agent_2]+[0,1,0]
+                    [obs of agent_3]+[0,0,1]
+                    So, we need to concatenate a N*N unit matrix(torch.eye(N))
+                """
                 actor_inputs.append(torch.eye(self.N))
 
-            actor_inputs = torch.cat([x for x in actor_inputs], dim=-1)
+            actor_inputs = torch.cat([x for x in actor_inputs], dim=-1)   # actor_input.shape=(N, actor_input_dim)
 
+            # Reset the RNN hidden state if using RNN
             if self.use_rnn:
-                batch_size = actor_inputs.size(0)
+                batch_size = actor_inputs.size(0)     # Should match N
                 self.actor.rnn_hidden = torch.zeros(batch_size, self.rnn_hidden_dim,
                                                    device=actor_inputs.device)
 
-            prob = self.actor(actor_inputs)
+            prob = self.actor(actor_inputs)   # prob.shape=(N,action_dim)
             if action_masks is not None:
                 mask_list = []
                 for m in action_masks:
-                    if m is None:
-                        mask_list.append(torch.ones(self.action_dim, device=prob.device))
-                    else:
-                        mask_list.append(torch.tensor(m, dtype=torch.float32, device=prob.device))
+                    mask_list.append(torch.tensor(m, dtype=torch.float32, device=prob.device))
                 mask = torch.stack(mask_list, dim=0)
                 prob = self._apply_action_mask(prob, mask)
 
-            if evaluate:
+            if evaluate:      # When evaluating the policy, we select the action with the highest probability
                 a_n = prob.argmax(dim=-1)
                 return a_n.numpy(), None
             else:
@@ -260,10 +266,10 @@ class MAPPO:
                     self.critic.rnn_hidden = None
                     probs_now, values_now = [], []
                     for t in range(self.episode_limit):
-                        prob = self.actor(actor_inputs[index, t].reshape(self.mini_batch_size * self.N, -1))
+                        prob = self.actor(actor_inputs[index, t].reshape(self.mini_batch_size * self.N, -1))  # prob.shape=(mini_batch_size*N, action_dim)
                         mask = batch['action_mask_n'][index, t].reshape(self.mini_batch_size * self.N, -1)
                         prob = self._apply_action_mask(prob, mask)
-                        probs_now.append(prob.reshape(self.mini_batch_size, self.N, -1))
+                        probs_now.append(prob.reshape(self.mini_batch_size, self.N, -1))      # prob.shape=(mini_batch_size,N,action_dim）
                         v = self.critic(critic_inputs[index, t].reshape(self.mini_batch_size * self.N, -1))  # v.shape=(mini_batch_size*N,1)
                         values_now.append(v.reshape(self.mini_batch_size, self.N))  # v.shape=(mini_batch_size,N)
                     # Stack them according to the time (dim=1)
@@ -277,7 +283,11 @@ class MAPPO:
                 dist_now = Categorical(probs_now)
                 dist_entropy = dist_now.entropy()  # dist_entropy.shape=(mini_batch_size, episode_limit, N)
                 # batch['a_n'][index].shape=(mini_batch_size, episode_limit, N)
-                a_logprob_n_now = dist_now.log_prob(batch['a_n'][index])  # a_logprob_n_now.shape=(mini_batch_size, episode_limit, N)
+                a_n = batch['a_n'][index]
+                print(" >>>> ", a_n.min().item())
+                assert a_n.min().item() >= 0, "Found negative action index"
+                assert a_n.max().item() < probs_now.size(-1), "Found action index >= num categories"
+                a_logprob_n_now = dist_now.log_prob(a_n)  # a_logprob_n_now.shape=(mini_batch_size, episode_limit, N)
                 # a/b=exp(log(a)-log(b))
                 ratios = torch.exp(a_logprob_n_now - batch['a_logprob_n'][index].detach())  # ratios.shape=(mini_batch_size, episode_limit, N)
                 surr1 = ratios * adv[index]
