@@ -51,7 +51,7 @@ def compute_pairwise_frob_norms(maddpg, obs, actions, action_spaces):
     vf_in = torch.cat((*torch_obs, *torch_actions), dim=1)
 
     N = maddpg.nagents
-    results = [[0.0 for _ in range(N)] for _ in range(N)]
+    results = np.zeros((N, N))
 
     for i in range(N):
         critic_val = maddpg.agents[i].critic(vf_in).mean()
@@ -72,6 +72,8 @@ def compute_pairwise_frob_norms(maddpg, obs, actions, action_spaces):
             frob_norm = torch.norm(hessian_rows, p='fro')
             results[i][j] = frob_norm.item()
 
+        results[i] = results[i] / (np.sum(results[i]) + 1e-10)  # normalization
+    
     return results
 
 
