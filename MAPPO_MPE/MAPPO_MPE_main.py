@@ -5,10 +5,9 @@ import argparse
 import os
 from normalization import Normalization, RewardScaling
 from replay_buffer import ReplayBuffer
-from mappo_mpe import MAPPO_MPE
+from mappo import MAPPO
 from make_env_pettingzoo import make_env
 from gym.spaces import Box, Discrete
-from gymnasium.spaces import Box, Discrete
 from datetime import datetime
 
 
@@ -59,7 +58,7 @@ class Runner_MAPPO_MPE:
         print("action_dim_n={}".format(self.args.action_dim_n), flush=True)
 
         # Setup output directory structure
-        self.output_dir = os.path.join(args.output_dir, f"train_{env_name}_{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+        self.output_dir = os.path.join(args.output_dir, "train", f"{env_name}" f"{datetime.now().strftime('%Y%m%d-%H%M%S')}")
         self.data_dir = os.path.join(self.output_dir, 'data')
         self.model_dir = os.path.join(self.output_dir, 'models')
         self.tensorboard_dir = os.path.join(self.output_dir, 'tensorboard')
@@ -71,7 +70,7 @@ class Runner_MAPPO_MPE:
                 print(f"Created directory: {directory}", flush=True)
 
         # Create N agents
-        self.agent_n = MAPPO_MPE(self.args)
+        self.agent_n = MAPPO(self.args)
         self.replay_buffer = ReplayBuffer(self.args)
 
         # Create a tensorboard with the new path
@@ -156,6 +155,7 @@ class Runner_MAPPO_MPE:
     def run_episode_mpe(self, evaluate=False):
         total_reward = 0
         obs_n = self.env.reset()  # Reset the environment
+        action_masks = [np.ones(self.args.action_dim) for _ in range(self.args.N)]  # Dummy action masks for compatibility
         episode_steps = 0
         
         while True:
@@ -171,18 +171,19 @@ class Runner_MAPPO_MPE:
             
             for agent_id in range(self.args.N):
                 obs = obs_n[agent_id]
-                if evaluate:  # When evaluating, we select the action with the highest probability
-                    action = self.agent_n.select_action(obs, agent_id, evaluate=True)
+                mask = action_masks[agent_id]
+                if evaluate:
+                    action = self.agent_n.select_action(obs, agent_id, evaluate=True, action_mask=mask)
                     actions.append(action)
                 else:
                     # When training, we need both actions and their log probabilities
-                    action, action_logprob = self.agent_n.choose_action([obs], False)
+                    action, action_logprob = self.agent_n.choose_action([obs], False, [mask])
                     actions.append(action[0])  # choose_action returns a numpy array
                     action_logprobs.append(action_logprob[0])  # choose_action returns a numpy array
-            
+
             # Take a step in the environment
             next_obs_n, reward_n, done_n, info_n = self.env.step(actions)
-            
+
             # Store transitions in the replay buffer if not evaluating
             if not evaluate:
                 self.replay_buffer.store_transition(
@@ -193,7 +194,8 @@ class Runner_MAPPO_MPE:
                     a_n=np.array(actions),
                     a_logprob_n=np.array(action_logprobs),
                     r_n=np.array(reward_n),
-                    done_n=np.array(done_n)
+                    done_n=np.array(done_n),
+                    action_mask_n=np.array(action_masks)
                 )
             
             # Calculate the total reward

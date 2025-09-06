@@ -109,7 +109,7 @@ class Critic_MLP(nn.Module):
         return value
 
 
-class MAPPO_MPE:
+class MAPPO:
     def __init__(self, args):
         self.N = args.N
         self.action_dim = args.action_dim
@@ -158,7 +158,16 @@ class MAPPO_MPE:
         else:
             self.ac_optimizer = torch.optim.Adam(self.ac_parameters, lr=self.lr)
 
-    def choose_action(self, obs_n, evaluate):
+    @staticmethod
+    def _apply_action_mask(probs, mask):
+        if mask is None:
+            return probs
+        probs = probs * mask
+        probs_sum = probs.sum(dim=-1, keepdim=True)
+        probs = probs / (probs_sum + 1e-8)
+        return probs
+
+    def choose_action(self, obs_n, evaluate, action_masks=None):
         with torch.no_grad():
             actor_inputs = []
             # Fix: Convert list of numpy arrays to a single numpy array before creating tensor
@@ -178,15 +187,25 @@ class MAPPO_MPE:
                 actor_inputs.append(torch.eye(self.N))
 
             actor_inputs = torch.cat([x for x in actor_inputs], dim=-1)  # actor_input.shape=(N, actor_input_dim)
-            
+
             # Reset the RNN hidden state if using RNN
             if self.use_rnn:
                 batch_size = actor_inputs.size(0)  # Should match N
-                self.actor.rnn_hidden = torch.zeros(batch_size, self.rnn_hidden_dim, 
+                self.actor.rnn_hidden = torch.zeros(batch_size, self.rnn_hidden_dim,
                                                    device=actor_inputs.device)
-            
+
             prob = self.actor(actor_inputs)  # prob.shape=(N,action_dim)
-            if evaluate:  # When evaluating the policy, we select the action with the highest probability
+            if action_masks is not None:
+                mask_list = []
+                for m in action_masks:
+                    if m is None:
+                        mask_list.append(torch.ones(self.action_dim, device=prob.device))
+                    else:
+                        mask_list.append(torch.tensor(m, dtype=torch.float32, device=prob.device))
+                mask = torch.stack(mask_list, dim=0)
+                prob = self._apply_action_mask(prob, mask)
+
+            if evaluate:
                 a_n = prob.argmax(dim=-1)
                 return a_n.numpy(), None
             else:
@@ -217,6 +236,12 @@ class MAPPO_MPE:
     def train(self, replay_buffer, total_steps):
         batch = replay_buffer.get_training_data()  # get training data
 
+        # mask out padded transitions using recorded episode lengths
+        lengths = batch['lengths']  # shape: (batch_size,)
+        device = lengths.device
+        valid_mask = (torch.arange(self.episode_limit, device=device).unsqueeze(0)
+                      < lengths.unsqueeze(1)).unsqueeze(-1).float()
+
         # Calculate the advantage using GAE
         adv = []
         gae = 0
@@ -227,7 +252,7 @@ class MAPPO_MPE:
                 adv.insert(0, gae)
             adv = torch.stack(adv, dim=1)  # adv.shape(batch_size,episode_limit,N)
             v_target = adv + batch['v_n'][:, :-1]  # v_target.shape(batch_size,episode_limit,N)
-            if self.use_adv_norm:  # Trick 1: advantage normalization
+            if self.use_adv_norm:
                 adv = ((adv - adv.mean()) / (adv.std() + 1e-5))
 
         """
@@ -251,26 +276,29 @@ class MAPPO_MPE:
                     self.critic.rnn_hidden = None
                     probs_now, values_now = [], []
                     for t in range(self.episode_limit):
-                        prob = self.actor(actor_inputs[index, t].reshape(self.mini_batch_size * self.N, -1)) # prob.shape=(mini_batch_size*N, action_dim)
+                        prob = self.actor(actor_inputs[index, t].reshape(self.mini_batch_size * self.N, -1))  # prob.shape=(mini_batch_size*N, action_dim)
+                        mask = batch['action_mask_n'][index, t].reshape(self.mini_batch_size * self.N, -1)
+                        prob = self._apply_action_mask(prob, mask)
                         probs_now.append(prob.reshape(self.mini_batch_size, self.N, -1))  # prob.shape=(mini_batch_size,N,action_dim）
                         v = self.critic(critic_inputs[index, t].reshape(self.mini_batch_size * self.N, -1))  # v.shape=(mini_batch_size*N,1)
                         values_now.append(v.reshape(self.mini_batch_size, self.N))  # v.shape=(mini_batch_size,N)
-                    # Stack them according to the time (dim=1)
                     probs_now = torch.stack(probs_now, dim=1)
                     values_now = torch.stack(values_now, dim=1)
                 else:
                     probs_now = self.actor(actor_inputs[index])
+                    probs_now = self._apply_action_mask(probs_now, batch['action_mask_n'][index])
                     values_now = self.critic(critic_inputs[index]).squeeze(-1)
 
                 dist_now = Categorical(probs_now)
                 dist_entropy = dist_now.entropy()  # dist_entropy.shape=(mini_batch_size, episode_limit, N)
-                # batch['a_n'][index].shape=(mini_batch_size, episode_limit, N)
                 a_logprob_n_now = dist_now.log_prob(batch['a_n'][index])  # a_logprob_n_now.shape=(mini_batch_size, episode_limit, N)
                 # a/b=exp(log(a)-log(b))
                 ratios = torch.exp(a_logprob_n_now - batch['a_logprob_n'][index].detach())  # ratios.shape=(mini_batch_size, episode_limit, N)
                 surr1 = ratios * adv[index]
                 surr2 = torch.clamp(ratios, 1 - self.epsilon, 1 + self.epsilon) * adv[index]
-                actor_loss = -torch.min(surr1, surr2) - self.entropy_coef * dist_entropy
+                valid_mask_batch = valid_mask[index]
+                actor_loss = (-torch.min(surr1, surr2) - self.entropy_coef * dist_entropy)
+                actor_loss = (actor_loss * valid_mask_batch).sum() / valid_mask_batch.sum()
 
                 if self.use_value_clip:
                     values_old = batch["v_n"][index, :-1].detach()
@@ -279,11 +307,12 @@ class MAPPO_MPE:
                     critic_loss = torch.max(values_error_clip ** 2, values_error_original ** 2)
                 else:
                     critic_loss = (values_now - v_target[index]) ** 2
+                critic_loss = (critic_loss * valid_mask_batch).sum() / valid_mask_batch.sum()
 
                 self.ac_optimizer.zero_grad()
-                ac_loss = actor_loss.mean() + critic_loss.mean()
+                ac_loss = actor_loss + critic_loss
                 ac_loss.backward()
-                if self.use_grad_clip:  # Trick 7: Gradient clip
+                if self.use_grad_clip:
                     torch.nn.utils.clip_grad_norm_(self.ac_parameters, 10.0)
                 self.ac_optimizer.step()
 
@@ -319,7 +348,7 @@ class MAPPO_MPE:
         # self.actor.load_state_dict(torch.load(path))
         self.actor.load_state_dict(torch.load(path)["actor_state_dict"])
 
-    def select_action(self, obs, agent_id, evaluate=False, return_dist=False):
+    def select_action(self, obs, agent_id, evaluate=False, action_mask=None, return_dist=False):
         """
         Select an action for the specified agent based on the observation
         
@@ -351,6 +380,9 @@ class MAPPO_MPE:
             
             # Get action probabilities
             action_probs = self.actor(actor_input)  # shape: (1, action_dim)
+            if action_mask is not None:
+                mask_tensor = torch.tensor(action_mask, dtype=torch.float32, device=action_probs.device)
+                action_probs = self._apply_action_mask(action_probs, mask_tensor)
             dist = torch.distributions.Categorical(action_probs)
             if evaluate:  # Use deterministic policy for evaluation
                 action = torch.argmax(action_probs, dim=-1).item()  # Select the action with highest probability
@@ -362,7 +394,7 @@ class MAPPO_MPE:
             return action, dist
         return action
     
-    def compute_log_prob(self, obs, agent_id, action):
+    def compute_log_prob(self, obs, agent_id, action, action_mask=None):
         # Convert to tensor and add batch dimension
         obs = obs.unsqueeze(0)  # shape: (1, obs_dim)
         
@@ -382,6 +414,9 @@ class MAPPO_MPE:
         
         # Get action probabilities
         action_probs = self.actor(actor_input)  # shape: (1, action_dim)
+        if action_mask is not None:
+            mask_tensor = torch.tensor(action_mask, dtype=torch.float32, device=action_probs.device)
+            action_probs = self._apply_action_mask(action_probs, mask_tensor)
         dist = torch.distributions.Categorical(action_probs)
         return dist.log_prob(action)
     
@@ -405,7 +440,7 @@ class MAPPO_MPE:
         return v_n
     
     # gradient enabled version of select_action
-    def compute_action(self, obs, agent_id, evaluate=False, return_dist=False):
+    def compute_action(self, obs, agent_id, evaluate=False, action_mask=None, return_dist=False):
         """
         Select an action for the specified agent based on the observation
         
@@ -434,6 +469,9 @@ class MAPPO_MPE:
         
         # Get action probabilities
         action_probs = self.actor(actor_input)  # shape: (1, action_dim)
+        if action_mask is not None:
+            mask_tensor = torch.tensor(action_mask, dtype=torch.float32, device=action_probs.device)
+            action_probs = self._apply_action_mask(action_probs, mask_tensor)
         dist = torch.distributions.Categorical(action_probs)
         if evaluate:  # Use deterministic policy for evaluation
             action = torch.argmax(action_probs, dim=-1) # Select the action with highest probability

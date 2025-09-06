@@ -12,6 +12,7 @@ class SmacWrapper:
         self.observation_space = [env.observation_space(agent)['observation'] for agent in env.possible_agents]
         self.action_mask_space = [env.observation_space(agent)['action_mask'] for agent in env.possible_agents]
         self.agent_types = ["agent" for _ in env.possible_agents]
+        self.num_agents = len(env.possible_agents)
 
     @staticmethod
     def wrap_env(env):
@@ -52,7 +53,6 @@ class SmacWrapper:
                 states.append(np.zeros(self.observation_space[i].shape))
                 rewards_list.append(0.0)
                 dones.append(True)
-                infos_list.append({})
                 action_mask = np.zeros(self.action_mask_space[i].shape)
                 action_mask[0] = 1 # dead agent can only take noop action
                 masks.append(action_mask)
