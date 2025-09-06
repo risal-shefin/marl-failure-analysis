@@ -58,7 +58,7 @@ class Runner_MAPPO_MPE:
         print("action_dim_n={}".format(self.args.action_dim_n), flush=True)
 
         # Setup output directory structure
-        self.output_dir = os.path.join(args.output_dir, f"train_{env_name}_{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+        self.output_dir = os.path.join(args.output_dir, "train", f"{env_name}" f"{datetime.now().strftime('%Y%m%d-%H%M%S')}")
         self.data_dir = os.path.join(self.output_dir, 'data')
         self.model_dir = os.path.join(self.output_dir, 'models')
         self.tensorboard_dir = os.path.join(self.output_dir, 'tensorboard')
@@ -154,12 +154,8 @@ class Runner_MAPPO_MPE:
 
     def run_episode_mpe(self, evaluate=False):
         total_reward = 0
-        reset_result = self.env.reset()  # Reset the environment
-        if isinstance(reset_result, tuple):
-            obs_n, action_masks = reset_result
-        else:
-            obs_n = reset_result
-            action_masks = [np.ones(self.args.action_dim) for _ in range(self.args.N)]
+        obs_n = self.env.reset()  # Reset the environment
+        action_masks = [np.ones(self.args.action_dim) for _ in range(self.args.N)]  # Dummy action masks for compatibility
         episode_steps = 0
         
         while True:
@@ -186,12 +182,7 @@ class Runner_MAPPO_MPE:
                     action_logprobs.append(action_logprob[0])  # choose_action returns a numpy array
 
             # Take a step in the environment
-            step_result = self.env.step(actions)
-            if isinstance(step_result, tuple) and len(step_result) == 5:
-                next_obs_n, reward_n, done_n, info_n, next_masks = step_result
-            else:
-                next_obs_n, reward_n, done_n, info_n = step_result
-                next_masks = [np.ones(self.args.action_dim) for _ in range(self.args.N)]
+            next_obs_n, reward_n, done_n, info_n = self.env.step(actions)
 
             # Store transitions in the replay buffer if not evaluating
             if not evaluate:
@@ -213,7 +204,6 @@ class Runner_MAPPO_MPE:
             
             # Update the observations
             obs_n = next_obs_n
-            action_masks = next_masks
             
             episode_steps += 1
             done = all(done_n) or episode_steps >= self.args.episode_limit

@@ -296,9 +296,9 @@ class MAPPO:
                 ratios = torch.exp(a_logprob_n_now - batch['a_logprob_n'][index].detach())  # ratios.shape=(mini_batch_size, episode_limit, N)
                 surr1 = ratios * adv[index]
                 surr2 = torch.clamp(ratios, 1 - self.epsilon, 1 + self.epsilon) * adv[index]
-                mask_batch = valid_mask[index]
+                valid_mask_batch = valid_mask[index]
                 actor_loss = (-torch.min(surr1, surr2) - self.entropy_coef * dist_entropy)
-                actor_loss = (actor_loss * mask_batch).sum() / mask_batch.sum()
+                actor_loss = (actor_loss * valid_mask_batch).sum() / valid_mask_batch.sum()
 
                 if self.use_value_clip:
                     values_old = batch["v_n"][index, :-1].detach()
@@ -307,7 +307,7 @@ class MAPPO:
                     critic_loss = torch.max(values_error_clip ** 2, values_error_original ** 2)
                 else:
                     critic_loss = (values_now - v_target[index]) ** 2
-                critic_loss = (critic_loss * mask_batch).sum() / mask_batch.sum()
+                critic_loss = (critic_loss * valid_mask_batch).sum() / valid_mask_batch.sum()
 
                 self.ac_optimizer.zero_grad()
                 ac_loss = actor_loss + critic_loss
