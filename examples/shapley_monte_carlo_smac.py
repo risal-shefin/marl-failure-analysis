@@ -57,8 +57,9 @@ def slice_avail(avail, agent_id):
         return None
     first = avail[0]
     if first is None:
-        return None
+        return None/deac/csc/vanbastelaerGrp/guptd23/RL_Project/HARL/examples/shapley_monte_carlo_smac.py
     return avail[:, agent_id]
+
 
 
 
@@ -68,27 +69,25 @@ def compute_pairwise_frob_norms_from_attack_test(runner, eval_obs, eval_rnn_stat
     Returns an N x N matrix where entry [i][j] approximates || \partial^2 v_i / (\partial obs_i \partial obs_j) ||_F.
     This is the version from attack_test.py
     """
-    eval_obs = torch.tensor(eval_obs, dtype=torch.float32, device=runner.device)
+    eval_obs = torch.tensor(eval_obs, dtype=torch.float32)
 
-    # concatenated_obs = torch.cat(agent_obs_tensors, dim=0)
-    # share_obs = concatenated_obs.unsqueeze(0).unsqueeze(0)
-    # share_obs = share_obs.expand(1, n_agents, -1)
-    # print(f"Debug: share_obs shape {share_obs.shape}  eval_rnn_states_critic shape {eval_rnn_states_critic.shape} eval_masks shape {eval_masks.shape}")
-    # Create list of individual agent observations with gradients enabled
     agent_obs_tensors = []
     n_agents = runner.num_agents
-    
-    # Create individual tensors for each agent's observations
+    # assume eval_obs shape (1, n_agents, obs_dim)
     for i in range(n_agents):
-        agent_obs = eval_obs[0, i].clone().detach()  # Get agent i's observation
+        agent_obs = eval_obs[0][i].clone().detach()
         agent_obs_tensor = torch.tensor(agent_obs, dtype=torch.float32, requires_grad=True)
         agent_obs_tensors.append(agent_obs_tensor)
-    
-    # Stack them back together for critic input, maintaining gradients
-    eval_obs_with_grad = torch.stack(agent_obs_tensors, dim=0).unsqueeze(0)  # Shape: (1, n_agents, obs_dim)
+
+    concatenated_obs = torch.cat(agent_obs_tensors, dim=0)
+    share_obs = concatenated_obs.unsqueeze(0).unsqueeze(0)
+    share_obs = share_obs.expand(1, n_agents, -1)
+    print(f"Shape of share_obs: {share_obs.shape}")
+
+    # exit("Exiting after one episode for edge score calculation.")
     
     values, temp_rnn_state_critic = runner.critic.get_values_with_grad(
-        eval_obs_with_grad,
+        share_obs,
         eval_rnn_states_critic,
         eval_masks,
     )
@@ -97,25 +96,56 @@ def compute_pairwise_frob_norms_from_attack_test(runner, eval_obs, eval_rnn_stat
     N = n_agents
     results = [[0.0 for _ in range(N)] for _ in range(N)]
 
+
     for i in range(N):
         # gradient of v_i wrt agent i obs using the individual tensor
+        """
+        obs tensor:
+            0 agent: [agent 0, agent 1, agent 2]
+            1 agent: [agent 0, agent 1, agent 2]
+            2 agent: [agent 0, agent 1, agent 2]
+        0 agent : values[i][0*70:(0+1)*70]
+        j agent : values[i][j*70:(j+1)*70]
+        """
+        
         grad_i = torch.autograd.grad(values[i], agent_obs_tensors[i], create_graph=True, retain_graph=True)[0]
 
-
         for j in range(N):
-            hessian_matrix = []
-            for k in range(grad_i.shape[0]):
-                second_order = torch.autograd.grad(
-                    grad_i[k],
-                    agent_obs_tensors[j],
-                    retain_graph=True,
-                    allow_unused=True,
-                )[0]
-                hessian_matrix.append(second_order.flatten())
+            # hessian_matrix = []
+            hessian_matrix = torch.autograd.grad(
+                grad_i.squeeze(),
+                agent_obs_tensors[j],
+                grad_outputs=torch.eye(grad_i.shape[0]).to(grad_i.device),
+                retain_graph=True,
+                is_grads_batched=True,
+                allow_unused=True,
+            )[0]
+            # if second_grad is None:
+            #     second_grad = torch.zeros_like(agent_obs_tensors[j])
+            # hessian_matrix.append(second_grad.flatten())
 
-            H = torch.stack(hessian_matrix) if len(hessian_matrix) > 0 else torch.zeros(1, 1)
-            results[i][j] = torch.norm(H, p='fro').item()
+            # H = torch.stack(hessian_matrix) if len(hessian_matrix) > 0 else torch.zeros(1, 1)
+            results[i][j] = torch.norm(hessian_matrix, p='fro').item()
 
+        # for j in range(N):
+        #     hessian_matrix = []
+    
+        #     for k in range(grad_i.shape[0]):
+        #         second_order = torch.autograd.grad(
+        #             grad_i[k],
+        #             agent_obs_tensors[j],
+        #             retain_graph=True,
+        #             allow_unused=True,
+        #         )[0]
+        #         # print(f"Second order : {second_order}")
+        #         hessian_matrix.append(second_order[j*70:(j+1)*70].flatten())
+        #         # print(f"Hessian matrix length : {hessian_matrix}")
+        #         # exit("Exiting after one calculation for debugging.")
+
+        #     H = torch.stack(hessian_matrix) if len(hessian_matrix) > 0 else torch.zeros(1, 1)
+        #     results[i][j] = torch.norm(H, p='fro').item()
+
+        # print(f"Computed row {i} of Frobenius norm matrix: {results[i]}")
         # for j in range(N):
         #     hessian_matrix = []
         #     for k in range(grad_i.shape[0]):
@@ -131,7 +161,7 @@ def compute_pairwise_frob_norms_from_attack_test(runner, eval_obs, eval_rnn_stat
 
         #     H = torch.stack(hessian_matrix) if len(hessian_matrix) > 0 else torch.zeros(1, 1)
         #     results[i][j] = H.norm(p='fro').item()
-
+    # exit("Exiting after one episode for edge score calculation.")
     return results
 
 def eval_frobenius_single_episode(runner, use_seed=False, seed=42):
@@ -144,6 +174,7 @@ def eval_frobenius_single_episode(runner, use_seed=False, seed=42):
     else:
         eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset()
 
+    print(f"Shape of eval_obs: {eval_obs.shape}, eval_share_obs: {eval_share_obs.shape}")
     eval_rnn_states = np.zeros(
         (
             runner.algo_args["eval"]["n_eval_rollout_threads"],
@@ -172,7 +203,7 @@ def eval_frobenius_single_episode(runner, use_seed=False, seed=42):
     while True:
         # Get actions for all agents
         eval_actions_collector = []
-        for agent_id in range(runner.num_agents):
+        for agent_id in tqdm(range(runner.num_agents), desc="Eval Agent Actions"):
             # print(f"Agent {agent_id} eval_share_obs shape: {eval_share_obs[:, agent_id].shape}")
             eval_actions, temp_rnn_state = runner.actor[agent_id].act(
                 eval_obs[:, agent_id],
@@ -190,7 +221,7 @@ def eval_frobenius_single_episode(runner, use_seed=False, seed=42):
         
         # Calculate pairwise Frobenius norms for this timestep
         pairwise_frobs = compute_pairwise_frob_norms_from_attack_test(
-            runner, eval_share_obs, eval_rnn_states_critic, eval_masks
+            runner, eval_obs, eval_rnn_states_critic, eval_masks
         )
         frob_norms_matrix_history.append(pairwise_frobs)
 
@@ -1068,10 +1099,10 @@ def main():
                        f"Monte Carlo Shapley Values (M={args.M})")
     
     # Save exact results if computed
-    # if exact_shapley_values is not None:
-    #     save_shapley_to_csv(exact_shapley_values, os.path.join(log_path, "shapley_exact.csv"))
-    #     plot_shapley_values(exact_shapley_values, os.path.join(log_path, "shapley_exact.png"),
-    #                        "Exact Shapley Values")
+    if exact_shapley_values is not None:
+        save_shapley_to_csv(exact_shapley_values, os.path.join(log_path, "shapley_exact.csv"))
+        plot_shapley_values(exact_shapley_values, os.path.join(log_path, "shapley_exact.png"),
+                           "Exact Shapley Values")
     
     # Compute and plot Frobenius norms if requested
     frob_matrices_history = []
