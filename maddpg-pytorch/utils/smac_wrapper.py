@@ -52,7 +52,6 @@ class SmacWrapper:
                 states.append(np.zeros(self.observation_space[i].shape))
                 rewards_list.append(0.0)
                 dones.append(True)
-                infos_list.append({})
                 action_mask = np.zeros(self.action_mask_space[i].shape)
                 action_mask[0] = 1 # dead agent can only take noop action
                 masks.append(action_mask)

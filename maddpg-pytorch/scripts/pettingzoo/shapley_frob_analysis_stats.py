@@ -1,24 +1,31 @@
 #!/usr/bin/env python3
 """
-Integrated Shapley Values, Frobenius Norm Analysis, and Attack Analysis for Multi-Agent RL (PettingZoo Version)
+Multi-Seed Integrated Shapley Values, Frobenius Norm Analysis, and Attack Analysis for Multi-Agent RL (PettingZoo Version)
 
-This script combines Monte Carlo Shapley value computation with Frobenius norm analysis
-and attack vulnerability assessment to provide comprehensive agent influence and risk assessment. It includes:
-1. Monte Carlo Shapley values computation (100 episodes)
-2. Pairwise Frobenius norm analysis (1 episode)
+This script runs comprehensive agent influence and risk assessment across multiple seeds and computes
+aggregated statistics with matching accuracy analysis. It includes:
+1. Monte Carlo Shapley values computation (100 episodes per seed)
+2. Pairwise Frobenius norm analysis (1 episode per seed)
 3. Outbound influence score I_i^out for each agent
-4. Cascade Risk Index (CRI) for each agent
-5. Attack vs No-Attack analysis (episodic rewards under attack scenarios)
-6. GIF saving functionality for coalition rollouts and attack scenarios
+4. Attack vs No-Attack analysis (episodic rewards under attack scenarios)
+5. Agent ranking and matching accuracy computation
+6. Aggregated visualization across multiple seeds
 
 Features:
-- Fixed episode counts: 100 for Shapley, 1 for Frobenius, 1 for each attack scenario
-- Outbound influence score: sum of frob[j][i] for all j != i
-- Cascade Risk Index: max(0, -shapley_i) * I_i^out
-- Attack analysis: normal vs individual agent attacks (random actions)
-- Comprehensive visualization with bar charts and attack impact analysis
-- GIF creation for unique coalitions and attack scenarios
+- Multi-seed analysis with configurable iteration count
+- Agent ranking by Shapley values, outbound influence, and attack impact
+- Matching accuracy computation between different ranking methods
+- Mean and standard deviation computation across seeds
+- Aggregated visualizations with error bars
+- Consistent color scheme across all plots using get_agent_colors function
 - PettingZoo environment support
+
+New Multi-Seed Analysis Features:
+- Command line argument for max iterations instead of seed
+- Ranking computation: agents sorted by Shapley values, outbound influence, and reward drop
+- Matching accuracy: position-wise comparison between rankings
+- Aggregated statistics: mean ± std for all metrics
+- Comprehensive multi-seed visualizations
 """
 
 import argparse
@@ -1286,16 +1293,564 @@ def run(config):
         print(f"Most Vulnerable Agent (Attack): Agent {most_vulnerable_agent} (Impact = {max_impact_value:.3f})")
 
 
+def compute_ranking_and_matching(shapley_values, outbound_influence, normal_reward, attack_rewards):
+    """
+    Compute agent rankings based on different metrics and their matching accuracies.
+    
+    Args:
+        shapley_values: List of Shapley values for each agent
+        outbound_influence: List of outbound influence scores for each agent
+        normal_reward: Reward from normal episode
+        attack_rewards: List of rewards when each agent is attacked
+        
+    Returns:
+        dict: Dictionary containing rankings and matching accuracies
+    """
+    n_agents = len(shapley_values)
+    
+    # Compute reward drops (impact of attacking each agent)
+    reward_drops = [normal_reward - attack_reward for attack_reward in attack_rewards]
+    
+    # Create agent indices
+    agent_indices = list(range(n_agents))
+    
+    # Sort agents by different metrics (descending order)
+    shapley_ranking = sorted(agent_indices, key=lambda i: shapley_values[i], reverse=True)
+    outbound_ranking = sorted(agent_indices, key=lambda i: outbound_influence[i], reverse=True)
+    reward_drop_ranking = sorted(agent_indices, key=lambda i: reward_drops[i], reverse=True)
+    
+    # Compute position-wise matching accuracies
+    def compute_position_wise_matching(ranking1, ranking2):
+        """Compute position-wise matching for each index/rank"""
+        position_matches = []
+        for i in range(len(ranking1)):
+            matches = 1 if ranking1[i] == ranking2[i] else 0
+            position_matches.append(matches)
+        return position_matches
+    
+    shapley_vs_reward_position_matches = compute_position_wise_matching(shapley_ranking, reward_drop_ranking)
+    outbound_vs_reward_position_matches = compute_position_wise_matching(outbound_ranking, reward_drop_ranking)
+    
+    return {
+        'shapley_ranking': shapley_ranking,
+        'outbound_ranking': outbound_ranking,
+        'reward_drop_ranking': reward_drop_ranking,
+        'reward_drops': reward_drops,
+        'shapley_vs_reward_position_matches': shapley_vs_reward_position_matches,
+        'outbound_vs_reward_position_matches': outbound_vs_reward_position_matches
+    }
+
+
+def plot_aggregated_shapley_barchart(mean_shapley_values, std_shapley_values, logdir, n_agents):
+    """Plot mean Shapley values as a bar chart"""
+    plt.figure(figsize=(10, 6))
+    
+    agents = list(range(n_agents))
+    # Get consistent color palette
+    agent_colors = get_agent_colors(n_agents)
+    colors = [agent_colors[i] for i in range(n_agents)]
+    
+    bars = plt.bar(agents, mean_shapley_values, 
+                   color=colors, alpha=0.8, edgecolor='black')
+    
+    # Add value labels on top of bars
+    for bar, val in zip(bars, mean_shapley_values):
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2., height + 0.01 * max(abs(min(mean_shapley_values)), max(mean_shapley_values)),
+                f'{val:.3f}', ha='center', va='bottom', fontweight='bold')
+    
+    plt.xlabel('Agent ID')
+    plt.ylabel('Mean Shapley Value')
+    plt.title('Mean Shapley Values Across Multiple Seeds')
+    plt.xticks(agents)
+    plt.grid(axis='y', alpha=0.3)
+    
+    # Add legend
+    legend_labels = [f'Agent {i}' for i in range(n_agents)]
+    legend_patches = [plt.matplotlib.patches.Patch(color=colors[i], label=legend_labels[i]) 
+                     for i in range(n_agents)]
+    plt.legend(handles=legend_patches, loc='upper right', fontsize=9)
+    
+    plt.tight_layout()
+    
+    # Save plot
+    barchart_path = os.path.join(logdir, 'mean_shapley_values_barchart.png')
+    plt.savefig(barchart_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved mean Shapley values bar chart to {barchart_path}")
+
+
+def plot_aggregated_outbound_influence_barchart(mean_outbound_influence, std_outbound_influence, logdir, n_agents):
+    """Plot mean outbound influence scores as a bar chart"""
+    plt.figure(figsize=(10, 6))
+    
+    agents = list(range(n_agents))
+    # Get consistent color palette
+    agent_colors = get_agent_colors(n_agents)
+    colors = [agent_colors[i] for i in range(n_agents)]
+    
+    bars = plt.bar(agents, mean_outbound_influence,
+                   color=colors, alpha=0.8, edgecolor='black')
+    
+    # Add value labels on top of bars
+    for bar, val in zip(bars, mean_outbound_influence):
+        height = bar.get_height()
+        if max(mean_outbound_influence) > 0:
+            plt.text(bar.get_x() + bar.get_width()/2., height + 0.01 * max(mean_outbound_influence),
+                    f'{val:.3f}', ha='center', va='bottom', fontweight='bold')
+        else:
+            plt.text(bar.get_x() + bar.get_width()/2., 0.001,
+                    f'{val:.3f}', ha='center', va='bottom', fontweight='bold')
+    
+    plt.xlabel('Agent ID')
+    plt.ylabel('Mean Outbound Influence Score (I_i^out)')
+    plt.title('Mean Outbound Influence Scores Across Multiple Seeds')
+    plt.xticks(agents)
+    plt.grid(axis='y', alpha=0.3)
+    
+    # Add legend
+    legend_labels = [f'Agent {i}' for i in range(n_agents)]
+    legend_patches = [plt.matplotlib.patches.Patch(color=colors[i], label=legend_labels[i]) 
+                     for i in range(n_agents)]
+    plt.legend(handles=legend_patches, loc='upper right', fontsize=9)
+    
+    plt.tight_layout()
+    
+    # Save plot
+    barchart_path = os.path.join(logdir, 'mean_outbound_influence_barchart.png')
+    plt.savefig(barchart_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved mean outbound influence bar chart to {barchart_path}")
+
+
+def create_aggregated_influence_pie_charts(mean_frob_norms, logdir, n_agents):
+    """
+    Create pie charts showing the mean influence of other agents on each agent.
+    
+    Args:
+        mean_frob_norms: N x N matrix of mean Frobenius norms
+        logdir: Directory to save the plots
+        n_agents: Number of agents
+    """
+    # Create subplots for each agent
+    max_per_row = 3
+    rows = math.ceil(n_agents / max_per_row)
+    cols = min(n_agents, max_per_row)
+    
+    fig, axes = plt.subplots(rows, cols, figsize=(2.8*cols, 4*rows))
+    if n_agents == 1:
+        axes = [axes]
+    elif rows == 1:
+        axes = axes if isinstance(axes, (list, np.ndarray)) else [axes]
+    else:
+        axes = axes.flatten()
+    
+    # Get consistent color palette
+    agent_colors = get_agent_colors(n_agents)
+    
+    for i in range(n_agents):
+        ax = axes[i]
+        
+        # Get influences of all agents (including self) on agent i
+        influences = []
+        labels = []
+        colors_for_agent = []
+        
+        for j in range(n_agents):
+            influences.append(mean_frob_norms[i, j])
+            if i == j:
+                labels.append(f'Agent {j} (self)')
+            else:
+                labels.append(f'Agent {j}')
+            colors_for_agent.append(agent_colors[j])
+        
+        # Only create pie chart if there are influences
+        if len(influences) > 0 and sum(influences) > 0:
+            # Remove zero influences for cleaner visualization
+            non_zero_indices = [k for k, val in enumerate(influences) if val > 1e-10]
+            if non_zero_indices:
+                clean_influences = [influences[k] for k in non_zero_indices]
+                clean_labels = [labels[k] for k in non_zero_indices]
+                clean_colors = [colors_for_agent[k] for k in non_zero_indices]
+                
+                # Create pie chart (without labels, using legend instead)
+                wedges, texts, autotexts = ax.pie(
+                    clean_influences, 
+                    colors=clean_colors,
+                    autopct='%1.1f%%',
+                    startangle=90
+                )
+                
+                # Improve text readability
+                for autotext in autotexts:
+                    autotext.set_color('white')
+                    autotext.set_fontweight('bold')
+            else:
+                # No non-zero influences
+                ax.text(0.5, 0.5, 'No significant\ninfluences', 
+                       horizontalalignment='center', verticalalignment='center',
+                       transform=ax.transAxes, fontsize=12)
+                ax.set_xlim(-1, 1)
+                ax.set_ylim(-1, 1)
+        else:
+            # No influences at all
+            ax.text(0.5, 0.5, 'No influences\ndetected', 
+                   horizontalalignment='center', verticalalignment='center',
+                   transform=ax.transAxes, fontsize=12)
+            ax.set_xlim(-1, 1)
+            ax.set_ylim(-1, 1)
+        
+        ax.set_title(f'Influences on Agent {i}', fontsize=14, fontweight='bold')
+    
+    # Hide unused subplots
+    for j in range(n_agents, len(axes)):
+        axes[j].set_visible(False)
+    
+    # Create a single legend at the bottom of the figure
+    legend_labels = []
+    legend_colors = []
+    for j in range(n_agents):
+        legend_labels.append(f'Agent {j}')
+        legend_colors.append(agent_colors[j])
+    
+    # Create legend patches
+    legend_patches = [plt.matplotlib.patches.Patch(color=legend_colors[j], label=legend_labels[j]) for j in range(n_agents)]
+    fig.legend(handles=legend_patches, loc='lower center', ncol=min(n_agents, 5), 
+               bbox_to_anchor=(0.5, -0.05), fontsize=10)
+    
+    plt.suptitle('Mean Agent Influence Analysis (Pairwise Frobenius Norms)', 
+                 fontsize=16, fontweight='bold', y=0.98)
+    plt.tight_layout(rect=[0, 0.1, 1, 0.95])  # Leave space for legend at bottom
+    
+    # Save plot
+    pie_chart_path = os.path.join(logdir, 'mean_agent_influence_pie_charts.png')
+    plt.savefig(pie_chart_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved mean influence pie charts to {pie_chart_path}")
+
+
+def plot_shapley_reward_matching_barchart(mean_position_accuracies, std_position_accuracies, logdir, n_agents):
+    """Plot Shapley vs Reward Drop matching accuracy for each rank/position"""
+    plt.figure(figsize=(10, 6))
+    
+    positions = list(range(n_agents))
+    position_labels = [f'Rank {i+1}' for i in range(n_agents)]
+    
+    # Use consistent color palette
+    agent_colors = get_agent_colors(n_agents)
+    colors = [agent_colors[i] for i in range(n_agents)]
+    
+    bars = plt.bar(positions, mean_position_accuracies,
+                   color=colors, alpha=0.7, edgecolor='black')
+    
+    # Add value labels on top of bars
+    for bar, val in zip(bars, mean_position_accuracies):
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2., height + 0.02,
+                f'{val:.3f}', ha='center', va='bottom', fontweight='bold', fontsize=9)
+    
+    plt.xlabel('Ranking Position', fontsize=12)
+    plt.ylabel('Matching Accuracy', fontsize=12)
+    plt.title('Shapley vs Reward Drop - Position-wise Matching Accuracy', fontsize=14, fontweight='bold')
+    plt.xticks(positions, position_labels)
+    plt.ylim(0, 1.1)
+    plt.grid(axis='y', alpha=0.3)
+    
+    plt.legend()
+    
+    plt.tight_layout()
+    
+    # Save plot
+    barchart_path = os.path.join(logdir, 'shapley_reward_matching_accuracy_barchart.png')
+    plt.savefig(barchart_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved Shapley-reward matching accuracy bar chart to {barchart_path}")
+
+
+def plot_outbound_reward_matching_barchart(mean_position_accuracies, std_position_accuracies, logdir, n_agents):
+    """Plot Outbound Influence vs Reward Drop matching accuracy for each rank/position"""
+    plt.figure(figsize=(10, 6))
+    
+    positions = list(range(n_agents))
+    position_labels = [f'Rank {i+1}' for i in range(n_agents)]
+    
+    # Use consistent color palette
+    agent_colors = get_agent_colors(n_agents)
+    colors = [agent_colors[i] for i in range(n_agents)]
+    
+    bars = plt.bar(positions, mean_position_accuracies,
+                   color=colors, alpha=0.7, edgecolor='black')
+    
+    # Add value labels on top of bars
+    for bar, val in zip(bars, mean_position_accuracies):
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2., height + 0.02,
+                f'{val:.3f}', ha='center', va='bottom', fontweight='bold', fontsize=9)
+    
+    plt.xlabel('Ranking Position', fontsize=12)
+    plt.ylabel('Matching Accuracy', fontsize=12)
+    plt.title('Outbound Influence vs Reward Drop - Position-wise Matching Accuracy', fontsize=14, fontweight='bold')
+    plt.xticks(positions, position_labels)
+    plt.ylim(0, 1.1)
+    plt.grid(axis='y', alpha=0.3)
+    
+    plt.legend()
+    
+    plt.tight_layout()
+    
+    # Save plot
+    barchart_path = os.path.join(logdir, 'outbound_reward_matching_accuracy_barchart.png')
+    plt.savefig(barchart_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved outbound-reward matching accuracy bar chart to {barchart_path}")
+
+
+def plot_matching_accuracy_barchart(mean_shapley_accuracy, std_shapley_accuracy, 
+                                   mean_outbound_accuracy, std_outbound_accuracy, logdir):
+    """Plot overall matching accuracy results as a bar chart"""
+    plt.figure(figsize=(10, 6))
+    
+    categories = ['Shapley vs Reward Drop', 'Outbound Influence vs Reward Drop']
+    accuracies = [mean_shapley_accuracy, mean_outbound_accuracy]
+    errors = [std_shapley_accuracy, std_outbound_accuracy]
+    
+    colors = ['blue', 'orange']
+    
+    bars = plt.bar(categories, accuracies, color=colors, alpha=0.7, 
+                   edgecolor='black')
+    
+    # Add value labels on top of bars
+    for bar, val in zip(bars, accuracies):
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                f'{val:.3f}', ha='center', va='bottom', fontweight='bold')
+    
+    plt.xlabel('Ranking Comparison', fontsize=12)
+    plt.ylabel('Mean Matching Accuracy', fontsize=12)
+    plt.title('Overall Ranking Matching Accuracy Across Multiple Seeds', fontsize=14, fontweight='bold')
+    plt.ylim(0, 1.1)
+    plt.grid(axis='y', alpha=0.3)
+    
+    plt.legend()
+    
+    plt.tight_layout()
+    
+    # Save plot
+    barchart_path = os.path.join(logdir, 'overall_matching_accuracy_barchart.png')
+    plt.savefig(barchart_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved overall matching accuracy bar chart to {barchart_path}")
+
+
+def run_multi_seed_analysis(config):
+    """Main execution function for multi-seed analysis"""
+    
+    # Load the trained MADDPG model
+    print(f"Loading MADDPG model from {config.model_path}")
+    maddpg = MADDPG.init_from_save(config.model_path, test_mode=True)
+    maddpg.prep_training(device=DEVICE)
+    
+    # Create log directory
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    logdir = os.path.join(
+        os.getcwd(), 
+        'runs', 
+        f"{config.env_id}_multi_seed_analysis", 
+        f"{timestamp}_iterations_{config.max_iterations}"
+    )
+    os.makedirs(logdir, exist_ok=True)
+    
+    print(f"Results will be saved to: {logdir}")
+    print(f"Environment: {config.env_id}")
+    print(f"Number of agents: {maddpg.nagents}")
+    print(f"Max iterations: {config.max_iterations}")
+    print(f"Shapley episodes per iteration: {SHAPLEY_EPISODES}")
+    print(f"Frobenius episodes per iteration: {FROBENIUS_EPISODES}")
+    
+    # Initialize storage for aggregated results
+    all_shapley_values = []
+    all_frob_norms = []
+    all_outbound_influence = []
+    all_matching_results = []
+    n_agents = maddpg.nagents
+    
+    # Run analysis for each seed
+    for iteration in tqdm(range(config.max_iterations), desc="Running multi-seed analysis"):
+        seed = iteration
+        print(f"\n" + "="*60)
+        print(f"ITERATION {iteration + 1}/{config.max_iterations} (Seed: {seed})")
+        print("="*60)
+        
+        # Set random seed for this iteration
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        
+        # Create temporary config for this iteration
+        temp_config = argparse.Namespace()
+        temp_config.env_id = config.env_id
+        temp_config.model_path = config.model_path
+        temp_config.seed = seed
+        temp_config.save_gifs = False  # Disable GIFs for multi-seed analysis
+        
+        try:
+            # Run single iteration analysis (without plotting)
+            shapley_values, _ = monte_carlo_shapley(temp_config, maddpg, logdir)
+            avg_frob_norms = run_frobenius_analysis(temp_config, maddpg, logdir)
+            outbound_influence = compute_outbound_influence(avg_frob_norms)
+            normal_reward, attack_rewards = run_attack_analysis(temp_config, maddpg, logdir)
+            
+            # Compute rankings and matching accuracies
+            matching_results = compute_ranking_and_matching(
+                shapley_values, outbound_influence, normal_reward, attack_rewards
+            )
+            
+            # Store results
+            all_shapley_values.append(shapley_values)
+            all_frob_norms.append(avg_frob_norms)
+            all_outbound_influence.append(outbound_influence)
+            all_matching_results.append(matching_results)
+            
+            print(f"Iteration {iteration + 1} completed successfully")
+            print(f"  Shapley position matches: {matching_results['shapley_vs_reward_position_matches']}")
+            print(f"  Outbound position matches: {matching_results['outbound_vs_reward_position_matches']}")
+            
+        except Exception as e:
+            print(f"Error in iteration {iteration + 1}: {e}")
+            continue
+    
+    # Compute aggregated statistics
+    print("\n" + "="*60)
+    print("COMPUTING AGGREGATED STATISTICS")
+    print("="*60)
+    
+    if not all_shapley_values:
+        print("No successful iterations completed!")
+        return
+    
+    # Convert to numpy arrays for easier computation
+    shapley_array = np.array(all_shapley_values)  # (iterations, agents)
+    frob_array = np.array(all_frob_norms)  # (iterations, agents, agents)
+    outbound_array = np.array(all_outbound_influence)  # (iterations, agents)
+    
+    # Compute means and standard deviations
+    mean_shapley = np.mean(shapley_array, axis=0)
+    std_shapley = np.std(shapley_array, axis=0)
+    
+    mean_frob_norms = np.mean(frob_array, axis=0)
+    std_frob_norms = np.std(frob_array, axis=0)
+    
+    mean_outbound = np.mean(outbound_array, axis=0)
+    std_outbound = np.std(outbound_array, axis=0)
+    
+    # Compute position-wise matching accuracy statistics
+    shapley_position_matches = [result['shapley_vs_reward_position_matches'] for result in all_matching_results]
+    outbound_position_matches = [result['outbound_vs_reward_position_matches'] for result in all_matching_results]
+    
+    # Convert to numpy arrays for easier computation (iterations x positions)
+    shapley_position_array = np.array(shapley_position_matches)  # (iterations, n_agents)
+    outbound_position_array = np.array(outbound_position_matches)  # (iterations, n_agents)
+    
+    # Compute mean and std for each position
+    mean_shapley_position_accuracy = np.mean(shapley_position_array, axis=0)
+    std_shapley_position_accuracy = np.std(shapley_position_array, axis=0)
+    
+    mean_outbound_position_accuracy = np.mean(outbound_position_array, axis=0)
+    std_outbound_position_accuracy = np.std(outbound_position_array, axis=0)
+    
+    # Also compute overall accuracies for summary
+    overall_shapley_accuracies = np.mean(shapley_position_array, axis=1)  # Mean across positions for each iteration
+    overall_outbound_accuracies = np.mean(outbound_position_array, axis=1)  # Mean across positions for each iteration
+    
+    mean_overall_shapley_accuracy = np.mean(overall_shapley_accuracies)
+    std_overall_shapley_accuracy = np.std(overall_shapley_accuracies)
+    
+    mean_overall_outbound_accuracy = np.mean(overall_outbound_accuracies)
+    std_overall_outbound_accuracy = np.std(overall_outbound_accuracies)
+    
+    # Create visualizations
+    print("\n" + "="*60)
+    print("CREATING AGGREGATED VISUALIZATIONS")
+    print("="*60)
+    
+    plot_aggregated_shapley_barchart(mean_shapley, std_shapley, logdir, n_agents)
+    plot_aggregated_outbound_influence_barchart(mean_outbound, std_outbound, logdir, n_agents)
+    create_aggregated_influence_pie_charts(mean_frob_norms, logdir, n_agents)
+    
+    # Plot position-wise matching accuracies
+    plot_shapley_reward_matching_barchart(mean_shapley_position_accuracy, std_shapley_position_accuracy, logdir, n_agents)
+    plot_outbound_reward_matching_barchart(mean_outbound_position_accuracy, std_outbound_position_accuracy, logdir, n_agents)
+    
+    # Plot overall matching accuracies
+    plot_matching_accuracy_barchart(mean_overall_shapley_accuracy, std_overall_shapley_accuracy, 
+                                   mean_overall_outbound_accuracy, std_overall_outbound_accuracy, logdir)
+    
+    # Save comprehensive results
+    print("\n" + "="*60)
+    print("SAVING COMPREHENSIVE RESULTS")
+    print("="*60)
+    
+    results_file = os.path.join(logdir, 'multi_seed_analysis_results.json')
+    with open(results_file, 'w') as f:
+        json.dump({
+            'aggregated_statistics': {
+                'mean_shapley_values': mean_shapley.tolist(),
+                'std_shapley_values': std_shapley.tolist(),
+                'mean_outbound_influence': mean_outbound.tolist(),
+                'std_outbound_influence': std_outbound.tolist(),
+                'mean_frob_norms': mean_frob_norms.tolist(),
+                'std_frob_norms': std_frob_norms.tolist(),
+                'mean_overall_shapley_accuracy': mean_overall_shapley_accuracy,
+                'std_overall_shapley_accuracy': std_overall_shapley_accuracy,
+                'mean_overall_outbound_accuracy': mean_overall_outbound_accuracy,
+                'std_overall_outbound_accuracy': std_overall_outbound_accuracy,
+                'mean_shapley_position_accuracy': mean_shapley_position_accuracy.tolist(),
+                'std_shapley_position_accuracy': std_shapley_position_accuracy.tolist(),
+                'mean_outbound_position_accuracy': mean_outbound_position_accuracy.tolist(),
+                'std_outbound_position_accuracy': std_outbound_position_accuracy.tolist()
+            },
+            'raw_data': {
+                'all_shapley_values': shapley_array.tolist(),
+                'all_outbound_influence': outbound_array.tolist(),
+                'all_frob_norms': frob_array.tolist(),
+                'all_matching_results': all_matching_results
+            },
+            'configuration': {
+                'max_iterations': config.max_iterations,
+                'num_agents': n_agents,
+                'shapley_episodes': SHAPLEY_EPISODES,
+                'frobenius_episodes': FROBENIUS_EPISODES,
+                'env_id': config.env_id,
+                'model_path': config.model_path
+            }
+        }, f, indent=2)
+    
+    print(f"Saved comprehensive results to {results_file}")
+    
+    # Final summary
+    print("\n" + "="*70)
+    print("MULTI-SEED ANALYSIS COMPLETED!")
+    print("="*70)
+    print(f"Successfully completed {len(all_shapley_values)}/{config.max_iterations} iterations")
+    print(f"Mean Shapley values: {[f'{val:.3f}±{std:.3f}' for val, std in zip(mean_shapley, std_shapley)]}")
+    print(f"Mean outbound influence: {[f'{val:.3f}±{std:.3f}' for val, std in zip(mean_outbound, std_outbound)]}")
+    print(f"Overall shapley-reward matching accuracy: {mean_overall_shapley_accuracy:.3f}±{std_overall_shapley_accuracy:.3f}")
+    print(f"Overall outbound-reward matching accuracy: {mean_overall_outbound_accuracy:.3f}±{std_overall_outbound_accuracy:.3f}")
+    print(f"Position-wise shapley matching: {[f'{val:.3f}±{std:.3f}' for val, std in zip(mean_shapley_position_accuracy, std_shapley_position_accuracy)]}")
+    print(f"Position-wise outbound matching: {[f'{val:.3f}±{std:.3f}' for val, std in zip(mean_outbound_position_accuracy, std_outbound_position_accuracy)]}")
+    print(f"\nResults saved to: {logdir}")
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Integrated Shapley Values, Frobenius Analysis, and Attack Analysis for Multi-Agent RL (PettingZoo)')
     
     parser.add_argument("env_id", help="Name of PettingZoo environment")
     parser.add_argument("model_path", help="Path to trained MADDPG model directory")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed for reproducibility (default: 42)")
+    parser.add_argument("--max_iterations", type=int, default=10,
+                        help="Maximum number of iterations (seeds) to run (default: 10)")
     parser.add_argument("--save_gifs", action="store_true",
                         help="Save GIFs of coalition rollouts, analysis episodes, and attack scenarios")
     
     config = parser.parse_args()
     
-    run(config)
+    run_multi_seed_analysis(config)
