@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Multi-Seed Integrated Shapley Values, Frobenius Norm Analysis, and Attack Analysis for Multi-Agent RL (SMAC Version)
+Multi-Seed Integrated Shapley Values, Frobenius Norm Analysis, Taylor Error Analysis, and Attack Analysis for Multi-Agent RL (SMAC Version)
 
 This script runs comprehensive agent influence and risk assessment across multiple seeds and computes
 aggregated statistics with matching accuracy analysis. It includes:
@@ -9,8 +9,9 @@ aggregated statistics with matching accuracy analysis. It includes:
 3. Outbound influence score I_i^out for each agent
 4. Cascade Risk Index (CRI) for each agent
 5. Attack vs No-Attack analysis (episodic rewards under attack scenarios)
-6. Agent ranking and matching accuracy computation
-7. Aggregated visualization across multiple seeds
+6. Taylor Error Analysis comparing normal vs attacked scenarios for each agent
+7. Agent ranking and matching accuracy computation
+8. Aggregated visualization across multiple seeds
 
 Features:
 - Multi-seed analysis with configurable iteration count
@@ -19,6 +20,7 @@ Features:
 - Mean and standard deviation computation across seeds
 - Aggregated visualizations with error bars
 - Cascade Risk Index for each agent
+- Taylor Error Analysis with barchart visualization comparing normal and attacked scenarios
 - Consistent color scheme across all plots using get_agent_colors function
 - SMAC environment support
 
@@ -28,6 +30,12 @@ New Multi-Seed Analysis Features:
 - Matching accuracy: position-wise comparison between rankings
 - Aggregated statistics: mean ± std for all metrics
 - Comprehensive multi-seed visualizations
+
+Taylor Error Analysis Features:
+- Computes Taylor error approximations for policy perturbations during normal episodes
+- Analyzes Taylor errors when specific agents are under attack (worst action attack)
+- Provides comparative barchart visualization showing normal vs attacked scenarios
+- Shows impact of attacks on Taylor error approximations across all agents
 """
 
 import argparse
@@ -55,7 +63,7 @@ DEVICE = 'gpu' if USE_CUDA else 'cpu'
 torch_device = torch.device("cuda" if USE_CUDA else "cpu")
 
 # Fixed episode counts
-SHAPLEY_EPISODES = 100
+SHAPLEY_EPISODES = 20
 FROBENIUS_EPISODES = 1
 
 
@@ -74,7 +82,7 @@ def get_agent_colors(n_agents):
     return agent_colors
 
 
-def create_environment(config, maddpg):
+def create_environment(config):
     """Create a fresh SMAC environment instance"""
     env = SmacWrapper.make_env(config.map_name)
     return env
@@ -167,7 +175,7 @@ def rollout_coalition(env, maddpg, coalition_mask):
     return total_reward
 
 
-def monte_carlo_shapley(config, maddpg, logdir):
+def monte_carlo_shapley(config, maddpg, logdir, env):
     """
     Compute Shapley values using Monte Carlo approximation.
     
@@ -190,10 +198,6 @@ def monte_carlo_shapley(config, maddpg, logdir):
     
     print(f"Computing Shapley values using Monte Carlo approximation with {M} iterations...")
     print(f"Number of agents: {n_agents}")
-
-    # Create environment for this rollout
-    env = create_environment(config, maddpg)
-    env.seed(config.seed)
     
     # Monte Carlo iterations
     for m in tqdm(range(M), desc="Monte Carlo iterations"):
@@ -235,10 +239,59 @@ def monte_carlo_shapley(config, maddpg, logdir):
     
     print(f"Final Shapley values: {final_shapley_values}")
     
-    # Clean up environment
-    env.close()
-    
     return final_shapley_values, running_means_history
+
+
+def compute_taylor_delta_policy(maddpg, obs, actions, action_spaces, epsilon):
+    """
+    Compute Taylor error delta for policy approximation.
+    Adapted from test_pettingzoo_detection.py for SMAC environments.
+    
+    Args:
+        maddpg: MADDPG model
+        obs: List of observations for each agent
+        actions: List of actions for each agent
+        action_spaces: List of action spaces for each agent
+        epsilon: Perturbation magnitude
+        
+    Returns:
+        list: Taylor error delta for each agent
+    """
+    # Convert discrete actions to one-hot encoding for SMAC
+    if maddpg.discrete_action:
+        one_hot_actions = []
+        for i, action in enumerate(actions):
+            one_hot = np.zeros(action_spaces[i].n)
+            one_hot[action] = 1.0
+            one_hot_actions.append(one_hot)
+        actions = one_hot_actions
+
+    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
+    actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
+    vf_in = torch.cat((*torch_obs, *actions), dim=1)
+
+    delta_errors = []
+
+    for i, agent_i in enumerate(maddpg.agents):
+        action_logits_i = agent_i.policy(torch_obs[i])
+        action_log_probs = torch.log_softmax(action_logits_i, dim=-1)
+        max_action_idx = torch.argmax(action_log_probs, dim=-1)
+        critic_val = action_log_probs.gather(-1, max_action_idx.unsqueeze(-1)).squeeze()
+        grad_i = torch.autograd.grad(critic_val, torch_obs[i], create_graph=True, retain_graph=True)[0]
+
+        eta_i = epsilon * grad_i.sign() / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
+        
+        # Second-order Taylor approximation: f(x + η) ≈ f(x) + ∇f(x)^T η
+        j_tilde = critic_val + torch.dot(grad_i.flatten(), eta_i.flatten())
+        p_torch_obs_i = torch_obs[i] + eta_i
+        p_action_logits_i = agent_i.policy(p_torch_obs_i)
+        p_action_log_probs = torch.log_softmax(p_action_logits_i, dim=-1)
+        p_max_action_idx = torch.argmax(p_action_log_probs, dim=-1)
+        j_perturbed = p_action_log_probs.gather(-1, p_max_action_idx.unsqueeze(-1)).squeeze()
+        delta_error = abs(j_perturbed - j_tilde).item()
+        delta_errors.append(delta_error)
+
+    return delta_errors
 
 
 def compute_pairwise_frob_norms(maddpg, obs, actions, action_spaces):
@@ -286,7 +339,7 @@ def compute_pairwise_frob_norms(maddpg, obs, actions, action_spaces):
     return results
 
 
-def run_frobenius_analysis(config, maddpg, logdir):
+def run_frobenius_analysis(config, maddpg, logdir, env):
     """
     Run Frobenius analysis for 1 episode.
     
@@ -307,10 +360,6 @@ def run_frobenius_analysis(config, maddpg, logdir):
     
     print(f"Running {num_episodes} episode(s) to compute pairwise Frobenius norms...")
     print(f"Number of agents: {n_agents}")
-    
-    # Create environment for this analysis
-    env = create_environment(config, maddpg)
-    env.seed(config.seed)
     
     # Run episodes
     for episode in tqdm(range(num_episodes), desc="Frobenius episodes"):
@@ -364,9 +413,6 @@ def run_frobenius_analysis(config, maddpg, logdir):
     
     print(f"Completed analysis with {total_timesteps} total timesteps")
     print(f"Average Frobenius norms shape: {avg_frob_norms.shape}")
-    
-    # Clean up environment
-    env.close()
     
     return avg_frob_norms
 
@@ -748,7 +794,7 @@ def create_influence_pie_charts(avg_frob_norms, logdir, n_agents):
     print(f"Saved influence pie charts to {pie_chart_path}")
 
 
-def rollout_normal_episode(env, maddpg, seed):
+def rollout_normal_episode(env, maddpg, seed, collect_taylor_errors=False, epsilon=0.01):
     """
     Run a normal episode where all agents use their learned policies.
     
@@ -756,13 +802,16 @@ def rollout_normal_episode(env, maddpg, seed):
         env: Environment instance
         maddpg: MADDPG model
         seed: Random seed for episode
+        collect_taylor_errors: Whether to collect Taylor error data at each timestep
+        epsilon: Perturbation magnitude for Taylor error computation
         
     Returns:
-        float: Total episode reward
+        float or tuple: Total episode reward, or (total_reward, taylor_errors_per_timestep) if collect_taylor_errors=True
     """
     obs, action_masks = env.reset()
     total_reward = 0.0
     step_count = 0
+    taylor_errors_per_timestep = [] if collect_taylor_errors else None
     
     while True:
         # Get actions for all agents
@@ -777,9 +826,18 @@ def rollout_normal_episode(env, maddpg, seed):
         
         # Create action dict with all agents using learned policies
         actions_dict = {}
+        actions_list = []
         for i, agent_name in enumerate(env.possible_agents):
             action = agent_actions[i].argmax()  # SMAC uses discrete actions
             actions_dict[agent_name] = action
+            actions_list.append(action)
+        
+        # Collect Taylor error data if requested
+        if collect_taylor_errors:
+            nagents = len(env.possible_agents)
+            action_spaces = [env.action_space[i] for i in range(nagents)]
+            taylor_errors = compute_taylor_delta_policy(maddpg, obs, actions_list, action_spaces, epsilon)
+            taylor_errors_per_timestep.append(taylor_errors)
         
         # Step environment
         obs, rewards, dones, infos, action_masks = env.step(actions_dict)
@@ -793,10 +851,13 @@ def rollout_normal_episode(env, maddpg, seed):
         if dones.all():
             break
     
-    return total_reward
+    if collect_taylor_errors:
+        return total_reward, taylor_errors_per_timestep
+    else:
+        return total_reward
 
 
-def rollout_attacked_episode(env, maddpg, attacked_agent_id, seed):
+def rollout_attacked_episode(env, maddpg, attacked_agent_id, seed, collect_taylor_errors=False, epsilon=0.01):
     """
     Run an episode where one specific agent is attacked (performs worst actions).
     
@@ -805,13 +866,16 @@ def rollout_attacked_episode(env, maddpg, attacked_agent_id, seed):
         maddpg: MADDPG model
         attacked_agent_id: Index of the agent to attack
         seed: Random seed for episode
+        collect_taylor_errors: Whether to collect Taylor error data at each timestep
+        epsilon: Perturbation magnitude for Taylor error computation
         
     Returns:
-        float: Total episode reward
+        float or tuple: Total episode reward, or (total_reward, taylor_errors_per_timestep) if collect_taylor_errors=True
     """
     obs, action_masks = env.reset()
     total_reward = 0.0
     step_count = 0
+    taylor_errors_per_timestep = [] if collect_taylor_errors else None
     
     while True:
         # Get actions for all agents
@@ -826,6 +890,7 @@ def rollout_attacked_episode(env, maddpg, attacked_agent_id, seed):
         
         # Create action dict
         actions_dict = {}
+        actions_list = []
         for i, agent_name in enumerate(env.possible_agents):
             if i == attacked_agent_id:
                 action_logits = maddpg.get_action_logits(torch_obs, torch_masks)
@@ -839,14 +904,22 @@ def rollout_attacked_episode(env, maddpg, attacked_agent_id, seed):
                 # action = torch.argmin(action_logits[attacked_agent_id]).item()
 
                 # kth best action
-                masked_logits[action_masks[i] == 0] = float('-inf') # set invalid actions to very low values so they won't be selected as maximum
-                indices = torch.argsort(action_logits[attacked_agent_id].squeeze(), descending=True)
-                action = indices[2].item() # 3rd best action
+                masked_logits[action_masks[i] == 0] = float('inf') # set invalid actions to very low values so they won't be selected as maximum
+                indices = torch.argsort(masked_logits, descending=False)
+                action = indices[1].item() # 3rd best action
             else:
                 # Normal agent: use learned policy
                 action = agent_actions[i].argmax()
             
             actions_dict[agent_name] = action
+            actions_list.append(action)
+        
+        # Collect Taylor error data if requested
+        if collect_taylor_errors:
+            nagents = len(env.possible_agents)
+            action_spaces = [env.action_space[i] for i in range(nagents)]
+            taylor_errors = compute_taylor_delta_policy(maddpg, obs, actions_list, action_spaces, epsilon)
+            taylor_errors_per_timestep.append(taylor_errors)
         
         # Step environment
         obs, rewards, dones, infos, action_masks = env.step(actions_dict)
@@ -860,12 +933,15 @@ def rollout_attacked_episode(env, maddpg, attacked_agent_id, seed):
         if dones.all():
             break
     
-    return total_reward
+    if collect_taylor_errors:
+        return total_reward, taylor_errors_per_timestep
+    else:
+        return total_reward
 
 
-def run_attack_analysis(config, maddpg, logdir):
+def run_attack_analysis(config, maddpg, logdir, env):
     """
-    Run attack vs no-attack analysis.
+    Run attack vs no-attack analysis and collect Taylor error data.
     
     Args:
         config: Configuration object
@@ -873,35 +949,50 @@ def run_attack_analysis(config, maddpg, logdir):
         logdir: Log directory for saving files
         
     Returns:
-        tuple: (normal_reward, attack_rewards) where attack_rewards is a list of rewards
-               when each agent is attacked
+        tuple: (normal_reward, attack_rewards, normal_taylor_errors, attack_taylor_errors) 
+               where attack_rewards and attack_taylor_errors are lists for each attacked agent
     """
     n_agents = maddpg.nagents
     
-    print(f"Running attack vs no-attack analysis...")
+    print(f"Running attack vs no-attack analysis with Taylor error collection...")
     print(f"Number of agents: {n_agents}")
     
-    # Create environment for analysis
-    env = create_environment(config, maddpg)
-    env.seed(config.seed)
-    
-    # Step 1: Run normal episode
-    print("Running normal episode (no attacks)...")
-    normal_reward = rollout_normal_episode(env, maddpg, config.seed)
+    # Step 1: Run normal episode and collect both reward and Taylor errors
+    print("Running normal episode (no attacks) and collecting Taylor errors...")
+    normal_reward, normal_taylor_errors = rollout_normal_episode(env, maddpg, config.seed, collect_taylor_errors=True)
     print(f"Normal episode reward: {normal_reward:.3f}")
     
-    # Step 2: Run episodes with each agent attacked
-    attack_rewards = []
+    # Compute mean Taylor errors across timesteps for each agent (normal scenario)
+    normal_mean_taylor_errors = []
     for agent_id in range(n_agents):
-        print(f"Running episode with Agent {agent_id} attacked...")
-        attacked_reward = rollout_attacked_episode(env, maddpg, agent_id, config.seed)
+        agent_errors = [timestep_errors[agent_id] for timestep_errors in normal_taylor_errors]
+        mean_error = np.mean(agent_errors) if agent_errors else 0.0
+        normal_mean_taylor_errors.append(mean_error)
+    
+    print(f"Normal scenario mean Taylor errors: {[f'{e:.6f}' for e in normal_mean_taylor_errors]}")
+    
+    # Step 2: Run episodes with each agent attacked and collect both rewards and Taylor errors
+    attack_rewards = []
+    attack_mean_taylor_errors = []
+    
+    for agent_id in range(n_agents):
+        print(f"Running episode with Agent {agent_id} attacked and collecting Taylor errors...")
+        attacked_reward, attack_taylor_errors = rollout_attacked_episode(env, maddpg, agent_id, config.seed, collect_taylor_errors=True)
         attack_rewards.append(attacked_reward)
+        
+        # Compute mean Taylor errors across timesteps for each agent (attack scenario)
+        attack_mean_errors_per_agent = []
+        for other_agent_id in range(n_agents):
+            agent_errors = [timestep_errors[other_agent_id] for timestep_errors in attack_taylor_errors]
+            mean_error = np.mean(agent_errors) if agent_errors else 0.0
+            attack_mean_errors_per_agent.append(mean_error)
+        
+        attack_mean_taylor_errors.append(attack_mean_errors_per_agent)
+        
         print(f"Episode reward when Agent {agent_id} attacked: {attacked_reward:.3f}")
+        print(f"Attack scenario (Agent {agent_id} attacked) mean Taylor errors: {[f'{e:.6f}' for e in attack_mean_errors_per_agent]}")
     
-    # Clean up environment
-    env.close()
-    
-    return normal_reward, attack_rewards
+    return normal_reward, attack_rewards, normal_mean_taylor_errors, attack_mean_taylor_errors
 
 
 def plot_attack_analysis_barchart(normal_reward, attack_rewards, logdir, n_agents):
@@ -961,6 +1052,186 @@ def plot_attack_analysis_barchart(normal_reward, attack_rewards, logdir, n_agent
     print(f"Saved attack analysis bar chart to {barchart_path}")
     
     return impacts
+
+
+def plot_taylor_error_barchart(normal_mean_errors, attack_mean_errors, logdir, n_agents):
+    """
+    Plot Taylor error analysis results as a bar chart comparing normal vs attacked scenarios.
+    
+    Args:
+        normal_mean_errors: List of mean Taylor errors per agent in normal scenario
+        attack_mean_errors: List of lists - for each attacked agent, the mean Taylor errors of all agents
+        logdir: Directory to save the plot
+        n_agents: Number of agents
+    """
+    # Create subplots: one for each attacked agent scenario
+    # Calculate how to distribute n_agents+1 columns across 2 rows
+    total_plots = n_agents + 1
+    cols_per_row = math.ceil(total_plots / 2)
+    fig, axes = plt.subplots(2, cols_per_row, figsize=(2.8*cols_per_row, 4*2))
+    
+    # Flatten axes array to handle 2D subplot grid properly
+    if total_plots == 1:
+        axes = [axes]
+    else:
+        axes = axes.flatten()
+    
+    # Get consistent color palette
+    agent_colors = get_agent_colors(n_agents)
+    
+    # Plot 1: Normal scenario (all agents)
+    ax = axes[0]
+    agents = list(range(n_agents))
+    colors = [agent_colors[i] for i in range(n_agents)]
+    
+    bars = ax.bar(agents, normal_mean_errors, color=colors, alpha=0.8, edgecolor='black')
+    
+    # Add value labels on top of bars
+    for bar, val in zip(bars, normal_mean_errors):
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height + 0.01 * max(abs(min(normal_mean_errors)), max(normal_mean_errors)),
+                f'{val:.4f}', ha='center', va='bottom', fontweight='bold', fontsize=8)
+    
+    ax.set_xlabel('Agent ID')
+    ax.set_ylabel('Mean Taylor Error')
+    ax.set_title('Normal Scenario')
+    ax.grid(axis='y', alpha=0.3)
+    ax.set_xticks(agents)
+    
+    # Plot 2-N+1: Attack scenarios (for each attacked agent)
+    for attacked_agent_id in range(n_agents):
+        ax = axes[attacked_agent_id + 1]
+        attack_errors = attack_mean_errors[attacked_agent_id]
+        
+        # Use same colors, but highlight the attacked agent in red
+        colors_attack = [agent_colors[i] if i != attacked_agent_id else 'red' for i in range(n_agents)]
+        
+        bars = ax.bar(agents, attack_errors, color=colors_attack, alpha=0.8, edgecolor='black')
+        
+        # Add value labels on top of bars
+        for bar, val in zip(bars, attack_errors):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + 0.01 * max(abs(min(attack_errors)), max(attack_errors)),
+                    f'{val:.4f}', ha='center', va='bottom', fontweight='bold', fontsize=8)
+        
+        ax.set_xlabel('Agent ID')
+        ax.set_ylabel('Mean Taylor Error')
+        ax.set_title(f'Agent {attacked_agent_id} Attacked')
+        ax.grid(axis='y', alpha=0.3)
+        ax.set_xticks(agents)
+    
+    plt.suptitle('Taylor Error Analysis: Normal vs Attack Scenarios', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    
+    # Save plot
+    barchart_path = os.path.join(logdir, 'taylor_error_analysis_barchart.png')
+    plt.savefig(barchart_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved Taylor error analysis bar chart to {barchart_path}")
+
+
+def plot_aggregated_taylor_error_barchart(mean_normal_taylor, std_normal_taylor, 
+                                        mean_attack_taylor, std_attack_taylor, logdir, n_agents):
+    """
+    Plot aggregated Taylor error analysis results as a bar chart comparing normal vs attacked scenarios.
+    
+    Args:
+        mean_normal_taylor: Mean Taylor errors per agent in normal scenario across seeds
+        std_normal_taylor: Std Taylor errors per agent in normal scenario across seeds
+        mean_attack_taylor: Mean Taylor errors matrix - for each attacked agent, the mean errors of all agents across seeds
+        std_attack_taylor: Std Taylor errors matrix - for each attacked agent, the std errors of all agents across seeds
+        logdir: Directory to save the plot
+        n_agents: Number of agents
+    """
+    # Create subplots: one for each attacked agent scenario
+    # Calculate how to distribute n_agents+1 columns across 2 rows
+    total_plots = n_agents + 1
+    cols_per_row = 3
+    rows = math.ceil(total_plots / cols_per_row)
+    fig, axes = plt.subplots(rows, cols_per_row, figsize=(5 * cols_per_row, 12))
+    
+    # Flatten axes array to handle 2D subplot grid properly
+    if total_plots == 1:
+        axes = [axes]
+    else:
+        axes = axes.flatten()
+    
+    # Get consistent color palette
+    agent_colors = get_agent_colors(n_agents)
+    
+    # Calculate global y-axis limits for consistency across all subplots
+    all_values = list(mean_normal_taylor)
+    for attack_means in mean_attack_taylor:
+        all_values.extend(attack_means)
+    
+    global_max = max(all_values) if all_values else 0.01
+    global_text_offset = 0.001
+    global_y_limit_upper = global_max * 1.1 if global_max > 0 else 0.01  # Extra space for text labels
+    
+    # Plot 1: Normal scenario (all agents)
+    ax = axes[0]
+    agents = list(range(n_agents))
+    colors = [agent_colors[i] for i in range(n_agents)]
+    
+    bars = ax.bar(agents, mean_normal_taylor, color=colors, alpha=0.8, edgecolor='black')
+    
+    # Add error bars for standard deviation
+    # ax.errorbar(agents, mean_normal_taylor, yerr=std_normal_taylor, fmt='none', color='black', capsize=3)
+    ax.errorbar(agents, mean_normal_taylor, fmt='none', color='black', capsize=3)
+    
+    # Add value labels on top of bars
+    for bar, val, std_val in zip(bars, mean_normal_taylor, std_normal_taylor):
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height + global_text_offset,
+                f'{val:.4f}', ha='center', va='bottom', fontweight='bold', fontsize=8)
+    
+    ax.set_xlabel('Agent ID')
+    ax.set_ylabel('Mean Taylor Error')
+    ax.set_title('Normal Scenario')
+    ax.grid(axis='y', alpha=0.3)
+    ax.set_xticks(agents)
+    ax.set_ylim(0, global_y_limit_upper)
+    
+    # Plot 2-N+1: Attack scenarios (for each attacked agent)
+    for attacked_agent_id in range(n_agents):
+        ax = axes[attacked_agent_id + 1]
+        attack_means = mean_attack_taylor[attacked_agent_id]
+        attack_stds = std_attack_taylor[attacked_agent_id]
+        
+        # Use same colors, but highlight the attacked agent in red
+        colors_attack = [agent_colors[i] if i != attacked_agent_id else 'red' for i in range(n_agents)]
+        
+        bars = ax.bar(agents, attack_means, color=colors_attack, alpha=0.8, edgecolor='black')
+        
+        # Add error bars for standard deviation
+        # ax.errorbar(agents, attack_means, yerr=attack_stds, fmt='none', color='black', capsize=3)
+        ax.errorbar(agents, attack_means, fmt='none', color='black', capsize=3)
+        
+        # Add value labels on top of bars using global text offset
+        for bar, val, std_val in zip(bars, attack_means, attack_stds):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + global_text_offset,
+                    f'{val:.4f}', ha='center', va='bottom', fontweight='bold', fontsize=8)
+        
+        ax.set_xlabel('Agent ID')
+        ax.set_ylabel('Mean Taylor Error')
+        ax.set_title(f'Agent {attacked_agent_id} Attacked')
+        ax.grid(axis='y', alpha=0.3)
+        ax.set_xticks(agents)
+        ax.set_ylim(0, global_y_limit_upper)  # Use global y-limit for consistency
+    
+    # Hide unused subplots
+    for j in range(total_plots, len(axes)):
+        axes[j].set_visible(False)
+    
+    plt.suptitle('Aggregated Taylor Error Analysis: Normal vs Attack Scenarios', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    
+    # Save plot
+    barchart_path = os.path.join(logdir, 'aggregated_taylor_error_analysis_barchart.png')
+    plt.savefig(barchart_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved aggregated Taylor error analysis bar chart to {barchart_path}")
 
 
 def plot_aggregated_shapley_barchart(mean_shapley_values, std_shapley_values, logdir, n_agents):
@@ -1276,6 +1547,9 @@ def save_results(shapley_values, running_means_history, avg_frob_norms,
 
 def run_multi_seed_analysis(config):
     """Run multi-seed analysis"""
+
+    # Create env
+    env = create_environment(config)
     
     # Load the trained MADDPG model
     print(f"Loading MADDPG model from {config.model_path}")
@@ -1306,6 +1580,8 @@ def run_multi_seed_analysis(config):
     all_frob_norms = []
     all_outbound_influence = []
     all_matching_results = []
+    all_normal_taylor_errors = []
+    all_attack_taylor_errors = []
     
     # Run multiple iterations with different seeds
     for iteration in range(config.max_iterations):
@@ -1315,52 +1591,51 @@ def run_multi_seed_analysis(config):
         
         # Use iteration as seed for reproducibility
         seed = iteration
+        env.seed(seed)
         
-        try:
-            # Create a temporary config for this iteration
-            temp_config = type('Config', (), {})()
-            temp_config.map_name = config.map_name
-            temp_config.model_path = config.model_path
-            temp_config.seed = seed
-            
-            # Set random seeds for this iteration
-            random.seed(seed)
-            np.random.seed(seed)
-            torch.manual_seed(seed)
-            print(f"Set random seed to {seed}")
-            
-            # Step 1: Compute Shapley values
-            print(f"\nSTEP 1 (Iteration {iteration + 1}): Computing Shapley Values")
-            shapley_values, running_means_history = monte_carlo_shapley(temp_config, maddpg, logdir)
-            
-            # Step 2: Compute Frobenius norms  
-            print(f"\nSTEP 2 (Iteration {iteration + 1}): Computing Frobenius Norms")
-            avg_frob_norms = run_frobenius_analysis(temp_config, maddpg, logdir)
-            
-            # Step 3: Compute outbound influence scores
-            outbound_influence = compute_outbound_influence(avg_frob_norms)
-            
-            # Step 4: Run attack analysis
-            normal_reward, attack_rewards = run_attack_analysis(temp_config, maddpg, logdir)
-            
-            # Compute rankings and matching accuracies
-            matching_results = compute_ranking_and_matching(
-                shapley_values, outbound_influence, normal_reward, attack_rewards
-            )
-            
-            # Store results
-            all_shapley_values.append(shapley_values)
-            all_frob_norms.append(avg_frob_norms)
-            all_outbound_influence.append(outbound_influence)
-            all_matching_results.append(matching_results)
-            
-            print(f"Iteration {iteration + 1} completed successfully")
-            print(f"  Shapley position matches: {matching_results['shapley_vs_reward_position_matches']}")
-            print(f"  Outbound position matches: {matching_results['outbound_vs_reward_position_matches']}")
-            
-        except Exception as e:
-            print(f"Error in iteration {iteration + 1}: {e}")
-            continue
+        # Create a temporary config for this iteration
+        temp_config = type('Config', (), {})()
+        temp_config.map_name = config.map_name
+        temp_config.model_path = config.model_path
+        temp_config.seed = seed
+        
+        # Set random seeds for this iteration
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        print(f"Set random seed to {seed}")
+        
+        # Step 1: Compute Shapley values
+        print(f"\nSTEP 1 (Iteration {iteration + 1}): Computing Shapley Values")
+        shapley_values, running_means_history = monte_carlo_shapley(temp_config, maddpg, logdir, env)
+        
+        # Step 2: Compute Frobenius norms  
+        print(f"\nSTEP 2 (Iteration {iteration + 1}): Computing Frobenius Norms")
+        avg_frob_norms = run_frobenius_analysis(temp_config, maddpg, logdir, env)
+        
+        # Step 3: Compute outbound influence scores
+        outbound_influence = compute_outbound_influence(avg_frob_norms)
+        
+        # Step 4: Run attack analysis and collect Taylor error data
+        normal_reward, attack_rewards, normal_taylor_errors, attack_taylor_errors = run_attack_analysis(temp_config, maddpg, logdir, env)
+        
+        # Compute rankings and matching accuracies
+        matching_results = compute_ranking_and_matching(
+            shapley_values, outbound_influence, normal_reward, attack_rewards
+        )
+        
+        # Store results
+        all_shapley_values.append(shapley_values)
+        all_frob_norms.append(avg_frob_norms)
+        all_outbound_influence.append(outbound_influence)
+        all_matching_results.append(matching_results)
+        all_normal_taylor_errors.append(normal_taylor_errors)
+        all_attack_taylor_errors.append(attack_taylor_errors)
+        
+        print(f"Iteration {iteration + 1} completed successfully")
+        print(f"  Shapley position matches: {matching_results['shapley_vs_reward_position_matches']}")
+        print(f"  Outbound position matches: {matching_results['outbound_vs_reward_position_matches']}")
+        
     
     # Compute aggregated statistics
     print("\n" + "="*60)
@@ -1385,6 +1660,16 @@ def run_multi_seed_analysis(config):
     
     mean_outbound = np.mean(outbound_array, axis=0)
     std_outbound = np.std(outbound_array, axis=0)
+    
+    # Compute Taylor error aggregated statistics
+    normal_taylor_array = np.array(all_normal_taylor_errors)  # (iterations, agents)
+    attack_taylor_array = np.array(all_attack_taylor_errors)  # (iterations, attacked_agents, agents)
+    
+    mean_normal_taylor = np.mean(normal_taylor_array, axis=0)
+    std_normal_taylor = np.std(normal_taylor_array, axis=0)
+    
+    mean_attack_taylor = np.mean(attack_taylor_array, axis=0)  # (attacked_agents, agents)
+    std_attack_taylor = np.std(attack_taylor_array, axis=0)  # (attacked_agents, agents)
     
     # Compute cascade risk index from mean values
     cascade_risk = compute_cascade_risk_index(mean_shapley, mean_outbound)
@@ -1424,6 +1709,10 @@ def run_multi_seed_analysis(config):
     create_aggregated_influence_pie_charts(mean_frob_norms, logdir, n_agents)
     plot_cascade_risk_barchart(cascade_risk, logdir, n_agents)  # Use existing function
     
+    # Plot aggregated Taylor error analysis
+    plot_aggregated_taylor_error_barchart(mean_normal_taylor, std_normal_taylor, 
+                                        mean_attack_taylor, std_attack_taylor, logdir, n_agents)
+    
     # Plot position-wise matching accuracies
     plot_shapley_reward_matching_barchart(mean_shapley_position_accuracy, std_shapley_position_accuracy, logdir, n_agents)
     plot_outbound_reward_matching_barchart(mean_outbound_position_accuracy, std_outbound_position_accuracy, logdir, n_agents)
@@ -1455,11 +1744,17 @@ def run_multi_seed_analysis(config):
                 'mean_shapley_position_accuracy': mean_shapley_position_accuracy.tolist(),
                 'std_shapley_position_accuracy': std_shapley_position_accuracy.tolist(),
                 'mean_outbound_position_accuracy': mean_outbound_position_accuracy.tolist(),
-                'std_outbound_position_accuracy': std_outbound_position_accuracy.tolist()
+                'std_outbound_position_accuracy': std_outbound_position_accuracy.tolist(),
+                'mean_normal_taylor_errors': mean_normal_taylor.tolist(),
+                'std_normal_taylor_errors': std_normal_taylor.tolist(),
+                'mean_attack_taylor_errors': mean_attack_taylor.tolist(),
+                'std_attack_taylor_errors': std_attack_taylor.tolist()
             },
             'raw_data': {
                 'all_shapley_values': shapley_array.tolist(),
                 'all_outbound_influence': outbound_array.tolist(),
+                'all_normal_taylor_errors': normal_taylor_array.tolist(),
+                'all_attack_taylor_errors': attack_taylor_array.tolist(),
                 'all_frob_norms': frob_array.tolist(),
                 'all_matching_results': all_matching_results
             },
@@ -1482,6 +1777,7 @@ def run_multi_seed_analysis(config):
     print(f"Successfully completed {len(all_shapley_values)}/{config.max_iterations} iterations")
     print(f"Mean Shapley values: {[f'{val:.3f}±{std:.3f}' for val, std in zip(mean_shapley, std_shapley)]}")
     print(f"Mean outbound influence: {[f'{val:.3f}±{std:.3f}' for val, std in zip(mean_outbound, std_outbound)]}")
+    print(f"Mean normal Taylor errors: {[f'{val:.6f}±{std:.6f}' for val, std in zip(mean_normal_taylor, std_normal_taylor)]}")
     print(f"Cascade Risk Index: {[f'{val:.3f}' for val in cascade_risk]}")
     print(f"Overall shapley-reward matching accuracy: {mean_overall_shapley_accuracy:.3f}±{std_overall_shapley_accuracy:.3f}")
     print(f"Overall outbound-reward matching accuracy: {mean_overall_outbound_accuracy:.3f}±{std_overall_outbound_accuracy:.3f}")
@@ -1497,6 +1793,7 @@ def run_multi_seed_analysis(config):
     else:
         print("No agent shows significant cascade risk.")
 
+    env.close()
 
 def run(config):
     """Main execution function"""
@@ -1554,12 +1851,13 @@ def run(config):
     cascade_risk = compute_cascade_risk_index(shapley_values, outbound_influence)
     print(f"Cascade Risk Index values: {cascade_risk}")
     
-    # Step 5: Run Attack Analysis
+    # Step 5: Run Attack Analysis and Taylor Error Analysis
     print("\n" + "="*50)
-    print("STEP 5: Attack vs No-Attack Analysis")
+    print("STEP 5: Attack vs No-Attack Analysis with Taylor Error Collection")
     print("="*50)
-    normal_reward, attack_rewards = run_attack_analysis(config, maddpg, logdir)
+    normal_reward, attack_rewards, normal_taylor_errors, attack_taylor_errors = run_attack_analysis(config, maddpg, logdir)
     attack_impacts = plot_attack_analysis_barchart(normal_reward, attack_rewards, logdir, maddpg.nagents)
+    plot_taylor_error_barchart(normal_taylor_errors, attack_taylor_errors, logdir, maddpg.nagents)
     
     # Step 6: Create all other visualizations
     print("\n" + "="*50)

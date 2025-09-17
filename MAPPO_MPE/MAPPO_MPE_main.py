@@ -66,7 +66,7 @@ class Runner_MAPPO_MPE:
         # Create directories if they don't exist
         for directory in [self.output_dir, self.data_dir, self.model_dir, self.tensorboard_dir]:
             if not os.path.exists(directory):
-                os.makedirs(directory)
+                os.makedirs(directory, exist_ok=True)
                 print(f"Created directory: {directory}", flush=True)
 
         # Create N agents

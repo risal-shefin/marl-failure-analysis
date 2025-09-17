@@ -95,7 +95,7 @@ def save_matrix_to_files(matrix, agent_id, logdir, suffix=""):
     filepath = os.path.join(logdir, filename)
     
     # Create header row
-    header = ["agent", "timestep", "mean", "variance", "std_dev", "q1", "q3", "median", "mad"]
+    header = ["agent", "timestep", "mean", "variance", "std_dev", "q1", "q3", "median", "mad", "diff_mean", "diff_std"]
     
     with open(filepath, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
@@ -131,8 +131,11 @@ def main(runner: Runner_MAPPO_MPE, env, args):
         # Compute mean and variance for each agent pair across all episodes
         print(f"\n---- Agent {agent_id}:")
         metrics_mat = []
-        for timestep, timestep_values in result_dataset[agent_id].items():
+        sorted_timesteps = sorted(result_dataset[agent_id].keys())
+        
+        for i, timestep in enumerate(sorted_timesteps):
             print(f"\n ---- Timestep {timestep}:")
+            timestep_values = result_dataset[agent_id][timestep]
             # Extract values for agent pair (i,j) across all episodes
             mean_val = np.mean(timestep_values)
             var_val = np.var(timestep_values)
@@ -141,8 +144,21 @@ def main(runner: Runner_MAPPO_MPE, env, args):
             median_val = np.median(timestep_values)
             # Compute MAD (Median Absolute Deviation)
             mad_val = np.median(np.abs(np.array(timestep_values) - median_val))
-            print(f"Agent {agent_id}: mean = {mean_val:.4f}, variance = {var_val:.4f}, std_dev = {std_dev_val:.4f}, IQR = {q3 - q1:.4f}, median = {median_val:.4f}, MAD = {mad_val:.4f}")
-            metrics = [mean_val, var_val, std_dev_val, q1, q3, median_val, mad_val]
+            
+            # Compute difference metrics (e_i - e_{i-1})
+            if i == 0:  # For timestep 0, differences are 0
+                diff_mean = 0.0
+                diff_std = 0.0
+            else:
+                prev_timestep = sorted_timesteps[i-1]
+                curr_metric_vals = result_dataset[agent_id][timestep]
+                prev_metric_vals = result_dataset[agent_id][prev_timestep]
+                differences = [curr - prev for curr, prev in zip(curr_metric_vals, prev_metric_vals)]
+                diff_mean = np.mean(differences)
+                diff_std = np.std(differences)
+            
+            print(f"Agent {agent_id}: mean = {mean_val:.4f}, variance = {var_val:.4f}, std_dev = {std_dev_val:.4f}, IQR = {q3 - q1:.4f}, median = {median_val:.4f}, MAD = {mad_val:.4f}, diff_mean = {diff_mean:.4f}, diff_std = {diff_std:.4f}")
+            metrics = [mean_val, var_val, std_dev_val, q1, q3, median_val, mad_val, diff_mean, diff_std]
             metrics_mat.append(metrics)
 
         save_matrix_to_files(metrics_mat, agent_id, logdir, suffix=f"{agent_id}")
