@@ -29,6 +29,7 @@ class HATRPO(OnPolicyBase):
         ), "only continuous and discrete action space is supported by HATRPO."
         super(HATRPO, self).__init__(args, obs_space, act_space, device)
 
+        self.use_centralized_q = args.get("use_centralized_q", False)
         self.kl_threshold = args["kl_threshold"]
         self.ls_step = args["ls_step"]
         self.accept_ratio = args["accept_ratio"]

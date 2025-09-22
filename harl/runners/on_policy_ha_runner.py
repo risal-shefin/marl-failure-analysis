@@ -127,4 +127,58 @@ class OnPolicyHARunner(OnPolicyBaseRunner):
         # update critic
         critic_train_info = self.critic.train(self.critic_buffer, self.value_normalizer)
 
+        if self.use_centralized_q:
+            q_train_info = self._train_centralized_q_functions()
+            for key, value in q_train_info.items():
+                critic_train_info[key] = value
+
         return actor_train_infos, critic_train_info
+
+    def _train_centralized_q_functions(self):
+        """Train centralized Q functions when enabled."""
+
+        aggregated_info = {}
+        if self.state_type == "EP":
+            share_obs = self.critic_buffer.share_obs[:-1].reshape(
+                -1, *self.critic_buffer.share_obs.shape[2:]
+            )
+            returns = self.critic_buffer.returns[:-1].reshape(-1, 1)
+        elif self.state_type == "FP":
+            share_obs = None
+            returns = None
+        else:
+            raise NotImplementedError
+
+        for agent_id, q_function in enumerate(self.central_q):
+            if self.state_type == "FP":
+                share_obs_agent = self.critic_buffer.share_obs[:-1, :, agent_id].reshape(
+                    -1, *self.critic_buffer.share_obs.shape[3:]
+                )
+                returns_agent = self.critic_buffer.returns[:-1, :, agent_id].reshape(-1, 1)
+            else:
+                share_obs_agent = share_obs
+                returns_agent = returns
+
+            actions = self.actor_buffer[agent_id].actions.reshape(
+                -1, self.actor_buffer[agent_id].actions.shape[-1]
+            )
+            active_masks = self.actor_buffer[agent_id].active_masks[1:].reshape(-1, 1)
+
+            train_info = q_function.train(
+                share_obs_agent,
+                actions,
+                returns_agent,
+                active_masks=active_masks,
+                value_normalizer=self.value_normalizer,
+            )
+
+            for key, value in train_info.items():
+                if key not in aggregated_info:
+                    aggregated_info[key] = 0.0
+                aggregated_info[key] += value
+
+        if len(self.central_q) > 0:
+            for key in aggregated_info:
+                aggregated_info[key] /= len(self.central_q)
+
+        return aggregated_info

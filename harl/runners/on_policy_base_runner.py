@@ -1,5 +1,6 @@
 """Base runner for on-policy algorithms."""
 
+import os
 import time
 import numpy as np
 import torch
@@ -10,6 +11,7 @@ from harl.common.buffers.on_policy_critic_buffer_ep import OnPolicyCriticBufferE
 from harl.common.buffers.on_policy_critic_buffer_fp import OnPolicyCriticBufferFP
 from harl.algorithms.actors import ALGO_REGISTRY
 from harl.algorithms.critics.v_critic import VCritic
+from harl.algorithms.critics.centralized_q import CentralizedQFunction
 from harl.utils.trans_tools import _t2n
 from harl.utils.envs_tools import (
     make_eval_env,
@@ -41,6 +43,8 @@ class OnPolicyBaseRunner:
         self.rnn_hidden_size = self.hidden_sizes[-1]
         self.recurrent_n = algo_args["model"]["recurrent_n"]
         self.action_aggregation = algo_args["algo"]["action_aggregation"]
+        self.use_centralized_q = algo_args["algo"].get("use_centralized_q", False)
+        self.central_q = []
         self.state_type = env_args.get("state_type", "EP")
         self.share_param = algo_args["algo"]["share_param"]
         self.fixed_order = algo_args["algo"]["fixed_order"]
@@ -139,6 +143,23 @@ class OnPolicyBaseRunner:
                 share_observation_space,
                 device=self.device,
             )
+            if self.use_centralized_q:
+                if self.state_type == "EP":
+                    cent_obs_spaces = [share_observation_space for _ in range(self.num_agents)]
+                elif self.state_type == "FP":
+                    cent_obs_spaces = self.envs.share_observation_space
+                else:
+                    raise NotImplementedError
+
+                self.central_q = []
+                for agent_id in range(self.num_agents):
+                    q_function = CentralizedQFunction(
+                        {**algo_args["model"], **algo_args["algo"]},
+                        cent_obs_spaces[agent_id],
+                        self.envs.action_space[agent_id],
+                        device=self.device,
+                    )
+                    self.central_q.append(q_function)
             if self.state_type == "EP":
                 # EP stands for Environment Provided, as phrased by MAPPO paper.
                 # In EP, the global states for all agents are the same.
@@ -198,6 +219,9 @@ class OnPolicyBaseRunner:
                     for agent_id in range(self.num_agents):
                         self.actor[agent_id].lr_decay(episode, episodes)
                 self.critic.lr_decay(episode, episodes)
+                if self.use_centralized_q:
+                    for q_function in self.central_q:
+                        q_function.lr_decay(episode, episodes)
 
             self.logger.episode_init(
                 episode
@@ -727,12 +751,18 @@ class OnPolicyBaseRunner:
         for agent_id in range(self.num_agents):
             self.actor[agent_id].prep_rollout()
         self.critic.prep_rollout()
+        if self.use_centralized_q:
+            for q_function in self.central_q:
+                q_function.prep_rollout()
 
     def prep_training(self):
         """Prepare for training."""
         for agent_id in range(self.num_agents):
             self.actor[agent_id].prep_training()
         self.critic.prep_training()
+        if self.use_centralized_q:
+            for q_function in self.central_q:
+                q_function.prep_training()
 
     def save(self):
         """Save model parameters."""
@@ -746,6 +776,9 @@ class OnPolicyBaseRunner:
         torch.save(
             policy_critic.state_dict(), str(self.save_dir) + "/critic_agent" + ".pt"
         )
+        if self.use_centralized_q:
+            for agent_id, q_function in enumerate(self.central_q):
+                q_function.save(self.save_dir, agent_id)
         if self.value_normalizer is not None:
             torch.save(
                 self.value_normalizer.state_dict(),
@@ -764,6 +797,9 @@ class OnPolicyBaseRunner:
         torch.save(
             policy_critic.state_dict(), str(self.save_dir) + "/critic_agent"  + "_" + str(reward) + ".pt"
         )
+        if self.use_centralized_q:
+            for agent_id, q_function in enumerate(self.central_q):
+                q_function.save(self.save_dir, agent_id, suffix=f"_{reward}")
         if self.value_normalizer is not None:
             torch.save(
                 self.value_normalizer.state_dict(),
@@ -785,6 +821,14 @@ class OnPolicyBaseRunner:
                 str(self.algo_args["train"]["model_dir"]) + "/critic_agent" + ".pt"
             )
             self.critic.critic.load_state_dict(policy_critic_state_dict)
+            if self.use_centralized_q:
+                for agent_id, q_function in enumerate(self.central_q):
+                    q_path = (
+                        str(self.algo_args["train"]["model_dir"])
+                        + f"/central_q_agent{agent_id}.pt"
+                    )
+                    if os.path.exists(q_path):
+                        q_function.restore(self.algo_args["train"]["model_dir"], agent_id)
             if self.value_normalizer is not None:
                 value_normalizer_state_dict = torch.load(
                     str(self.algo_args["train"]["model_dir"])

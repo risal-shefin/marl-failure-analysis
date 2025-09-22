@@ -104,6 +104,8 @@ algo:
   use_policy_active_masks: True
   # huber delta
   huber_delta: 10.0
+  # whether to train centralized q function alongside the value function
+  use_centralized_q: False
   # kl threshold in HATRPO update
   kl_threshold: 0.01
   # line search steps
