@@ -307,6 +307,360 @@ def compute_second_order_observation_influences_happo(runner, obs, rnn_states_cr
     return results
 
 
+############# THREAT DETECTION FUNCTIONS #############
+
+def detect_threats_top_k(pairwise_frobs_history, attacked_agent_id, top_k=2, fault_timeline=None, window_size=3):
+    """
+    Detect threats by analyzing if the attacked agent has the HIGHEST Frobenius value (excluding self-influence)
+    in the timesteps BEFORE fault events of non-attacked agents.
+    Only analyzes timesteps within window_size before fault events of non-attacked agents.
+    
+    Args:
+        pairwise_frobs_history: List of N x N matrices, one per timestep
+        attacked_agent_id: ID of the attacked agent
+        top_k: Number of top agents to consider
+        fault_timeline: List of fault events with 'agent' and 't' keys
+        window_size: Number of timesteps before fault to analyze
+        
+    Returns:
+        threat_data: Dictionary with threat detection results
+    """
+    if not pairwise_frobs_history or not fault_timeline:
+        return {
+            'timestamp': [],
+            'agent_id': [],
+            'attacked_agent_rank': [],
+            'is_threat': [],
+            'top_k_agents': [],
+            'top_k_values': [],
+            'threat_timesteps': set(),
+            'analysis_windows': []
+        }
+    
+    n_agents = len(pairwise_frobs_history[0])
+    n_timesteps = len(pairwise_frobs_history)
+    
+    threat_data = {
+        'timestamp': [],
+        'agent_id': [],
+        'attacked_agent_rank': [],
+        'is_threat': [],
+        'top_k_agents': [],
+        'top_k_values': [],
+        'threat_timesteps': set(),
+        'analysis_windows': []
+    }
+    
+    # Find fault events for non-attacked agents
+    non_attacked_faults = [event for event in fault_timeline if event['agent'] != attacked_agent_id]
+    
+    if not non_attacked_faults:
+        print(f"No faults detected in non-attacked agents. No threat analysis performed.")
+        return threat_data
+    
+    # Create analysis windows around each fault
+    analysis_timesteps = set()
+    analysis_windows_info = []
+    
+    for fault_event in non_attacked_faults:
+        fault_time = fault_event['t']
+        fault_agent = fault_event['agent']
+        
+        # Define window BEFORE fault (only looking at timesteps before fault occurs)
+        window_start = max(0, fault_time - window_size)
+        window_end = max(0, fault_time - 1)  # Only up to 1 timestep before fault
+        
+        # Only add timesteps if there are valid timesteps before the fault
+        if window_end >= window_start:
+            window_timesteps = list(range(window_start, window_end + 1))
+            analysis_timesteps.update(window_timesteps)
+            
+            analysis_windows_info.append({
+                'fault_agent': fault_agent,
+                'fault_time': fault_time,
+                'window_start': window_start,
+                'window_end': window_end,
+            'window_timesteps': window_timesteps
+        })
+    
+    threat_data['analysis_windows'] = analysis_windows_info
+    print(f"Analyzing {len(analysis_timesteps)} timesteps BEFORE {len(non_attacked_faults)} fault events")
+    
+    # Analyze only the timesteps in analysis windows
+    for t in sorted(analysis_timesteps):
+        if t >= n_timesteps:
+            continue
+            
+        frob_matrix = pairwise_frobs_history[t]
+        
+        # For each agent i (check if attacked agent influences agent i)
+        for i in range(n_agents):
+            # Get Frobenius values for how all agents influence agent i, EXCLUDING self-influence
+            agent_i_influences = []
+            for j in range(n_agents):
+                if i != j:  # Exclude self-influence (diagonal elements)
+                    agent_i_influences.append((j, frob_matrix[i][j]))
+            
+            # Sort by Frobenius values in descending order (highest first)
+            agent_i_influences.sort(key=lambda x: x[1], reverse=True)
+            
+            # Get top-k agents and their values
+            top_k_agents = [agent_id for agent_id, _ in agent_i_influences[:top_k]]
+            top_k_values = [value for _, value in agent_i_influences[:top_k]]
+            
+            # Check if attacked agent is #1 (highest value)
+            is_threat = False
+            attacked_agent_rank = -1
+            
+            if len(agent_i_influences) > 0:
+                # Check if attacked agent has the highest Frobenius value
+                highest_agent = agent_i_influences[0][0]  # Agent with highest value
+                if highest_agent == attacked_agent_id:
+                    is_threat = True
+                    attacked_agent_rank = 1
+                    threat_data['threat_timesteps'].add(t)
+                else:
+                    # Find rank of attacked agent if it's in the list
+                    for rank, (agent_id, _) in enumerate(agent_i_influences):
+                        if agent_id == attacked_agent_id:
+                            attacked_agent_rank = rank + 1  # 1-indexed
+                            break
+            
+            # Store results
+            threat_data['timestamp'].append(t)
+            threat_data['agent_id'].append(i)
+            threat_data['attacked_agent_rank'].append(attacked_agent_rank)
+            threat_data['is_threat'].append(is_threat)
+            threat_data['top_k_agents'].append(top_k_agents.copy())
+            threat_data['top_k_values'].append(top_k_values.copy())
+    
+    return threat_data
+
+def save_threat_data_csv(threat_data, attacked_agent_id, top_k, logdir, window_str):
+    """
+    Save threat detection results to CSV file.
+    
+    Args:
+        threat_data: Dictionary with threat detection results
+        attacked_agent_id: ID of the attacked agent
+        top_k: Number of top agents considered
+        logdir: Directory to save the file
+        window_str: String describing the attack window
+    """
+    filepath = os.path.join(logdir, "raise_flag.csv")
+    
+    # Create header
+    header = [
+        "timestamp", 
+        "agent_id", 
+        "attacked_agent_id",
+        "attacked_agent_rank", 
+        "is_threat", 
+        f"top_{top_k}_agents",
+        f"top_{top_k}_values"
+    ]
+    
+    with open(filepath, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(header)
+        
+        # Write data
+        for i in range(len(threat_data['timestamp'])):
+            row = [
+                threat_data['timestamp'][i],
+                threat_data['agent_id'][i],
+                attacked_agent_id,
+                threat_data['attacked_agent_rank'][i] if threat_data['is_threat'][i] else 'N/A',
+                1 if threat_data['is_threat'][i] else 0,
+                f"[{', '.join(map(str, threat_data['top_k_agents'][i]))}]",
+                f"[{', '.join([f'{v:.4f}' for v in threat_data['top_k_values'][i]])}]"
+            ]
+            writer.writerow(row)
+    
+    # Print summary
+    total_entries = len(threat_data['timestamp'])
+    threat_entries = sum(threat_data['is_threat'])
+    threat_timesteps = len(threat_data['threat_timesteps'])
+    
+    print(f"Saved threat detection results to {filepath}")
+    print(f"Total entries: {total_entries}")
+    print(f"Threat entries (attacked agent ranked #1): {threat_entries}")
+    print(f"Unique threat timesteps: {threat_timesteps}")
+    
+    # Print analysis window information
+    if 'analysis_windows' in threat_data and threat_data['analysis_windows']:
+        print(f"\n=== FAULT-BASED ANALYSIS WINDOWS ===")
+        for window_info in threat_data['analysis_windows']:
+            print(f"  Fault: Agent {window_info['fault_agent']} at t={window_info['fault_time']}")
+            print(f"    Analysis window: t={window_info['window_start']} to t={window_info['window_end']}")
+    
+    print(f"Note: Only analyzes timesteps around fault events of non-attacked agents (±3 timestep window)")
+
+def plot_threat_analysis_combined(fault_timeline, threat_data, pairwise_frobs_history, attacked_agent_id, total_agents, top_k, logdir):
+    """
+    Create combined visualization with fault timeline (top) and threat bar charts (bottom).
+    Bottom row shows bar plots for only the timesteps where threats were detected.
+    
+    Args:
+        fault_timeline: List of fault events
+        threat_data: Dictionary with threat detection results
+        pairwise_frobs_history: List of N x N Frobenius matrices per timestep
+        attacked_agent_id: ID of the attacked agent
+        total_agents: Total number of agents
+        top_k: Number of top agents considered
+        logdir: Directory to save the plot
+    """
+    if not pairwise_frobs_history:
+        print("No Frobenius history data available for threat analysis plot.")
+        return
+    
+    n_timesteps = len(pairwise_frobs_history)
+    threat_timesteps = sorted(list(threat_data['threat_timesteps']))
+    
+    if len(threat_timesteps) == 0:
+        print("No threats detected. Creating plot with fault timeline only.")
+        # Create simple fault timeline plot
+        fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+        if len(fault_timeline) > 0:
+            for i, event in enumerate(fault_timeline):
+                fault_time = event['t']
+                fault_agent = event['agent']
+                ax.scatter(fault_time, fault_agent, color='red', s=100, marker='x', linewidth=3)
+                ax.annotate(f'Fault t={fault_time}', 
+                          xy=(fault_time, fault_agent),
+                          xytext=(10, 10), textcoords='offset points',
+                          fontsize=10, fontweight='bold', color='red')
+        
+        ax.set_xlim(-1, n_timesteps)
+        ax.set_ylim(-0.5, total_agents - 0.5)
+        ax.set_xlabel('Timestep')
+        ax.set_ylabel('Agent ID')
+        ax.set_title('Fault Detection Timeline - No Threats Detected')
+        ax.grid(True, alpha=0.3)
+        ax.set_yticks(range(total_agents))
+        ax.set_yticklabels([f'Agent {i}' for i in range(total_agents)])
+        
+        plt.tight_layout()
+        out_path = os.path.join(logdir, f'threat_analysis_combined_attack_{attacked_agent_id}_top{top_k}.png')
+        plt.savefig(out_path, dpi=300, bbox_inches='tight', pad_inches=0.2)
+        plt.show()
+        return
+    
+    # Create figure with 2 rows: fault timeline (top) and threat bar charts (bottom)
+    fig = plt.figure(figsize=(max(15, 5*len(threat_timesteps)), 10))
+    
+    # Get consistent agent colors
+    agent_colors = get_agent_colors(total_agents)
+    
+    # === TOP ROW: FAULT TIMELINE ===
+    ax_fault = fig.add_subplot(2, 1, 1)
+    ax_fault.set_title('Fault Detection Timeline', fontsize=14, fontweight='bold', pad=20)
+    
+    if len(fault_timeline) > 0:
+        # Plot fault timeline
+        for i, event in enumerate(fault_timeline):
+            fault_time = event['t']
+            fault_agent = event['agent']
+            ax_fault.scatter(fault_time, fault_agent, color='red', s=100, marker='x', linewidth=3)
+            ax_fault.annotate(f'Fault t={fault_time}', 
+                            xy=(fault_time, fault_agent),
+                            xytext=(10, 10), textcoords='offset points',
+                            fontsize=10, fontweight='bold', color='red')
+    
+    # Mark threat timesteps on fault timeline
+    for t in threat_timesteps:
+        ax_fault.axvline(x=t, color='orange', alpha=0.3, linewidth=2, linestyle='-')
+    
+    ax_fault.set_xlim(-1, n_timesteps)
+    ax_fault.set_ylim(-0.5, total_agents - 0.5)
+    ax_fault.set_xlabel('Timestep')
+    ax_fault.set_ylabel('Agent ID')
+    ax_fault.grid(True, alpha=0.3)
+    ax_fault.set_yticks(range(total_agents))
+    ax_fault.set_yticklabels([f'Agent {i}' for i in range(total_agents)])
+    
+    # Add legend for fault timeline
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], marker='x', color='red', markersize=10, linestyle='None', label='Fault Detected'),
+        Line2D([0], [0], color='orange', alpha=0.6, linewidth=3, label='Threat Timestep')
+    ]
+    ax_fault.legend(handles=legend_elements, loc='upper right')
+    
+    # === BOTTOM ROW: THREAT BAR CHARTS ===
+    # Create subplots for each threat timestep
+    n_threat_plots = len(threat_timesteps)
+    gs_bottom = fig.add_gridspec(1, n_threat_plots, top=0.45, bottom=0.05, hspace=0.3, wspace=0.3)
+    
+    for plot_idx, threat_t in enumerate(threat_timesteps):
+        ax = fig.add_subplot(gs_bottom[0, plot_idx])
+        
+        # Find all threat instances at this timestep
+        threat_instances_at_t = []
+        for i in range(len(threat_data['timestamp'])):
+            if (threat_data['timestamp'][i] == threat_t and 
+                threat_data['is_threat'][i] and
+                len(threat_data['top_k_values'][i]) > 0):
+                
+                threat_instances_at_t.append({
+                    'influenced_agent': threat_data['agent_id'][i],
+                    'top_k_agents': threat_data['top_k_agents'][i],
+                    'top_k_values': threat_data['top_k_values'][i]
+                })
+        
+        if threat_instances_at_t:
+            # Create stacked bars for each influenced agent
+            bar_width = 0.6
+            influenced_agents = [inst['influenced_agent'] for inst in threat_instances_at_t]
+            x_positions = range(len(influenced_agents))
+            
+            # For each influenced agent, create stacked bars showing top-k agents
+            for i, instance in enumerate(threat_instances_at_t):
+                bottom = 0
+                for j, (agent_id, frob_value) in enumerate(zip(instance['top_k_agents'], instance['top_k_values'])):
+                    color = 'red' if agent_id == attacked_agent_id else agent_colors[agent_id]
+                    alpha = 1.0 if agent_id == attacked_agent_id else 0.7
+                    
+                    bar = ax.bar(i, frob_value, bar_width, bottom=bottom, 
+                               color=color, alpha=alpha, 
+                               label=f'Agent {agent_id}' if plot_idx == 0 and i == 0 else "")
+                    
+                    # Add value labels on bars
+                    ax.text(i, bottom + frob_value/2, f'A{agent_id}\n{frob_value:.3f}', 
+                           ha='center', va='center', fontsize=8, fontweight='bold')
+                    
+                    bottom += frob_value
+            
+            # Styling
+            ax.set_title(f'Threat at t={threat_t}\n(Attacked Agent #{attacked_agent_id} Ranked #1)', 
+                        fontsize=11, fontweight='bold')
+            ax.set_xlabel('Influenced Agent')
+            ax.set_ylabel('Frobenius Norm')
+            ax.set_xticks(x_positions)
+            ax.set_xticklabels([f'Agent {ag}' for ag in influenced_agents], rotation=45)
+            ax.grid(True, alpha=0.3, axis='y')
+            
+            # Highlight if this threat timestep affects the attacked agent
+            if attacked_agent_id in influenced_agents:
+                ax.set_facecolor('#fff8f8')  # Light red background
+        else:
+            ax.text(0.5, 0.5, f'No threat data\nfor t={threat_t}', 
+                   ha='center', va='center', transform=ax.transAxes, fontsize=10)
+            ax.set_title(f'Threat at t={threat_t}')
+    
+    # Overall title
+    fig.suptitle(f'Fault Detection and Top-{top_k} Threat Analysis\n(Attack on Agent {attacked_agent_id} - Only Highest Ranked Threats)', 
+                 fontsize=16, fontweight='bold', y=0.95)
+    
+    # Save plot
+    out_path = os.path.join(logdir, f'threat_analysis_combined_attack_{attacked_agent_id}_top{top_k}.png')
+    plt.savefig(out_path, dpi=300, bbox_inches='tight', pad_inches=0.2)
+    plt.show()
+    print(f"Saved combined threat analysis plot to {out_path}")
+    print(f"Threat detection summary: {len(threat_timesteps)} timesteps where attacked agent ranked #1")
+
+############# THREAT DETECTION FUNCTIONS END #############
+
 # -------------- Ploting Starts Here -----------------
 def plot_results(results, results_attacked, atk_agent_id, logdir):
         os.makedirs(logdir, exist_ok=True)
@@ -944,7 +1298,7 @@ def slice_avail(avail, agent_id):
         return None
     return avail[:, agent_id]
 
-def eval(runner, attack_status=False, attack_agent_id=0, seed=23, taylor_history_data=None, min_window=0, max_window=None):
+def eval(runner, attack_status=False, attack_agent_id=0, seed=23, taylor_history_data=None, min_window=0, max_window=None, top_k=2):
     """Evaluate the model."""
     
     eval_episode = 0
@@ -1184,8 +1538,11 @@ def eval(runner, attack_status=False, attack_agent_id=0, seed=23, taylor_history
 
         cnt += 1
     
+    # Perform threat detection analysis around fault events only
+    threat_data = detect_threats_top_k(pairwise_frobs_history, attack_agent_id, top_k, fault_timeline)
+    
     # return taylor_error_list, frob_norms_list, sec_dir_derivatives, frob_norms_matrix_history, fault_timeline, attacked_steps
-    return taylor_error_list,pairwise_frobs_history, pairwise_obs_influences_history, pairwise_second_order_influences_history, frob_norms_matrix_history, fault_timeline, attacked_steps
+    return taylor_error_list, pairwise_frobs_history, pairwise_obs_influences_history, pairwise_second_order_influences_history, frob_norms_matrix_history, fault_timeline, attacked_steps, threat_data
 
 def compute_pairwise_frob_norms(runner, eval_obs, eval_rnn_states_critic, eval_masks):
     """Compute Frobenius norms of cross-agent Hessian blocks for all (i, j).
@@ -1618,6 +1975,9 @@ def main():
     parser.add_argument(
         "--max_window", type=int, default=None, help="Maximum timestep for attack window (inclusive). If None, attacks until episode ends."
     )
+    parser.add_argument(
+        "--top_k", type=int, default=2, help="Top-k agents to consider for threat detection based on Frobenius values."
+    )
     args, unparsed_args = parser.parse_known_args()
 
     def process(arg):
@@ -1673,25 +2033,27 @@ def main():
     # Run evaluation without attack
     # results_normal, frob_norms_normal, sec_dir_derivatives_normal, frob_norms_matrix_history_normal, fault_timeline_normal, attacked_steps_normal = eval(runner, False, attack_agent_id, taylor_history_data=taylor_history_data)
     # Run evaluation with attack
-    results__normal, pairwise_frobs_history_normal, pairwise_obs_influences_history_normal, pairwise_second_order_influences_history_normal, frob_norms_matrix_history_atk_normal, fault_timeline_atk_normal, attacked_steps_atk_normal = eval(
+    results__normal, pairwise_frobs_history_normal, pairwise_obs_influences_history_normal, pairwise_second_order_influences_history_normal, frob_norms_matrix_history_atk_normal, fault_timeline_atk_normal, attacked_steps_atk_normal, threat_data_normal = eval(
         runner, 
         attack_status=False, 
         attack_agent_id=attack_agent_id, 
         seed=args['seed'], 
         taylor_history_data=taylor_history_data,
         min_window=args['min_window'],
-        max_window=args['max_window']
+        max_window=args['max_window'],
+        top_k=args['top_k']
     )
         
     # exit("Exiting")
-    results_attacked, pairwise_frobs_history,pairwise_obs_influences_history, pairwise_second_order_influences_history, frob_norms_matrix_history_atk, fault_timeline_atk, attacked_steps_atk = eval(
+    results_attacked, pairwise_frobs_history, pairwise_obs_influences_history, pairwise_second_order_influences_history, frob_norms_matrix_history_atk, fault_timeline_atk, attacked_steps_atk, threat_data_attacked = eval(
         runner, 
         attack_status=True, 
         attack_agent_id=attack_agent_id, 
         seed=args['seed'], 
         taylor_history_data=taylor_history_data,
         min_window=args['min_window'],
-        max_window=args['max_window']
+        max_window=args['max_window'],
+        top_k=args['top_k']
     )
 
     log_dir = algo_args['attack']['log_dir']
@@ -1743,6 +2105,39 @@ def main():
     
     # Plot Taylor error vs historical bounds
     plot_taylor_error_with_historical_bounds(results_attacked, taylor_history_data, attacked_steps_atk, attack_agent_id, log_path)
+
+    # === NEW THREAT DETECTION ANALYSIS ===
+    # Save threat detection results to CSV
+    save_threat_data_csv(threat_data_attacked, attack_agent_id, args['top_k'], log_path, window_str)
+    
+    # Plot combined threat analysis visualization
+    plot_threat_analysis_combined(
+        fault_timeline_atk, 
+        threat_data_attacked, 
+        pairwise_frobs_history, 
+        attack_agent_id, 
+        runner.num_agents, 
+        args['top_k'], 
+        log_path
+    )
+    
+    # Print threat detection summary
+    if threat_data_attacked['threat_timesteps']:
+        print(f"\n=== THREAT DETECTION SUMMARY ===")
+        print(f"Top-{args['top_k']} Analysis: Agent {attack_agent_id} detected as potential threat")
+        print(f"Threat detected at timesteps: {sorted(list(threat_data_attacked['threat_timesteps']))}")
+        print(f"Total unique threat timesteps: {len(threat_data_attacked['threat_timesteps'])}")
+        
+        # Show some example threat instances
+        threat_instances = [(i, threat_data_attacked['timestamp'][i], threat_data_attacked['agent_id'][i], threat_data_attacked['attacked_agent_rank'][i]) 
+                          for i in range(len(threat_data_attacked['is_threat'])) if threat_data_attacked['is_threat'][i]]
+        
+        print(f"Sample threat instances (first 5):")
+        for i, (idx, t, agent, rank) in enumerate(threat_instances[:5]):
+            print(f"  - Timestep {t}: Agent {attack_agent_id} ranked #{rank} in top-{args['top_k']} influencers of Agent {agent}")
+    else:
+        print(f"\n=== THREAT DETECTION SUMMARY ===")
+        print(f"Top-{args['top_k']} Analysis: No threats detected for Agent {attack_agent_id}")
 
     # runner.run()
     runner.close()
