@@ -44,7 +44,135 @@ def set_all_seeds(seed: int):
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
+def calculate_edge_scores(runner, num_episodes=1, seed=42):
+    """
+    Calculate edge scores (outbound influence) for each agent
+    Edge score = sum of agent's influence on all other agents
+    """
+    # একটা episode এর জন্য Frobenius norms calculate করব
+    frob_matrices = eval_frobenius_single_episode(runner, use_seed=True, seed=seed)
+    
+    if not frob_matrices:
+        return None, None
+    
+    # সব timesteps এর average নিব
+    n_agents = runner.num_agents
+    average_matrix = np.zeros((n_agents, n_agents))
+    
+    for matrix in frob_matrices:
+        average_matrix += np.array(matrix)
+    average_matrix /= len(frob_matrices)
+    
+    # Edge scores calculate করব (প্রতিটা agent এর inbound influence)
+    edge_scores = {}
+    for i in range(n_agents):
+        # Agent i এর উপর অন্য agents এর influence এর sum (নিজের থেকে নিজের উপর influence বাদ)
+        edge_scores[i] = sum(average_matrix[j][i] for j in range(n_agents) if j != i)
+    print(f"Average Influence Matrix:\n{average_matrix}")
+    print(f"Edge Scores (Outbound Influence): {edge_scores}")
+    return edge_scores, average_matrix.tolist()
 
+def calculate_cascade_risk_index(shapley_values, edge_scores):
+    """
+    Calculate Cascade Risk Index using the formula:
+    CRI_i = max(0, -a_i) * I_i
+    where a_i = contribution (Shapley value) and I_i = outbound influence
+    """
+    cri_scores = {}
+    
+    for agent_id in shapley_values.keys():
+        contribution = shapley_values[agent_id]  # a_i
+        outbound_influence = edge_scores[agent_id]  # I_i
+        
+        # CRI formula: max(0, -a_i) * I_i
+        # যদি contribution negative হয়, তাহলে ওটা risky
+        cri_scores[agent_id] = max(0, -contribution) * outbound_influence
+    
+    return cri_scores
+
+def plot_edge_scores(edge_scores, save_path, title="Edge Scores (Outbound Influence)"):
+    """Plot bar chart of edge scores"""
+    agents = list(edge_scores.keys())
+    values = list(edge_scores.values())
+    
+    plt.figure(figsize=(10, 6))
+    plt.bar(range(len(agents)), values, alpha=0.7, color='orange')
+    plt.xlabel('Agent ID')
+    plt.ylabel('Edge Score (Outbound Influence)')
+    plt.title(title)
+    plt.xticks(range(len(agents)), [f'Agent {a}' for a in agents])
+    plt.grid(True, alpha=0.3)
+    
+    # Value labels on bars
+    for i, v in enumerate(values):
+        plt.text(i, v + max(values) * 0.01, f'{v:.3f}', ha='center', va='bottom')
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+def plot_cri_scores(cri_scores, save_path, title="Cascade Risk Index (CRI)"):
+    """Plot bar chart of CRI scores"""
+    agents = list(cri_scores.keys())
+    values = list(cri_scores.values())
+    
+    plt.figure(figsize=(10, 6))
+    # Risk এর জন্য red color ব্যবহার করব
+    plt.bar(range(len(agents)), values, alpha=0.7, color='red')
+    plt.xlabel('Agent ID')
+    plt.ylabel('Cascade Risk Index')
+    plt.title(title)
+    plt.xticks(range(len(agents)), [f'Agent {a}' for a in agents])
+    plt.grid(True, alpha=0.3)
+    
+    # Value labels
+    for i, v in enumerate(values):
+        plt.text(i, v + max(values) * 0.01 if max(values) > 0 else 0.001, 
+                f'{v:.3f}', ha='center', va='bottom')
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+def plot_combined_metrics(shapley_values, edge_scores, cri_scores, save_path):
+    """Plot all three metrics in subplots"""
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    
+    agents = list(shapley_values.keys())
+    
+    # Node scores (Shapley values)
+    shapley_vals = list(shapley_values.values())
+    axes[0].bar(range(len(agents)), shapley_vals, alpha=0.7, color='blue')
+    axes[0].set_title('Node Scores (Shapley Values)')
+    axes[0].set_xlabel('Agent ID')
+    axes[0].set_ylabel('Contribution')
+    axes[0].set_xticks(range(len(agents)))
+    axes[0].set_xticklabels([f'Agent {a}' for a in agents])
+    axes[0].grid(True, alpha=0.3)
+    
+    # Edge scores
+    edge_vals = list(edge_scores.values())
+    axes[1].bar(range(len(agents)), edge_vals, alpha=0.7, color='orange')
+    axes[1].set_title('Edge Scores (Outbound Influence)')
+    axes[1].set_xlabel('Agent ID')
+    axes[1].set_ylabel('Influence')
+    axes[1].set_xticks(range(len(agents)))
+    axes[1].set_xticklabels([f'Agent {a}' for a in agents])
+    axes[1].grid(True, alpha=0.3)
+    
+    # CRI scores
+    cri_vals = list(cri_scores.values())
+    axes[2].bar(range(len(agents)), cri_vals, alpha=0.7, color='red')
+    axes[2].set_title('Cascade Risk Index (CRI)')
+    axes[2].set_xlabel('Agent ID')
+    axes[2].set_ylabel('Risk Level')
+    axes[2].set_xticks(range(len(agents)))
+    axes[2].set_xticklabels([f'Agent {a}' for a in agents])
+    axes[2].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
 
 def ensure_dir(path):
     """Create directory if it doesn't exist"""
@@ -57,7 +185,7 @@ def slice_avail(avail, agent_id):
         return None
     first = avail[0]
     if first is None:
-        return None/deac/csc/vanbastelaerGrp/guptd23/RL_Project/HARL/examples/shapley_monte_carlo_smac.py
+        return None
     return avail[:, agent_id]
 
 
@@ -120,48 +248,13 @@ def compute_pairwise_frob_norms_from_attack_test(runner, eval_obs, eval_rnn_stat
                 is_grads_batched=True,
                 allow_unused=True,
             )[0]
-            # if second_grad is None:
-            #     second_grad = torch.zeros_like(agent_obs_tensors[j])
-            # hessian_matrix.append(second_grad.flatten())
-
-            # H = torch.stack(hessian_matrix) if len(hessian_matrix) > 0 else torch.zeros(1, 1)
             results[i][j] = torch.norm(hessian_matrix, p='fro').item()
-
-        # for j in range(N):
-        #     hessian_matrix = []
-    
-        #     for k in range(grad_i.shape[0]):
-        #         second_order = torch.autograd.grad(
-        #             grad_i[k],
-        #             agent_obs_tensors[j],
-        #             retain_graph=True,
-        #             allow_unused=True,
-        #         )[0]
-        #         # print(f"Second order : {second_order}")
-        #         hessian_matrix.append(second_order[j*70:(j+1)*70].flatten())
-        #         # print(f"Hessian matrix length : {hessian_matrix}")
-        #         # exit("Exiting after one calculation for debugging.")
-
-        #     H = torch.stack(hessian_matrix) if len(hessian_matrix) > 0 else torch.zeros(1, 1)
-        #     results[i][j] = torch.norm(H, p='fro').item()
-
-        # print(f"Computed row {i} of Frobenius norm matrix: {results[i]}")
-        # for j in range(N):
-        #     hessian_matrix = []
-        #     for k in range(grad_i.shape[0]):
-        #         second_grad = torch.autograd.grad(
-        #             grad_i[k],
-        #             agent_obs_tensors[j],
-        #             retain_graph=True,
-        #             allow_unused=True,
-        #         )[0]
-        #         if second_grad is None:
-        #             second_grad = torch.zeros_like(agent_obs_tensors[j])
-        #         hessian_matrix.append(second_grad.flatten())
-
-        #     H = torch.stack(hessian_matrix) if len(hessian_matrix) > 0 else torch.zeros(1, 1)
-        #     results[i][j] = H.norm(p='fro').item()
-    # exit("Exiting after one episode for edge score calculation.")
+    # Normalize each row by its sum
+    for i in range(N):
+        row_sum = sum(results[i])
+        if row_sum > 0:
+            for j in range(N):
+                results[i][j] /= row_sum
     return results
 
 def eval_frobenius_single_episode(runner, use_seed=False, seed=42):
@@ -379,6 +472,108 @@ def plot_influence_pies(frob_matrix_history, attacked_agent_id, total_agents, sa
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"Saved influence pies to {save_path}")
+
+
+def calculate_attack_reward(runner,attack_status=False,attacked_agent_id=None,seed=42):
+    """
+    Calculate reward when doing attack or not doing attack.
+    When attack_status is True, the attacked_agent_id will take the worst possible action by evaluating Q-values.
+    When attack_status is False, all agents act optimally.
+    """
+    # Reset environment with specified seed
+    set_all_seeds(seed)
+    eval_obs, eval_share_obs, eval_avail = runner.eval_envs.reset()
+
+    n_agents = runner.num_agents
+    rnn = np.zeros((1, n_agents, runner.recurrent_n, runner.rnn_hidden_size), dtype=np.float32)
+    masks = np.ones((1, n_agents, 1), dtype=np.float32)
+
+    total_reward = 0.0
+    step_count = 0
+
+    while True:
+        actions_col = []
+        
+        for agent_id in range(n_agents):
+            if attack_status and agent_id == attacked_agent_id:
+                # Attacked agent: evaluate Q-values and take worst action (argmin)
+                if hasattr(runner.eval_envs.action_space[agent_id], 'n'):
+                    # Discrete action space - evaluate Q-values for all actions
+                    n_actions = runner.eval_envs.action_space[agent_id].n
+                    avail_slice = slice_avail(eval_avail, agent_id)
+                    
+                    if avail_slice is not None and avail_slice[0] is not None:
+                        available_actions = np.where(avail_slice[0] > 0.5)[0]
+                    else:
+                        available_actions = list(range(n_actions))
+                    
+                    # print(f"Available actions for attacked agent {agent_id}: {available_actions}")
+                    # print(f"Available actions slice: {avail_slice}")
+                    # Get Q-values for all available actions
+                    obs_tensor = torch.FloatTensor(eval_obs[:, agent_id])
+                    rnn_tensor = torch.FloatTensor(rnn[:, agent_id])
+                    mask_tensor = torch.FloatTensor(masks[:, agent_id])
+                    
+                    # Get action logits/Q-values from the actor
+                    with torch.no_grad():
+                        # action_logits = runner.actor[agent_id].actor.act.get_logits(torch.tensor(eval_obs).to(runner.device))
+                        action_log_probs, dist_entropy, action_distribution = runner.actor[agent_id].evaluate_actions(
+                            obs_tensor.to(runner.device),
+                            rnn_tensor.to(runner.device),
+                            available_actions,
+                            mask_tensor.to(runner.device),
+                            slice_avail(eval_avail, agent_id),
+                            None
+                        )
+                        # Extract action probabilities and take argmin
+                        q_values = action_log_probs.squeeze()
+                        
+                        # # Mask unavailable actions with high values (so they won't be selected as minimum)
+                        # masked_q_values = q_values.clone()
+                        # if avail_slice is not None and avail_slice[0] is not None:
+                        #     for a in range(n_actions):
+                        #         if a not in available_actions:
+                        #             masked_q_values[a] = float('inf')
+                        
+                        # Take argmin to get worst action
+                        # print(f"Log probabilities of actions for attacked agent {agent_id}: {q_values}")
+                        worst_action_index = torch.argmin(q_values).item()
+                        action_array = np.array([[available_actions[worst_action_index]]], dtype=np.int64)
+                        # print(f"Chosen worst action for attacked agent {agent_id}: {action_array}")
+                        # exit("Exiting after printing chosen worst action for debugging.")
+                        actions_col.append(action_array)
+            else:
+                # Normal agent: act optimally using trained policy
+                action, rnn_next = runner.actor[agent_id].act(
+                    eval_obs[:, agent_id],
+                    rnn[:, agent_id],
+                    masks[:, agent_id],
+                    slice_avail(eval_avail, agent_id),
+                    deterministic=True
+                )
+                rnn[:, agent_id] = _t2n(rnn_next)
+                actions_col.append(_t2n(action))
+        
+        # Transpose to get proper action format
+        actions = np.array(actions_col).transpose(1, 0, 2)
+        
+        # Step environment
+        eval_obs, eval_share_obs, eval_rewards, eval_dones, eval_infos, eval_avail = runner.eval_envs.step(actions)
+        total_reward += float(eval_rewards.sum())
+        step_count += 1
+        
+        # Check termination conditions
+        if np.all(eval_dones):
+            break
+        
+        # Update masks for done environments
+        done_env = np.all(eval_dones, axis=1)
+        rnn[done_env == True] = 0
+        masks[:] = 1.0
+        masks[done_env == True] = 0.0
+
+    return total_reward
+
 # ------------------------------- Coalition Value Functions -------------------------------
 
 def sample_coalition(agents):
@@ -606,16 +801,6 @@ def rollout(runner, coalition, seed, episode_length=None, save_gif=False, gif_pa
         total_reward += float(eval_rewards.sum())
         step_count += 1
         
-        # # Compute pairwise Frobenius norms if requested
-        # if compute_frob:
-        #     # try:
-        #     current_obs = [eval_obs[0, i] for i in range(n_agents)] 
-        #     pairwise_frobs = compute_pairwise_frob_norms(runner, current_obs)
-        #     frob_history.append(pairwise_frobs)
-            # except Exception as e:
-            #     print(f"Warning: Could not compute Frobenius norms at step {step_count}: {e}")
-            #     pairwise_frobs = [[0.0 for _ in range(n_agents)] for _ in range(n_agents)]
-            #     frob_history.append(pairwise_frobs)
         
         # Check termination conditions
         if np.all(eval_dones):
@@ -969,6 +1154,7 @@ def main():
     # Set evaluation parameters
     algo_args["eval"]["n_eval_rollout_threads"] = 1
     algo_args["eval"]["eval_episodes"] = 1
+    algo_args["seed"]["seed"]=args.seed
     update_args(unparsed_dict, algo_args, env_args)
     
     # Special handling for dexhands environment
@@ -988,6 +1174,7 @@ def main():
         restore_model(runner, args.restore_dir, args.restore_reward)
 
     runner.prep_training()
+    
     
     # Get list of agents
     agents = list(range(runner.num_agents))
@@ -1180,8 +1367,93 @@ def main():
                 print("Note: PettingZoo MPE environments often require additional setup for visual output")
         except Exception as e:
             print(f"Could not check GIF directory: {e}")
+    
+    # Part 1 Task Implementation শুরু হবে Shapley values এর পরে
 
+    # Step 1: Edge Scores (Outbound Influence) calculation
+    print("\nCalculating Edge Scores (Outbound Influence)...")
+    edge_scores, influence_matrix = calculate_edge_scores(runner, num_episodes=1, seed=args.seed)
+
+    if edge_scores is not None:
+        print("\nEdge Scores (Outbound Influence):")
+        print("-" * 40)
+        for agent_id, score in edge_scores.items():
+            print(f"Agent {agent_id}: {score:.6f}")
+        
+        # Step 2: CRI Calculation
+        print("\nCalculating Cascade Risk Index (CRI)...")
+        cri_scores = calculate_cascade_risk_index(mc_shapley_values, edge_scores)
+        
+        print("\nCascade Risk Index (CRI):")
+        print("-" * 30)
+        for agent_id, cri in cri_scores.items():
+            print(f"Agent {agent_id}: {cri:.6f}")
+        
+        # Find most risky agent
+        most_risky_agent = max(cri_scores.keys(), key=lambda x: cri_scores[x])
+        print(f"\nMost Risky Agent: Agent {most_risky_agent} (CRI: {cri_scores[most_risky_agent]:.6f})")
+        
+        # Step 3: Save and Visualize Results
+        print(f"\nSaving Part 1 results...")
+        
+        # Save edge scores
+        edge_csv_path = os.path.join(log_path, "edge_scores.csv")
+        with open(edge_csv_path, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['agent_id', 'edge_score'])
+            for agent_id, score in edge_scores.items():
+                writer.writerow([agent_id, score])
+        
+        # Save CRI scores
+        cri_csv_path = os.path.join(log_path, "cri_scores.csv")
+        with open(cri_csv_path, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['agent_id', 'cri_score'])
+            for agent_id, cri in cri_scores.items():
+                writer.writerow([agent_id, cri])
+        
+        # Create visualizations
+        plot_edge_scores(edge_scores, os.path.join(log_path, "edge_scores.png"))
+        plot_cri_scores(cri_scores, os.path.join(log_path, "cri_scores.png"))
+        plot_combined_metrics(mc_shapley_values, edge_scores, cri_scores, 
+                            os.path.join(log_path, "combined_metrics.png"))
+        
+        print("Part 1 Task Completed Successfully!")
+        print(f"Results saved in: {log_path}")
+    else:
+        print("Failed to calculate edge scores.")
+        
+    normal_reward = calculate_attack_reward(runner,attack_status=False,attacked_agent_id=None,seed=args.seed)
+    print(f"Normal episode reward (no attack): {normal_reward:.6f}")
+    attack_agent_zero_reward = calculate_attack_reward(runner,attack_status=True,attacked_agent_id=0,seed=args.seed)
+    print(f"Episode reward with Agent 0 attacked: {attack_agent_zero_reward:.6f}")
+    attack_agent_one_reward = calculate_attack_reward(runner,attack_status=True,attacked_agent_id=1,seed=args.seed)
+    print(f"Episode reward with Agent 1 attacked: {attack_agent_one_reward:.6f}")
+    attack_agent_two_reward = calculate_attack_reward(runner,attack_status=True,attacked_agent_id=2,seed=args.seed)
+    print(f"Episode reward with Agent 2 attacked: {attack_agent_two_reward:.6f}")
     # Close runner
+    # Plot reward comparison under different attack scenarios
+    attack_scenarios = ['Normal', 'Attacked Agent 0', 'Attacked Agent 1', 'Attacked Agent 2']
+    reward_values = [normal_reward, attack_agent_zero_reward, attack_agent_one_reward, attack_agent_two_reward]
+    
+    plt.figure(figsize=(12, 8))
+    plt.bar(range(len(attack_scenarios)), reward_values, alpha=0.7, 
+                   color=['green', 'red', 'red', 'red'])
+    plt.xlabel('Attack Scenario')
+    plt.ylabel('Reward')
+    plt.title('Reward Under Attack vs Normal')
+    plt.xticks(range(len(attack_scenarios)), attack_scenarios, rotation=45, ha='right')
+    plt.grid(True, alpha=0.3)
+    
+    # Add value labels on bars
+    for i, v in enumerate(reward_values):
+        plt.text(i, v + max(reward_values) * 0.01, f'{v:.3f}', ha='center', va='bottom')
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(log_path, "reward_inception.png"), dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Reward comparison plot saved to: {os.path.join(log_path, 'reward_inception.png')}")
     runner.close()
 
 

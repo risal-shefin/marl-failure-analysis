@@ -135,13 +135,12 @@ def compute_taylor_policy(runner, eval_obs, eval_available_actions, eval_rnn_sta
 
         return delta_errors
 
-def eval(runner, attack_status=False, attack_agent_id=0,seed=23,randomness=0.25):
+def eval(runner, attack_status=False, attack_agent_id=0,seed=None, randomness=0.25):
     """Evaluate the model."""
     
-    print(f"Seeding eval with seed {seed}")
     eval_episode = 0
 
-    eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset(seed=seed)
+    eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset()
 
     if np.random.random() < randomness:  # 10% chance to add noise to observations
         noise = np.random.normal(loc=0.0, scale=0.1, size=eval_obs.shape)
@@ -289,23 +288,10 @@ def restore_model(runner, restore_dir, reward):
     for agent_id in range(runner.num_agents):
         policy_actor_state_dict = torch.load(
             os.path.join(restore_dir, f"actor_agent{agent_id}_{reward}.pt"),
-            weights_only=False
+            weights_only=False, map_location=torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         )
         runner.actor[agent_id].actor.load_state_dict(policy_actor_state_dict)
     
-    if not runner.algo_args["render"]["use_render"]:
-        policy_critic_state_dict = torch.load(
-            os.path.join(restore_dir, f"critic_agent_{reward}.pt"),
-            weights_only=False
-        )
-        runner.critic.critic.load_state_dict(policy_critic_state_dict)
-        
-        if runner.value_normalizer is not None:
-            value_normalizer_state_dict = torch.load(
-                os.path.join(restore_dir, f"value_normalizer_{reward}.pt"),
-                weights_only=False
-            )
-            runner.value_normalizer.load_state_dict(value_normalizer_state_dict)
     # if not runner.algo_args["render"]["use_render"]:
     #     policy_critic_state_dict = torch.load(
     #         os.path.join(restore_dir, f"critic_agent_{reward}.pt"),
@@ -375,16 +361,16 @@ def main():
         help="Reward value to restore the model."
     )
     parser.add_argument(
-        "--seed",
-        type=int,
-        default=376,
-        help="Random seed for initialization."
-    )
-    parser.add_argument(
         "--total_episodes",
         type=int,
         default=5000,
         help="Total number of episodes to run."
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=376,
+        help="Random seed for initialization."
     )
     parser.add_argument(
         "--randomness",
@@ -398,6 +384,7 @@ def main():
         default="/deac/csc/vanbastelaerGrp/guptd23/RL_Project/HARL/examples/results/pettingzoo_mpe/simple_spread_v2-discrete/happo/installtest/seed-00042-2025-08-03-20-41-48/models",
         help="Filepath to restore the model from."
     )
+    
     parser.add_argument(
         "--save_result_dir",
         type=str,
@@ -425,6 +412,10 @@ def main():
         env_args = all_config["env_args"]
     else:  # load config from corresponding yaml file
         algo_args, env_args = get_defaults_yaml_args(args["algo"], args["env"])
+    
+    print(">>",algo_args)
+    print(f"Seeding with seed {args['seed']}")
+    algo_args["seed"]["seed"]=args["seed"]
     update_args(unparsed_dict, algo_args, env_args)  # update args from command line
 
     if args["env"] == "dexhands":
@@ -440,7 +431,7 @@ def main():
     # log_dir = algo_args['attack']['log_dir']
     alg_name = algo_args['attack']['algo_name']
     date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-    log_path = os.path.join(args['save_result_dir'], f"seed-{args['seed']}", alg_name, date)
+    log_path = os.path.join(args['save_result_dir'], alg_name, date)
     # if args['save_result_dir'] is not None:
     #     log_path = os.path.join(args['save_result_dir'], alg_name, date)
     # else:
@@ -449,6 +440,7 @@ def main():
 
     algo_args['eval']['n_eval_rollout_threads'] = 1
     algo_args['eval']['eval_episodes'] = 1
+    
     runner = RUNNER_REGISTRY[args["algo"]](args, algo_args, env_args)
     restore_model(runner,args['filepath'], args['reward'])  # Restore the model with specific reward and episode
     runner.prep_training()
@@ -459,7 +451,7 @@ def main():
     randomness = args.get('randomness', 0.25)
     print(f"Randomness in eval set to {randomness}")
     for i in tqdm(range(total_episodes), desc="Processing episodes"):
-        results = eval(runner,randomness=randomness,seed=args['seed'])  # Run evaluation
+        results = eval(runner,randomness=randomness)  # Run evaluation
         for timestep in range(len(results)):
             for agent_id in range(runner.num_agents):
                 if timestep not in result_dataset[agent_id]:

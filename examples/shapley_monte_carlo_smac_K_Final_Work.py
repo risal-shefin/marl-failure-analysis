@@ -45,7 +45,7 @@ def set_all_seeds(seed: int):
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-def calculate_edge_scores(runner, average_matrix=None, num_episodes=1000, seed=42):
+def calculate_edge_scores(runner, average_matrix=None):
     """
     Calculate edge scores (outbound influence) for each agent
     Edge score = sum of agent's influence on all other agents
@@ -57,14 +57,6 @@ def calculate_edge_scores(runner, average_matrix=None, num_episodes=1000, seed=4
         seed: Random seed (only used if average_matrix is None)
     """
     # If no pre-computed matrix is provided, calculate it
-    if average_matrix is None:
-        print(f"Computing Frobenius norms for edge scores over {num_episodes} episodes...")
-        average_matrix = calculate_average_frobenius_norms(runner, num_episodes=num_episodes, seed=seed)
-        
-        if average_matrix is None:
-            return None, None
-    else:
-        print("Using pre-computed Frobenius matrix for edge scores...")
     
     # Convert to numpy array for easier manipulation
     average_matrix = np.array(average_matrix)
@@ -196,6 +188,61 @@ def slice_avail(avail, agent_id):
     return avail[:, agent_id]
 
 
+def compute_taylor_policy(runner, eval_obs, eval_available_actions, eval_rnn_states):
+        # states_tensor = torch.stack([torch.tensor(state_dict[k], dtype=torch.float32, requires_grad=True) for k in state_dict.keys()])
+        eval_obs = torch.tensor(eval_obs, dtype=torch.float32, requires_grad=True)
+        delta_errors = []
+        eval_actions_collector = []
+        eval_masks = np.ones(
+            (runner.algo_args["eval"]["n_eval_rollout_threads"], runner.num_agents, 1),
+            dtype=np.float32,
+        )
+
+        for agent_id in range(runner.num_agents):
+            cur_obs = eval_obs[:, agent_id]
+            eval_actions, eval_actions_log_prob, temp_rnn_state = runner.actor[agent_id].get_actions(
+                cur_obs,
+                eval_rnn_states[:, agent_id],
+                eval_masks[:, agent_id],
+                eval_available_actions[:, agent_id]
+                if eval_available_actions[0] is not None
+                else None,
+                deterministic=True,
+            )
+            # eval_rnn_states[:, agent_id] = _t2n(temp_rnn_state)
+            eval_actions_collector.append(_t2n(eval_actions))
+
+            eval_actions = np.array(eval_actions_collector).transpose(1, 0, 2)
+            grad_i = torch.autograd.grad(
+                outputs=eval_actions_log_prob,
+                inputs=cur_obs,
+                create_graph=True,
+                retain_graph=True,
+            )[0]
+
+            eta_i = 0.01 * grad_i.sign() / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
+
+            
+            j_tilde = eval_actions_log_prob + torch.dot(grad_i.flatten(), eta_i.flatten())  #+ 0.5 * torch.dot(eta_i.flatten(), hvp.flatten())
+
+            p_obs = cur_obs + eta_i
+            _, perturb_log_prob, _ = runner.actor[agent_id].get_actions(
+                p_obs,
+                eval_rnn_states[:, agent_id],
+                eval_masks[:, agent_id],
+                eval_available_actions[:, agent_id]
+                if eval_available_actions[0] is not None
+                else None,
+                deterministic=True,
+            )
+            # _, _, p_log_prob = runner.agents.choose_actions_attack(p_state, i)
+            # # Actual value of perturbed point
+            j_perturbed = perturb_log_prob
+
+            delta_error = abs(j_perturbed - j_tilde).item()
+            delta_errors.append(delta_error)
+
+        return delta_errors
 
 
 def compute_pairwise_frob_norms_from_attack_test(runner, eval_obs, eval_rnn_states_critic, eval_masks):
@@ -264,15 +311,15 @@ def compute_pairwise_frob_norms_from_attack_test(runner, eval_obs, eval_rnn_stat
                 results[i][j] /= row_sum
     return results
 
-def eval_frobenius_single_episode(runner, use_seed=False, seed=42):
+def eval_frobenius_single_episode(runner, use_seed=False, seed=42,args=None):
     """
     Modified eval function from attack_test.py for calculating Frobenius norms in a single episode.
     Returns the list of pairwise Frobenius norm matrices for each timestep.
     """
-    if use_seed:
+    if args.env=='smac' or args.env=='smacv2':
         eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset()
     else:
-        eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset()
+        eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset(seed=seed)
 
     # print(f"Shape of eval_obs: {eval_obs.shape}, eval_share_obs: {eval_share_obs.shape}")
     eval_rnn_states = np.zeros(
@@ -368,7 +415,7 @@ def eval_frobenius_single_episode(runner, use_seed=False, seed=42):
 
     return frob_norms_matrix_history
 
-def calculate_average_frobenius_norms(runner, num_episodes=1, seed=42):
+def calculate_average_frobenius_norms(runner, num_episodes=1, seed=42,args=None):
     """
     Calculate Frobenius norms over multiple episodes and return the average.
     
@@ -385,7 +432,7 @@ def calculate_average_frobenius_norms(runner, num_episodes=1, seed=42):
     for episode in tqdm(range(num_episodes), desc="Calculating Frobenius norms"):
         use_seed = (num_episodes == 1)
         print(f"use_seed={use_seed}, seed={seed}")
-        episode_matrices = eval_frobenius_single_episode(runner, use_seed=use_seed, seed=seed)
+        episode_matrices = eval_frobenius_single_episode(runner, use_seed=use_seed, seed=seed,args=args)
         all_episode_matrices.extend(episode_matrices)
     
     if len(all_episode_matrices) == 0:
@@ -481,7 +528,245 @@ def plot_influence_pies(frob_matrix_history, attacked_agent_id, total_agents, sa
     print(f"Saved influence pies to {save_path}")
 
 
-def calculate_attack_reward(runner,attack_status=False,attacked_agent_id=None,seed=42,args=None):
+# def calculate_attack_reward(runner,attack_status=False,attacked_agent_id=None,seed=42,args=None):
+#     """
+#     Calculate reward when doing attack or not doing attack.
+#     When attack_status is True, the attacked_agent_id will take the worst possible action by evaluating Q-values.
+#     When attack_status is False, all agents act optimally.
+#     """
+#     # Reset environment with specified seed
+#     set_all_seeds(seed)
+#     if args.env=='smac' or args.env=='smacv2':   
+#         eval_obs, eval_share_obs, eval_avail = runner.eval_envs.reset()
+#     else:
+#         eval_obs, eval_share_obs, eval_avail = runner.eval_envs.reset(seed=seed)
+
+#     n_agents = runner.num_agents
+#     rnn = np.zeros((1, n_agents, runner.recurrent_n, runner.rnn_hidden_size), dtype=np.float32)
+#     masks = np.ones((1, n_agents, 1), dtype=np.float32)
+
+#     total_reward = 0.0
+#     step_count = 0
+
+#     while True:
+#         actions_col = []
+        
+#         for agent_id in range(n_agents):
+#             if attack_status and agent_id == attacked_agent_id:
+#                 # Attacked agent: evaluate Q-values and take worst action (argmin)
+#                 if hasattr(runner.eval_envs.action_space[agent_id], 'n'):
+#                     # Discrete action space - evaluate Q-values for all actions
+#                     n_actions = runner.eval_envs.action_space[agent_id].n
+#                     avail_slice = slice_avail(eval_avail, agent_id)
+                    
+#                     if avail_slice is not None and avail_slice[0] is not None:
+#                         available_actions = np.where(avail_slice[0] > 0.5)[0]
+#                     else:
+#                         available_actions = list(range(n_actions))
+                    
+#                     # print(f"Available actions for attacked agent {agent_id}: {available_actions}")
+#                     # print(f"Available actions slice: {avail_slice}")
+#                     # Get Q-values for all available actions
+#                     obs_tensor = torch.FloatTensor(eval_obs[:, agent_id])
+#                     rnn_tensor = torch.FloatTensor(rnn[:, agent_id])
+#                     mask_tensor = torch.FloatTensor(masks[:, agent_id])
+                    
+#                     # Get action logits/Q-values from the actor
+#                     with torch.no_grad():
+#                         # action_logits = runner.actor[agent_id].actor.act.get_logits(torch.tensor(eval_obs).to(runner.device))
+#                         action_log_probs, dist_entropy, action_distribution = runner.actor[agent_id].evaluate_actions(
+#                             obs_tensor.to(runner.device),
+#                             rnn_tensor.to(runner.device),
+#                             available_actions,
+#                             mask_tensor.to(runner.device),
+#                             slice_avail(eval_avail, agent_id),
+#                             None
+#                         )
+#                         # Extract action probabilities and take argmin
+#                         q_values = action_log_probs.squeeze()
+                        
+#                         # # Mask unavailable actions with high values (so they won't be selected as minimum)
+#                         # masked_q_values = q_values.clone()
+#                         # if avail_slice is not None and avail_slice[0] is not None:
+#                         #     for a in range(n_actions):
+#                         #         if a not in available_actions:
+#                         #             masked_q_values[a] = float('inf')
+                        
+#                         # Take argmin to get worst action
+#                         print(f"Log probabilities of actions for attacked agent {agent_id}: {q_values}")
+#                         print(f"Q-values shape: {q_values.shape}, Available actions: {len(available_actions)}")
+
+#                         # Handle case where agent is dead (only one action available)
+#                         if q_values.numel() == 1 or len(available_actions) == 1:
+#                             print(f"Agent {agent_id} appears to be dead or has only one action. Using index 0.")
+#                             action_index = 0
+#                         else:
+#                             # Normal case with multiple actions
+#                             if args.worst_action == 'worst':
+#                                 action_index = torch.argmin(q_values).item()
+#                             elif args.worst_action == '2nd_worst':
+#                                 if len(available_actions) >= 2:
+#                                     action_index = torch.topk(q_values, 2, largest=False).indices[1].item()
+#                                 else:
+#                                     print(f"Not enough actions for 2nd worst, using worst action for agent {agent_id}")
+#                                     action_index = torch.argmin(q_values).item()
+#                             elif args.best_action == '2nd_best':
+#                                 if len(available_actions) >= 2:
+#                                     action_index = torch.topk(q_values, 2, largest=True).indices[1].item()
+#                                 else:
+#                                     print(f"Not enough actions for 2nd best, using best action for agent {agent_id}")
+#                                     action_index = torch.argmax(q_values).item()
+#                             elif args.best_action == '3rd_best':
+#                                 if len(available_actions) >= 3:
+#                                     action_index = torch.topk(q_values, 3, largest=True).indices[2].item()
+#                                 else:
+#                                     print(f"Not enough actions for 3rd best, using best available action for agent {agent_id}")
+#                                     action_index = torch.argmax(q_values).item()
+#                             else:
+#                                 # taking best action always
+#                                 print(f"Warning: BEST ACTION IS TAKEN FOR ATTACKED AGENT {agent_id}")
+#                                 action_index = torch.argmax(q_values).item()
+                        
+#                         action_array = np.array([[available_actions[action_index]]], dtype=np.int64)
+#                         # print(f"Chosen worst action for attacked agent {agent_id}: {action_array}")
+#                         # exit("Exiting after printing chosen worst action for debugging.")
+#                         actions_col.append(action_array)
+#             else:
+#                 # Normal agent: act optimally using trained policy
+#                 action, rnn_next = runner.actor[agent_id].act(
+#                     eval_obs[:, agent_id],
+#                     rnn[:, agent_id],
+#                     masks[:, agent_id],
+#                     slice_avail(eval_avail, agent_id),
+#                     deterministic=True
+#                 )
+#                 rnn[:, agent_id] = _t2n(rnn_next)
+#                 actions_col.append(_t2n(action))
+        
+#         # Transpose to get proper action format
+#         actions = np.array(actions_col).transpose(1, 0, 2)
+        
+#         # Step environment
+#         eval_obs, eval_share_obs, eval_rewards, eval_dones, eval_infos, eval_avail = runner.eval_envs.step(actions)
+#         total_reward += float(eval_rewards.sum())
+#         step_count += 1
+        
+#         # Check termination conditions
+#         if np.all(eval_dones):
+#             break
+        
+#         # Update masks for done environments
+#         done_env = np.all(eval_dones, axis=1)
+#         rnn[done_env == True] = 0
+#         masks[:] = 1.0
+#         masks[done_env == True] = 0.0
+
+#     return total_reward
+
+# def plot_aggregated_taylor_error_barchart(mean_normal_taylor, 
+#                                         zero_mean_attack_taylor.first_mean_attack, logdir, n_agents):
+#     """
+#     Plot aggregated Taylor error analysis results as a bar chart comparing normal vs attacked scenarios.
+    
+#     Args:
+#         mean_normal_taylor: Mean Taylor errors per agent in normal scenario across seeds
+#         std_normal_taylor: Std Taylor errors per agent in normal scenario across seeds
+#         mean_attack_taylor: Mean Taylor errors matrix - for each attacked agent, the mean errors of all agents across seeds
+#         std_attack_taylor: Std Taylor errors matrix - for each attacked agent, the std errors of all agents across seeds
+#         logdir: Directory to save the plot
+#         n_agents: Number of agents
+#     """
+#     # Create subplots: one for each attacked agent scenario
+#     # Calculate how to distribute n_agents+1 columns across 2 rows
+#     total_plots = n_agents + 1
+#     cols_per_row = 3
+#     rows = math.ceil(total_plots / cols_per_row)
+#     fig, axes = plt.subplots(rows, cols_per_row, figsize=(5 * cols_per_row, 12))
+    
+#     # Flatten axes array to handle 2D subplot grid properly
+#     if total_plots == 1:
+#         axes = [axes]
+#     else:
+#         axes = axes.flatten()
+    
+#     # Get consistent color palette
+#     agent_colors = get_agent_colors(n_agents)
+    
+#     # Calculate global y-axis limits for consistency across all subplots
+#     all_values = list(mean_normal_taylor)
+#     for attack_means in mean_attack_taylor:
+#         all_values.extend(attack_means)
+    
+#     global_max = max(all_values) if all_values else 0.01
+#     global_text_offset = 0.001
+#     global_y_limit_upper = global_max * 1.1 if global_max > 0 else 0.01  # Extra space for text labels
+    
+#     # Plot 1: Normal scenario (all agents)
+#     ax = axes[0]
+#     agents = list(range(n_agents))
+#     colors = [agent_colors[i] for i in range(n_agents)]
+    
+#     bars = ax.bar(agents, mean_normal_taylor, color=colors, alpha=0.8, edgecolor='black')
+    
+#     # Add error bars for standard deviation
+#     # ax.errorbar(agents, mean_normal_taylor, yerr=std_normal_taylor, fmt='none', color='black', capsize=3)
+#     ax.errorbar(agents, mean_normal_taylor, fmt='none', color='black', capsize=3)
+    
+#     # Add value labels on top of bars
+#     for bar, val, std_val in zip(bars, mean_normal_taylor, std_normal_taylor):
+#         height = bar.get_height()
+#         ax.text(bar.get_x() + bar.get_width()/2., height + global_text_offset,
+#                 f'{val:.4f}', ha='center', va='bottom', fontweight='bold', fontsize=8)
+    
+#     ax.set_xlabel('Agent ID')
+#     ax.set_ylabel('Mean Taylor Error')
+#     ax.set_title('Normal Scenario')
+#     ax.grid(axis='y', alpha=0.3)
+#     ax.set_xticks(agents)
+#     ax.set_ylim(0, global_y_limit_upper)
+    
+#     # Plot 2-N+1: Attack scenarios (for each attacked agent)
+#     for attacked_agent_id in range(n_agents):
+#         ax = axes[attacked_agent_id + 1]
+#         attack_means = mean_attack_taylor[attacked_agent_id]
+#         attack_stds = std_attack_taylor[attacked_agent_id]
+        
+#         # Use same colors, but highlight the attacked agent in red
+#         colors_attack = [agent_colors[i] if i != attacked_agent_id else 'red' for i in range(n_agents)]
+        
+#         bars = ax.bar(agents, attack_means, color=colors_attack, alpha=0.8, edgecolor='black')
+        
+#         # Add error bars for standard deviation
+#         # ax.errorbar(agents, attack_means, yerr=attack_stds, fmt='none', color='black', capsize=3)
+#         ax.errorbar(agents, attack_means, fmt='none', color='black', capsize=3)
+        
+#         # Add value labels on top of bars using global text offset
+#         for bar, val, std_val in zip(bars, attack_means, attack_stds):
+#             height = bar.get_height()
+#             ax.text(bar.get_x() + bar.get_width()/2., height + global_text_offset,
+#                     f'{val:.4f}', ha='center', va='bottom', fontweight='bold', fontsize=8)
+        
+#         ax.set_xlabel('Agent ID')
+#         ax.set_ylabel('Mean Taylor Error')
+#         ax.set_title(f'Agent {attacked_agent_id} Attacked')
+#         ax.grid(axis='y', alpha=0.3)
+#         ax.set_xticks(agents)
+#         ax.set_ylim(0, global_y_limit_upper)  # Use global y-limit for consistency
+    
+#     # Hide unused subplots
+#     for j in range(total_plots, len(axes)):
+#         axes[j].set_visible(False)
+    
+#     plt.suptitle('Aggregated Taylor Error Analysis: Normal vs Attack Scenarios', fontsize=16, fontweight='bold')
+#     plt.tight_layout()
+    
+#     # Save plot
+#     barchart_path = os.path.join(logdir, 'aggregated_taylor_error_analysis_barchart.png')
+#     plt.savefig(barchart_path, dpi=300, bbox_inches='tight')
+#     plt.show()
+#     print(f"Saved aggregated Taylor error analysis bar chart to {barchart_path}")
+
+def calculate_attack_reward(runner,attack_status=False,attacked_agent_id=None,seed=42,args=None,calculate_taylor=False):
     """
     Calculate reward when doing attack or not doing attack.
     When attack_status is True, the attacked_agent_id will take the worst possible action by evaluating Q-values.
@@ -489,18 +774,34 @@ def calculate_attack_reward(runner,attack_status=False,attacked_agent_id=None,se
     """
     # Reset environment with specified seed
     set_all_seeds(seed)
-    eval_obs, eval_share_obs, eval_avail = runner.eval_envs.reset()
-
+    if args.env=='smac' or args.env=='smacv2':
+        eval_obs, eval_share_obs, eval_avail = runner.eval_envs.reset()
+    else:
+        eval_obs, eval_share_obs, eval_avail = runner.eval_envs.reset(seed=seed)
     n_agents = runner.num_agents
-    rnn = np.zeros((1, n_agents, runner.recurrent_n, runner.rnn_hidden_size), dtype=np.float32)
-    masks = np.ones((1, n_agents, 1), dtype=np.float32)
+    # rnn = np.zeros((1, n_agents, runner.recurrent_n, runner.rnn_hidden_size), dtype=np.float32)
+    # masks = np.ones((1, n_agents, 1), dtype=np.float32)
+    eval_rnn_states = np.zeros(
+    (
+        runner.algo_args["eval"]["n_eval_rollout_threads"],
+        runner.num_agents,
+        runner.recurrent_n,
+        runner.rnn_hidden_size,
+    ),
+    dtype=np.float32,
+    )
+    eval_masks = np.ones(
+        (runner.algo_args["eval"]["n_eval_rollout_threads"], runner.num_agents, 1),
+        dtype=np.float32,
+    )
 
     total_reward = 0.0
     step_count = 0
-
+    result_list = [[] for _ in range(n_agents)]
+    
     while True:
         actions_col = []
-        
+        eval_rnn_states_backup = eval_rnn_states.copy()
         for agent_id in range(n_agents):
             if attack_status and agent_id == attacked_agent_id:
                 # Attacked agent: evaluate Q-values and take worst action (argmin)
@@ -518,8 +819,8 @@ def calculate_attack_reward(runner,attack_status=False,attacked_agent_id=None,se
                     # print(f"Available actions slice: {avail_slice}")
                     # Get Q-values for all available actions
                     obs_tensor = torch.FloatTensor(eval_obs[:, agent_id])
-                    rnn_tensor = torch.FloatTensor(rnn[:, agent_id])
-                    mask_tensor = torch.FloatTensor(masks[:, agent_id])
+                    rnn_tensor = torch.FloatTensor(eval_rnn_states[:, agent_id])
+                    mask_tensor = torch.FloatTensor(eval_masks[:, agent_id])
                     
                     # Get action logits/Q-values from the actor
                     with torch.no_grad():
@@ -543,8 +844,8 @@ def calculate_attack_reward(runner,attack_status=False,attacked_agent_id=None,se
                         #             masked_q_values[a] = float('inf')
                         
                         # Take argmin to get worst action
-                        print(f"Log probabilities of actions for attacked agent {agent_id}: {q_values}")
-                        print(f"Q-values shape: {q_values.shape}, Available actions: {len(available_actions)}")
+                        # print(f"Log probabilities of actions for attacked agent {agent_id}: {q_values}")
+                        # print(f"Q-values shape: {q_values.shape}, Available actions: {len(available_actions)}")
 
                         # Handle case where agent is dead (only one action available)
                         if q_values.numel() == 1 or len(available_actions) == 1:
@@ -585,14 +886,21 @@ def calculate_attack_reward(runner,attack_status=False,attacked_agent_id=None,se
                 # Normal agent: act optimally using trained policy
                 action, rnn_next = runner.actor[agent_id].act(
                     eval_obs[:, agent_id],
-                    rnn[:, agent_id],
-                    masks[:, agent_id],
+                    eval_rnn_states[:, agent_id],
+                    eval_masks[:, agent_id],
                     slice_avail(eval_avail, agent_id),
                     deterministic=True
                 )
-                rnn[:, agent_id] = _t2n(rnn_next)
+                eval_rnn_states[:, agent_id] = _t2n(rnn_next)
                 actions_col.append(_t2n(action))
         
+        if calculate_taylor:
+            delta_errors = compute_taylor_policy(runner, eval_obs, eval_avail, eval_rnn_states_backup)
+            # print(f"Taylor errors at step {step_count}: {delta_errors}")
+            for i in range(runner.num_agents):
+                result_list[i].append(delta_errors[i]) # episode
+            
+    
         # Transpose to get proper action format
         actions = np.array(actions_col).transpose(1, 0, 2)
         
@@ -607,11 +915,15 @@ def calculate_attack_reward(runner,attack_status=False,attacked_agent_id=None,se
         
         # Update masks for done environments
         done_env = np.all(eval_dones, axis=1)
-        rnn[done_env == True] = 0
-        masks[:] = 1.0
-        masks[done_env == True] = 0.0
+        eval_rnn_states[done_env == True] = 0
+        eval_masks[:] = 1.0
+        eval_masks[done_env == True] = 0.0
+    # print(f"result_list: {result_list}")
+    taylor_error_episode_mean = [np.mean(result_list[j]) for j in range(runner.num_agents)]
+    # print(f"Taylor error mean per agent for the episode: {taylor_error_episode_mean}")
+    
+    return total_reward, taylor_error_episode_mean if calculate_taylor else total_reward
 
-    return total_reward
 
 # ------------------------------- Coalition Value Functions -------------------------------
 
@@ -694,10 +1006,13 @@ def save_gif_from_frames(frames, filepath, duration=200):
     
 
 
-def rollout(runner, coalition, seed, episode_length=None, save_gif=False, gif_path=None, compute_frob=False):
+def rollout(runner, coalition, seed,args=None, episode_length=None, save_gif=False, gif_path=None, compute_frob=False):
     """Modified rollout to optionally compute Frobenius norms"""
     # Reset environment with specified seed
-    eval_obs, eval_share_obs, eval_avail = runner.eval_envs.reset()
+    if args.env=='smac' or args.env=='smacv2':
+        eval_obs, eval_share_obs, eval_avail = runner.eval_envs.reset()
+    else:
+        eval_obs, eval_share_obs, eval_avail = runner.eval_envs.reset(seed=seed)
     
     n_agents = runner.num_agents
     rnn = np.zeros((1, n_agents, runner.recurrent_n, runner.rnn_hidden_size), dtype=np.float32)
@@ -864,7 +1179,7 @@ def rollout(runner, coalition, seed, episode_length=None, save_gif=False, gif_pa
 
 # ------------------------------- Shapley Value Computation -------------------------------
 
-def monte_carlo_shapley_values(runner, agents, M=1000, seed=42, save_gifs=False, gif_dir=None):
+def monte_carlo_shapley_values(runner, agents, M=1000, seed=42,args=None, save_gifs=False, gif_dir=None):
     """
     Monte Carlo approximation of Shapley values (Algorithm 1)
     
@@ -928,7 +1243,7 @@ def monte_carlo_shapley_values(runner, agents, M=1000, seed=42, save_gifs=False,
             # Compute reward with this agent
             coal_with_agent = frozenset(coal_i | {agent})
             # print(f"  Evaluating coalition with Agent {agent}: {sorted(coal_with_agent)}")
-            r_i = rollout(runner, coal_with_agent, current_seed, 
+            r_i = rollout(runner, coal_with_agent, current_seed,args=args, 
                                        save_gif=should_save_gif, gif_path=gif_path, 
                                        compute_frob=True)
         
@@ -936,8 +1251,8 @@ def monte_carlo_shapley_values(runner, agents, M=1000, seed=42, save_gifs=False,
             coal_without_agent = frozenset(coal_with_agent - {agent}) # if agent in coal_i else coal_i
             # print(f"  Evaluating coalition without Agent {agent}: {sorted(coal_without_agent)}")
             # Don't save GIF for marginal contribution rollouts (too many)
-            r_neg_i = rollout(runner, coal_without_agent, current_seed)   #+ agent + 1
-            
+            r_neg_i = rollout(runner, coal_without_agent, current_seed,args=args)   #+ agent + 1
+
             # Marginal contribution
             marginal_contributions[agent] = r_i - r_neg_i
         
@@ -1056,13 +1371,104 @@ def plot_shapley_values(shapley_values, save_path, title="Shapley Values"):
     plt.close()
 
 
+def get_agent_colors(n_agents):
+    """
+    Get consistent color palette for agents across all plots.
+    
+    Args:
+        n_agents: Number of agents
+        
+    Returns:
+        dict: Dictionary mapping agent index to color
+    """
+    cmap = plt.get_cmap('tab20')
+    agent_colors = {i: cmap(i % 20) for i in range(n_agents)}
+    return agent_colors
+
+def plot_frob_full_details(normal, first_attack, second_attack, third_attack,save_path,attack_type):
+    colors_dict = get_agent_colors(3)
+    colors = [colors_dict[i] for i in range(3)]  # Convert dict to list
+    print(f"Colors used for agents: {colors_dict}")
+    """
+    Plot full details of Frobenius norms for Normal and Attack scenarios
+    Shows Taylor expansion errors for each agent across different scenarios
+    """
+    total_plots = 3 + 1
+    rows = math.ceil(total_plots / 3)
+    fig, axes = plt.subplots(rows, 3, figsize=(5 * 3, 12))
+    all_values = list(normal)
+    all_values.extend(first_attack)
+    all_values.extend(second_attack)
+    all_values.extend(third_attack)
+    global_max = max(all_values) if all_values else 0.01
+    global_text_offset = 0.001
+    global_y_limit_upper = global_max * 1.1 if global_max > 0 else 0.01  # Extra space for text labels
+    # Flatten axes array to handle 2D subplot grid properly
+    if total_plots == 1:
+        axes = [axes]
+    else:
+        axes = axes.flatten()
+    ax = axes[0]
+    agents = list(range(3))
+    bars = ax.bar(agents, normal, color=colors, alpha=0.8, edgecolor='black')
+    for bar, val in zip(bars, normal):
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height + 0.001,
+                f'{val:.4f}', ha='center', va='bottom', fontweight='bold', fontsize=8)
+    
+    mean_attack = [first_attack, second_attack, third_attack]
+    for attacked_agent_id in range(3):
+        ax = axes[attacked_agent_id + 1]
+        attack_means = mean_attack[attacked_agent_id]
+
+
+        # Use same colors, but highlight the attacked agent in red
+        colors_attack = [colors[i] if i != attacked_agent_id else 'red' for i in range(3)]
+        
+        bars = ax.bar(agents, attack_means, color=colors_attack, alpha=0.8, edgecolor='black')
+        
+        # Add error bars for standard deviation
+        # ax.errorbar(agents, attack_means, yerr=attack_stds, fmt='none', color='black', capsize=3)
+        ax.errorbar(agents, attack_means, fmt='none', color='black', capsize=3)
+        
+        # Add value labels on top of bars using global text offset
+        for bar, val in zip(bars, attack_means):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + 0.001,
+                    f'{val:.4f}', ha='center', va='bottom', fontweight='bold', fontsize=8)
+        
+        ax.set_xlabel('Agent ID')
+        ax.set_ylabel('Mean Taylor Error')
+        ax.set_title(f'Agent {attacked_agent_id} Attacked')
+        ax.grid(axis='y', alpha=0.3)
+        ax.set_xticks(agents)
+        ax.set_ylim(0, global_y_limit_upper)  # Use global y-limit for consistency
+    # Hide unused subplots
+    for j in range(total_plots, len(axes)):
+        axes[j].set_visible(False)
+    
+    plt.suptitle('Aggregated Taylor Error Analysis: Normal vs Attack Scenarios', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    
+    # Save plot
+    barchart_path = os.path.join(save_path, attack_type)
+    ensure_dir(barchart_path)
+    plt.savefig(f"{barchart_path}/aggregated_taylor_error_analysis_barchart.png", dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved aggregated Taylor error analysis bar chart to {barchart_path}")
+
 def save_shapley_to_csv(shapley_values, filepath):
     """Save Shapley values to CSV file"""
-    with open(filepath, 'w', newline='') as csvfile:
+    with open(filepath, 'a', newline='') as csvfile:
         writer = csv.writer(csvfile)
-        writer.writerow(['agent_id', 'shapley_value'])
-        for agent_id, value in shapley_values.items():
-            writer.writerow([agent_id, value])
+        # Create header with agent columns
+        agents = sorted(shapley_values.keys())
+        header = [f'agent_{agent_id}' for agent_id in agents]
+        writer.writerow(header)
+        
+        # Write shapley values in a single row
+        values = [shapley_values[agent_id] for agent_id in agents]
+        writer.writerow(values)
 
 
 def compare_methods(mc_values, exact_values=None):
@@ -1180,6 +1586,12 @@ def main():
     shapley_ranking_list = []
     edge_score_ranking_list = []
     
+    # Initialize list to collect all Shapley values from each seed
+    all_shapley_values = []
+    
+    # Initialize list to collect all edge scores from each seed
+    all_edge_scores = []
+    
     # Initialize accuracy counters for analysis
     shapley_index_zero_acc = 0
     shapley_index_one_acc = 0
@@ -1192,16 +1604,22 @@ def main():
     analysis_data = []
     args.output_dir = f"{args.output_dir}/{timestamp}"
     ensure_dir(args.output_dir)
+    log_path = args.output_dir
+    print(f"Analysis results will be saved to: {log_path}")
+    final_normal_taylor_error = [[] for _ in range(3)]  # Assuming max 3 agents for normal
+    final_attack_0_taylor_error = [[] for _ in range(3)]  # Assuming max 3 agents for attack 0
+    final_attack_1_taylor_error = [[] for _ in range(3)]  # Assuming max 3 agents for attack 1
+    final_attack_2_taylor_error = [[] for _ in range(3)]  # Assuming max 3 agents for attack 2
     # Set seeds
     for seed in range(args.total_seeds):
         args.seed = seed
         print(f"\n\n===== Running with Seed {args.seed} =====")
         set_all_seeds(args.seed)
         
-        if seed % 1000==0:
-            # Create output directory
-            log_path = os.path.join(args.save_dir, args.dir_name,str(args.seed),timestamp)
-            ensure_dir(log_path)
+        # if seed == args.total_seeds - 1:
+        #     # Create output directory
+        #     log_path = os.path.join(args.save_dir, args.dir_name,str(args.seed),timestamp)
+        #     ensure_dir(log_path)
         
         # Parse additional config overrides
         unparsed_dict = {}
@@ -1227,7 +1645,9 @@ def main():
         # Set evaluation parameters
         algo_args["eval"]["n_eval_rollout_threads"] = 1
         algo_args["eval"]["eval_episodes"] = 1
-        algo_args["seed"]["seed"]=args.seed
+        if args.env == 'smac' or args.env == 'smacv2':
+            algo_args["seed"]["seed"]=args.seed
+        
         update_args(unparsed_dict, algo_args, env_args)
         
         # Special handling for dexhands environment
@@ -1309,6 +1729,7 @@ def main():
             agents=agents,
             M=args.M,
             seed=args.seed,
+            args=args,
             save_gifs=args.save_gifs,
             # gif_dir=gif_dir
         )
@@ -1358,10 +1779,40 @@ def main():
         # print(f"\nSaving results to {log_path}...")
         
         # Save Monte Carlo results
-        # save_shapley_to_csv(mc_shapley_values, os.path.join(log_path, "shapley_monte_carlo.csv"))
-        if seed % 1000 == 0:
-            plot_shapley_values(mc_shapley_values, os.path.join(log_path, "shapley_monte_carlo.png"),
-                            f"Monte Carlo Shapley Values (M={args.M})")
+        print(f"Mc_shapley values: {mc_shapley_values}")
+        
+        # Store Shapley values for this seed
+        all_shapley_values.append(mc_shapley_values.copy())
+        
+        # Save individual seed results for reference (CSV for each seed)
+        # save_shapley_to_csv(mc_shapley_values, os.path.join(log_path, f"shapley_monte_carlo_seed_{args.seed}.csv"))
+        
+        # Save averaged Shapley values to CSV (updated each seed)
+        if len(all_shapley_values) > 0:
+            # Calculate current average
+            num_agents = len(all_shapley_values[0])
+            current_averaged_shapley = {}
+            for agent_id in range(num_agents):
+                agent_values = [shapley_dict[agent_id] for shapley_dict in all_shapley_values]
+                current_averaged_shapley[agent_id] = np.mean(agent_values)
+            
+            # Save current averaged results to CSV
+            avg_shapley_csv_path = os.path.join(log_path, f"averaged_shapley_values_{timestamp}.csv")
+            save_shapley_to_csv(current_averaged_shapley, avg_shapley_csv_path)
+            
+            # Save all individual Shapley values to CSV (updated each seed)
+            all_shapley_csv_path = os.path.join(log_path, f"all_shapley_values_{timestamp}.csv")
+            with open(all_shapley_csv_path, 'w', newline='') as csvfile:
+                # Create header with agent columns
+                fieldnames = ['seed'] + [f'agent_{i}' for i in range(num_agents)]
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                
+                writer.writeheader()
+                for seed_idx, shapley_dict in enumerate(all_shapley_values):
+                    row = {'seed': seed_idx}
+                    for agent_id in range(num_agents):
+                        row[f'agent_{agent_id}'] = shapley_dict[agent_id]
+                    writer.writerow(row)
 
         # Save exact results if computed
         # if exact_shapley_values is not None:
@@ -1378,14 +1829,17 @@ def main():
             average_frob_matrix = calculate_average_frobenius_norms(
                 runner, 
                 num_episodes=args.frobenius_episodes, 
-                seed=args.seed
+                seed=args.seed,
+                args=args
             )
-            
+            # print("\nAverage Frobenius Norm Matrix:")
+            # print(average_frob_matrix)
+            # exit("Exiting after Frobenius norm calculation for debugging.")
             if average_frob_matrix is not None:
                 # Convert average matrix to the format expected by plot_influence_pies
                 frob_matrices_history = [average_frob_matrix]
 
-                if seed % 1000 == 0:
+                if seed == args.total_seeds - 1:
                     print("Generating influence pie charts...")
                     influence_pie_path = os.path.join(log_path, "influence_pies.png")
                     plot_influence_pies(
@@ -1398,10 +1852,18 @@ def main():
                 
                 # Save Frobenius matrices to CSV for analysis
                 frob_csv_path = os.path.join(log_path, "frobenius_matrices.csv")
-                with open(frob_csv_path, 'w', newline='') as csvfile:
+                
+                # Check if file exists to determine if we need to write header
+                file_exists = os.path.exists(frob_csv_path)
+                
+                with open(frob_csv_path, 'a', newline='') as csvfile:
                     writer = csv.writer(csvfile)
-                    header = ['metric'] + [f'agent_{i}_to_{j}' for i in range(len(agents)) for j in range(len(agents))]
-                    writer.writerow(header)
+                    
+                    # Only write header if file doesn't exist (first time)
+                    if not file_exists:
+                        header = ['metric'] + [f'agent_{i}_to_{j}' for i in range(len(agents)) for j in range(len(agents))]
+                        writer.writerow(header)
+                    
                     row = ['average_frobenius'] + [average_frob_matrix[i][j] for i in range(len(agents)) for j in range(len(agents))]
                     writer.writerow(row)
                 print(f"Saved Frobenius matrices to {frob_csv_path}")
@@ -1410,22 +1872,21 @@ def main():
         
         # Part 1 Task Implementation শুরু হবে Shapley values এর পরে
         # If Frobenius norms weren't computed above but we need them for edge scores,
-        # compute them now with 1000 episodes
-        if average_frob_matrix is None:
-            print(f"\nComputing Frobenius norms for edge scores over 1000 episodes...")
-            average_frob_matrix = calculate_average_frobenius_norms(
-                runner, 
-                num_episodes=1000, 
-                seed=args.seed
-            )
+        # # compute them now with 1000 episodes
+        # if average_frob_matrix is None:
+        #     print(f"\nComputing Frobenius norms for edge scores over 1000 episodes...")
+        #     average_frob_matrix = calculate_average_frobenius_norms(
+        #         runner, 
+        #         num_episodes=1000, 
+        #         seed=args.seed,
+        #         args=args
+        #     )
 
         # Step 1: Edge Scores (Outbound Influence) calculation
         print("\nCalculating Edge Scores (Outbound Influence)...")
         edge_scores, influence_matrix = calculate_edge_scores(
             runner, 
             average_matrix=average_frob_matrix,  # Pass the pre-computed matrix
-            num_episodes=1000,  # This won't be used since we're passing the matrix
-            seed=args.seed
         )
 
         if edge_scores is not None:
@@ -1434,49 +1895,32 @@ def main():
             for agent_id, score in edge_scores.items():
                 print(f"Agent {agent_id}: {score:.6f}")
             
+            # Store edge scores for this seed
+            all_edge_scores.append(edge_scores.copy())
+            
             # Rank agents by edge scores (descending: highest to lowest influence)
             edge_score_sorted = sorted(edge_scores.items(), key=lambda x: x[1], reverse=True)
             edge_score_ranking = [agent_id for agent_id, _ in edge_score_sorted]
             edge_score_ranking_list.append(edge_score_ranking)
             
-            # # Step 2: CRI Calculation
-            # print("\nCalculating Cascade Risk Index (CRI)...")
-            # cri_scores = calculate_cascade_risk_index(mc_shapley_values, edge_scores)
+            # Save edge scores to consolidated CSV (append mode)
+            edge_csv_path = os.path.join(log_path, "edge_scores_all_seeds.csv")
             
-            # print("\nCascade Risk Index (CRI):")
-            # print("-" * 30)
-            # for agent_id, cri in cri_scores.items():
-            #     print(f"Agent {agent_id}: {cri:.6f}")
+            # Check if file exists to determine if we need to write header
+            file_exists = os.path.exists(edge_csv_path)
             
-            # # Find most risky agent
-            # most_risky_agent = max(cri_scores.keys(), key=lambda x: cri_scores[x])
-            # print(f"\nMost Risky Agent: Agent {most_risky_agent} (CRI: {cri_scores[most_risky_agent]:.6f})")
-            
-            # Step 3: Save and Visualize Results
-            print(f"\nSaving Part 1 results...")
-            
-            # Save edge scores
-            edge_csv_path = os.path.join(log_path, "edge_scores.csv")
-            with open(edge_csv_path, 'w', newline='') as csvfile:
+            with open(edge_csv_path, 'a', newline='') as csvfile:
                 writer = csv.writer(csvfile)
-                writer.writerow(['agent_id', 'edge_score'])
-                for agent_id, score in edge_scores.items():
-                    writer.writerow([agent_id, score])
-            
-            # Save CRI scores
-            # cri_csv_path = os.path.join(log_path, "cri_scores.csv")
-            # with open(cri_csv_path, 'w', newline='') as csvfile:
-            #     writer = csv.writer(csvfile)
-            #     writer.writerow(['agent_id', 'cri_score'])
-            #     for agent_id, cri in cri_scores.items():
-            #         writer.writerow([agent_id, cri])
-            
-            # Create visualizations
-            if seed % 1000 == 0:
-                plot_edge_scores(edge_scores, os.path.join(log_path, "edge_scores.png"))
-            # plot_cri_scores(cri_scores, os.path.join(log_path, "cri_scores.png"))
-            # plot_combined_metrics(mc_shapley_values, edge_scores, cri_scores, 
-            #                     os.path.join(log_path, "combined_metrics.png"))
+                
+                # Only write header if file doesn't exist (first time)
+                if not file_exists:
+                    num_agents = len(edge_scores)
+                    header = ['seed'] + [f'agent_{i}' for i in range(num_agents)]
+                    writer.writerow(header)
+                
+                # Write edge scores for current seed
+                row = [args.seed] + [edge_scores[agent_id] for agent_id in sorted(edge_scores.keys())]
+                writer.writerow(row)
             
             print("Part 1 Task Completed Successfully!")
             print(f"Results saved in: {log_path}")
@@ -1524,16 +1968,19 @@ def main():
             except Exception as e:
                 print(f"Could not check GIF directory: {e}")
 
-        normal_reward = calculate_attack_reward(runner,attack_status=False,attacked_agent_id=None,seed=args.seed,args=args)
+        normal_reward,normal_taylor_episode_mean = calculate_attack_reward(runner,attack_status=False,attacked_agent_id=None,seed=args.seed,args=args,calculate_taylor=True)
         print(f"Normal episode reward (no attack): {normal_reward:.6f}")
         attack_rewards = []
-        attack_agent_zero_reward = calculate_attack_reward(runner,attack_status=True,attacked_agent_id=0,seed=args.seed,args=args)
+        
+        
+        attack_agent_zero_reward, attack_agent_zero_taylor_mean = calculate_attack_reward(runner,attack_status=True,attacked_agent_id=0,seed=args.seed,args=args,calculate_taylor=True)
         print(f"Episode reward with Agent 0 attacked: {attack_agent_zero_reward:.6f}")
         attack_rewards.append((0, attack_agent_zero_reward))
-        attack_agent_one_reward = calculate_attack_reward(runner,attack_status=True,attacked_agent_id=1,seed=args.seed,args=args)
+        
+        attack_agent_one_reward, attack_agent_one_taylor_mean = calculate_attack_reward(runner,attack_status=True,attacked_agent_id=1,seed=args.seed,args=args,calculate_taylor=True)
         print(f"Episode reward with Agent 1 attacked: {attack_agent_one_reward:.6f}")
         attack_rewards.append((1, attack_agent_one_reward))
-        attack_agent_two_reward = calculate_attack_reward(runner,attack_status=True,attacked_agent_id=2,seed=args.seed,args=args)
+        attack_agent_two_reward, attack_agent_two_taylor_mean = calculate_attack_reward(runner,attack_status=True,attacked_agent_id=2,seed=args.seed,args=args,calculate_taylor=True)
         print(f"Episode reward with Agent 2 attacked: {attack_agent_two_reward:.6f}")
         attack_rewards.append((2, attack_agent_two_reward))
 
@@ -1546,7 +1993,18 @@ def main():
         current_shapley_ranking = shapley_ranking_list[-1]  # Get the most recent shapley ranking
         current_edge_ranking = edge_score_ranking_list[-1]  # Get the most recent edge ranking
         current_reward_ranking = agent_ranking  # Current reward drop ranking
-        
+        print(f"Current Shapley Ranking: {current_shapley_ranking}")
+        print(f"Current Reward Drop Ranking: {current_reward_ranking}")
+        print(f"Normal Taylor Error per Agent: {normal_taylor_episode_mean}")
+        print(f"Attack Agent 0 Taylor Error per Agent: {attack_agent_zero_taylor_mean}")
+        print(f"Attack Agent 1 Taylor Error per Agent: {attack_agent_one_taylor_mean}")
+        print(f"Attack Agent 2 Taylor Error per Agent: {attack_agent_two_taylor_mean}")
+        # Append Taylor errors for each agent
+        for i in range(3):
+            final_normal_taylor_error[i].append(normal_taylor_episode_mean[i])
+            final_attack_0_taylor_error[i].append(attack_agent_zero_taylor_mean[i])
+            final_attack_1_taylor_error[i].append(attack_agent_one_taylor_mean[i])
+            final_attack_2_taylor_error[i].append(attack_agent_two_taylor_mean[i])
         # Compare rankings position by position
         for i in range(3):  # Assuming 3 agents
             # Shapley vs Reward comparison
@@ -1583,7 +2041,7 @@ def main():
 
         # Close runner
         # Plot reward comparison under different attack scenarios (only every 1000th seed)
-        if args.seed % 1000 == 0:
+        if args.seed == args.total_seeds - 1:
             attack_scenarios = ['Normal', 'Attacked Agent 0', 'Attacked Agent 1', 'Attacked Agent 2']
             reward_values = [normal_reward, attack_agent_zero_reward, attack_agent_one_reward, attack_agent_two_reward]
             
@@ -1614,6 +2072,8 @@ def main():
             print(f"Skipping plot generation for seed {args.seed} (plots saved only every 1000th seed)")
         runner.close()
 
+
+    
     # Print all rankings outside the args.seed loop
     # print("\n" + "="*60)
     # print("AGENT RANKINGS SUMMARY")
@@ -1626,10 +2086,135 @@ def main():
     # print("\nShapley Values Ranking (Agent ranking from highest to lowest contribution):")
     # for i, ranking in enumerate(shapley_ranking_list):
     #     print(f"Seed {i}: {ranking}")
-        
+    normal_mean = []
+    attack_0_mean = []
+    attack_1_mean = []
+    attack_2_mean = []
+    for i in range(3):
+        normal_mean.append(np.mean(final_normal_taylor_error[i]))
+
+        attack_0_mean.append(np.mean(final_attack_0_taylor_error[i]))
+
+        attack_1_mean.append(np.mean(final_attack_1_taylor_error[i]))
+
+        attack_2_mean.append(np.mean(final_attack_2_taylor_error[i]))
+
+        print(f"\nAgent {i} Taylor Error Analysis:")
+        print(f"  Normal scenario: {normal_mean[i]:.6f}")
+        print(f"  Attack Agent 0: {attack_0_mean[i]:.6f}")
+        print(f"  Attack Agent 1: {attack_1_mean[i]:.6f}")
+        print(f"  Attack Agent 2: {attack_2_mean[i]:.6f}")
+
+    plot_frob_full_details(normal_mean, attack_0_mean, attack_1_mean, attack_2_mean, save_path=args.output_dir,attack_type=args.worst_action if args.worst_action != "None" else args.best_action)
     print("\nEdge Scores Ranking (Agent ranking from highest to lowest influence):")
     for i, ranking in enumerate(edge_score_ranking_list):
         print(f"Seed {i}: {ranking}")
+    
+    # Calculate averaged Shapley values across all seeds
+    print("\n" + "="*60)
+    print("AVERAGED SHAPLEY VALUES ACROSS ALL SEEDS")
+    print("="*60)
+    
+    if all_shapley_values:
+        # Get number of agents from first Shapley values dictionary
+        num_agents = len(all_shapley_values[0])
+        
+        # Initialize averaged Shapley values dictionary
+        averaged_shapley_values = {}
+        
+        # Calculate average for each agent
+        for agent_id in range(num_agents):
+            agent_values = [shapley_dict[agent_id] for shapley_dict in all_shapley_values]
+            averaged_shapley_values[agent_id] = np.mean(agent_values)
+        
+        # Print averaged results
+        print(f"\nAveraged Shapley Values over {len(all_shapley_values)} seeds:")
+        print("-" * 50)
+        total_avg_value = 0
+        for agent_id, avg_value in averaged_shapley_values.items():
+            # Calculate standard deviation for this agent across seeds
+            agent_values = [shapley_dict[agent_id] for shapley_dict in all_shapley_values]
+            std_value = np.std(agent_values)
+            print(f"Agent {agent_id}: {avg_value:.6f} ± {std_value:.6f}")
+            total_avg_value += avg_value
+        print("-" * 50)
+        print(f"Total: {total_avg_value:.6f}")
+        
+        # Plot averaged Shapley values using existing function (only plotting here, CSV already saved in loop)
+        avg_shapley_plot_path = os.path.join(args.output_dir, f"averaged_shapley_values_{timestamp}.png")
+        plot_shapley_values(
+            averaged_shapley_values, 
+            avg_shapley_plot_path,
+            f"Averaged Shapley Values (M={args.M}, Seeds={len(all_shapley_values)})"
+        )
+        print(f"Saved averaged Shapley values plot to: {avg_shapley_plot_path}")
+        
+    else:
+        print("No Shapley values collected - cannot compute averages")
+    
+    # Calculate averaged Edge Scores across all seeds
+    print("\n" + "="*60)
+    print("AVERAGED EDGE SCORES ACROSS ALL SEEDS")
+    print("="*60)
+    
+    if all_edge_scores:
+        # Get number of agents from first edge scores dictionary
+        num_agents = len(all_edge_scores[0])
+        
+        # Initialize averaged edge scores dictionary
+        averaged_edge_scores = {}
+        
+        # Calculate average for each agent
+        for agent_id in range(num_agents):
+            agent_edge_scores = [edge_dict[agent_id] for edge_dict in all_edge_scores]
+            averaged_edge_scores[agent_id] = np.mean(agent_edge_scores)
+        
+        # Print averaged results
+        print(f"\nAveraged Edge Scores over {len(all_edge_scores)} seeds:")
+        print("-" * 50)
+        for agent_id, avg_score in averaged_edge_scores.items():
+            # Calculate standard deviation for this agent across seeds
+            agent_edge_scores = [edge_dict[agent_id] for edge_dict in all_edge_scores]
+            std_score = np.std(agent_edge_scores)
+            print(f"Agent {agent_id}: {avg_score:.6f} ± {std_score:.6f}")
+        
+        # Save averaged edge scores to CSV
+        avg_edge_csv_path = os.path.join(args.output_dir, f"averaged_edge_scores_{timestamp}.csv")
+        with open(avg_edge_csv_path, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['agent_id', 'averaged_edge_score', 'std_edge_score'])
+            for agent_id, avg_score in averaged_edge_scores.items():
+                agent_edge_scores = [edge_dict[agent_id] for edge_dict in all_edge_scores]
+                std_score = np.std(agent_edge_scores)
+                writer.writerow([agent_id, avg_score, std_score])
+        print(f"Saved averaged edge scores to: {avg_edge_csv_path}")
+        
+        # Save all individual edge scores to CSV for further analysis
+        all_edge_csv_path = os.path.join(args.output_dir, f"all_edge_scores_{timestamp}.csv")
+        with open(all_edge_csv_path, 'w', newline='') as csvfile:
+            # Create header with agent columns
+            fieldnames = ['seed'] + [f'agent_{i}_edge_score' for i in range(num_agents)]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            
+            writer.writeheader()
+            for seed_idx, edge_dict in enumerate(all_edge_scores):
+                row = {'seed': seed_idx}
+                for agent_id in range(num_agents):
+                    row[f'agent_{agent_id}_edge_score'] = edge_dict[agent_id]
+                writer.writerow(row)
+        print(f"Saved all individual edge scores to: {all_edge_csv_path}")
+        
+        # Plot averaged edge scores using existing function
+        avg_edge_plot_path = os.path.join(args.output_dir, f"averaged_edge_scores_{timestamp}.png")
+        plot_edge_scores(
+            averaged_edge_scores, 
+            avg_edge_plot_path,
+            f"Averaged Edge Scores (Seeds={len(all_edge_scores)})"
+        )
+        print(f"Saved averaged edge scores plot to: {avg_edge_plot_path}")
+        
+    else:
+        print("No edge scores collected - cannot compute averages")
     
     # Calculate final accuracy percentages
     total_seeds = args.total_seeds
@@ -1649,6 +2234,63 @@ def main():
     # Create output directory if it doesn't exist
 
     
+    
+    # Create correlation plots
+    # Plot 1: Shapley vs Reward Drop Correlation
+    shapley_correlations = [
+        shapley_index_zero_acc / total_seeds,
+        shapley_index_one_acc / total_seeds,
+        shapley_index_two_acc / total_seeds
+    ]
+    
+    plt.figure(figsize=(10, 6))
+    ranks = ['Rank 0', 'Rank 1', 'Rank 2']
+    bars = plt.bar(ranks, shapley_correlations, alpha=0.7, color='blue', edgecolor='black')
+    plt.xlabel('Ranking Position')
+    plt.ylabel('Correlation Accuracy')
+    plt.title('Shapley Values vs Reward Drop Correlation')
+    plt.ylim(0, 1.0)
+    plt.grid(True, alpha=0.3, axis='y')
+    
+    # Add percentage labels on bars
+    for bar, corr in zip(bars, shapley_correlations):
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                f'{corr:.2%}', ha='center', va='bottom', fontweight='bold')
+    
+    plt.tight_layout()
+    shapley_corr_plot_path = os.path.join(args.output_dir, f"shapley_correlation_{timestamp}.png")
+    plt.savefig(shapley_corr_plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Plot 2: Edge Score vs Reward Drop Correlation
+    edge_correlations = [
+        edge_index_zero_acc / total_seeds,
+        edge_index_one_acc / total_seeds,
+        edge_index_two_acc / total_seeds
+    ]
+    
+    plt.figure(figsize=(10, 6))
+    bars = plt.bar(ranks, edge_correlations, alpha=0.7, color='orange', edgecolor='black')
+    plt.xlabel('Ranking Position')
+    plt.ylabel('Correlation Accuracy')
+    plt.title('Edge Scores vs Reward Drop Correlation')
+    plt.ylim(0, 1.0)
+    plt.grid(True, alpha=0.3, axis='y')
+    
+    # Add percentage labels on bars
+    for bar, corr in zip(bars, edge_correlations):
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                f'{corr:.2%}', ha='center', va='bottom', fontweight='bold')
+    
+    plt.tight_layout()
+    edge_corr_plot_path = os.path.join(args.output_dir, f"edge_correlation_{timestamp}.png")
+    plt.savefig(edge_corr_plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Saved Shapley correlation plot to: {shapley_corr_plot_path}")
+    print(f"Saved Edge correlation plot to: {edge_corr_plot_path}")
     
     # Save correlation analysis to text file
     txt_filename = f"correlation_analysis_{timestamp}.txt"
