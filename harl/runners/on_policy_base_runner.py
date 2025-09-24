@@ -152,11 +152,12 @@ class OnPolicyBaseRunner:
                     raise NotImplementedError
 
                 self.central_q = []
+                joint_action_spaces = self.envs.action_space
                 for agent_id in range(self.num_agents):
                     q_function = CentralizedQFunction(
                         {**algo_args["model"], **algo_args["algo"]},
                         cent_obs_spaces[agent_id],
-                        self.envs.action_space[agent_id],
+                        joint_action_spaces,
                         device=self.device,
                     )
                     self.central_q.append(q_function)

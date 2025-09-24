@@ -149,6 +149,16 @@ class OnPolicyHARunner(OnPolicyBaseRunner):
         else:
             raise NotImplementedError
 
+        joint_actions = np.concatenate(
+            [
+                self.actor_buffer[i].actions.reshape(
+                    -1, self.actor_buffer[i].actions.shape[-1]
+                )
+                for i in range(self.num_agents)
+            ],
+            axis=-1,
+        )
+
         for agent_id, q_function in enumerate(self.central_q):
             if self.state_type == "FP":
                 share_obs_agent = self.critic_buffer.share_obs[:-1, :, agent_id].reshape(
@@ -159,14 +169,11 @@ class OnPolicyHARunner(OnPolicyBaseRunner):
                 share_obs_agent = share_obs
                 returns_agent = returns
 
-            actions = self.actor_buffer[agent_id].actions.reshape(
-                -1, self.actor_buffer[agent_id].actions.shape[-1]
-            )
             active_masks = self.actor_buffer[agent_id].active_masks[:-1].reshape(-1, 1)
 
             train_info = q_function.train(
                 share_obs_agent,
-                actions,
+                joint_actions,
                 returns_agent,
                 active_masks=active_masks,
                 value_normalizer=self.value_normalizer,
