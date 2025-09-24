@@ -162,7 +162,7 @@ class OnPolicyHARunner(OnPolicyBaseRunner):
             actions = self.actor_buffer[agent_id].actions.reshape(
                 -1, self.actor_buffer[agent_id].actions.shape[-1]
             )
-            active_masks = self.actor_buffer[agent_id].active_masks[1:].reshape(-1, 1)
+            active_masks = self.actor_buffer[agent_id].active_masks[:-1].reshape(-1, 1)
 
             train_info = q_function.train(
                 share_obs_agent,
