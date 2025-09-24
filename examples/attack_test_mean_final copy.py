@@ -255,14 +255,7 @@ def plot_contributor_barchart(fault_timeline, total_agents, logdir):
     print(f"Saved contributor bar chart to {out_path}")
 
 ############# PLOTING ENDS HERE #############
-def slice_avail(avail, agent_id):
-    """Extract available actions for a specific agent"""
-    if avail is None:
-        return None
-    first = avail[0]
-    if first is None:
-        return None
-    return avail[:, agent_id]
+
 # --------- COMPUTE TAYLOR POLICY ------------------
 def compute_taylor_policy(runner, eval_obs, eval_available_actions, eval_rnn_states):
         # states_tensor = torch.stack([torch.tensor(state_dict[k], dtype=torch.float32, requires_grad=True) for k in state_dict.keys()])
@@ -296,7 +289,7 @@ def compute_taylor_policy(runner, eval_obs, eval_available_actions, eval_rnn_sta
                 retain_graph=True,
             )[0]
 
-            eta_i = 0.001 * grad_i.sign() / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
+            eta_i = 0.01 * grad_i.sign() / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
 
             
             j_tilde = eval_actions_log_prob + torch.dot(grad_i.flatten(), eta_i.flatten())  #+ 0.5 * torch.dot(eta_i.flatten(), hvp.flatten())
@@ -320,12 +313,21 @@ def compute_taylor_policy(runner, eval_obs, eval_available_actions, eval_rnn_sta
 
         return delta_errors
 # ---------- Evaluation Loop --
-def eval(runner, attack_status=False, attack_agent_id=0,seed=23):
+def slice_avail(avail, agent_id):
+    """Extract available actions for a specific agent"""
+    if avail is None:
+        return None
+    first = avail[0]
+    if first is None:
+        return None
+    return avail[:, agent_id]
+
+def eval(runner, attack_status=False, attack_agent_id=0, seed=23):
     """Evaluate the model."""
     
     eval_episode = 0
 
-    eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset(seed=seed)
+    eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset(seed)
 
     eval_rnn_states = np.zeros(
         (
@@ -364,7 +366,7 @@ def eval(runner, attack_status=False, attack_agent_id=0,seed=23):
     attacked_steps = []
     taylor_history = [[] for _ in range(runner.num_agents)]
     cnt = 0
-    
+
     while True:
         eval_rnn_states_backup = np.copy(eval_rnn_states)
         eval_actions_collector = []
@@ -383,25 +385,40 @@ def eval(runner, attack_status=False, attack_agent_id=0,seed=23):
 
         eval_actions = np.array(eval_actions_collector).transpose(1, 0, 2)
         
-        if  attack_status:
+        if attack_status:
             # mark attacked step
-            n_actions = runner.eval_envs.action_space[agent_id].n
-            avail_slice = slice_avail(eval_available_actions[:, agent_id], attack_agent_id)
+            eval_actions[0][attack_agent_id] = runner.eval_envs.action_space[attack_agent_id].sample()  # Random action for attack agent
+            print(f">>>> ",eval_actions[0][attack_agent_id])
+            n_actions = runner.eval_envs.action_space[attack_agent_id].n
+            avail_slice = slice_avail(eval_available_actions, attack_agent_id)
             if avail_slice is not None and avail_slice[0] is not None:
-                available_actions = np.where(avail_slice[0] > 0.5)[0]
+                        available_actions = np.where(avail_slice[0] > 0.5)[0]
             else:
                 available_actions = list(range(n_actions))
-            action_log_probs, dist_entropy, action_distribution = runner.actor[agent_id].evaluate_actions(
-                            eval_obs[:, agent_id].to(runner.device),
-                            eval_rnn_states[:, agent_id].to(runner.device),
-                            avail_slice.to(runner.device),
-                            eval_masks[:, agent_id].to(runner.device),
-                            slice_avail(eval_available_actions[:, agent_id], attack_agent_id),
+            
+            # exit("Exiting for debug")
+            with torch.no_grad():
+                print(f" [!!!] Attack launched on agent {attack_agent_id} at timestep: {cnt}")
+                obs_tensor = torch.FloatTensor(eval_obs[:, attack_agent_id])
+                rnn_tensor = torch.FloatTensor(eval_rnn_states[:, attack_agent_id])
+                mask_tensor = torch.FloatTensor(eval_masks[:, attack_agent_id])
+                
+                action_log_probs, dist_entropy, action_distribution = runner.actor[attack_agent_id].evaluate_actions(
+                            obs_tensor.to(runner.device),
+                            rnn_tensor.to(runner.device),
+                            available_actions,
+                            mask_tensor.to(runner.device),
+                            slice_avail(eval_available_actions, attack_agent_id),
                             None
                         )
-                        # Extract action probabilities and take argmin
-            q_values = action_log_probs.squeeze()
-            eval_actions[0][attack_agent_id] = runner.eval_envs.action_space[attack_agent_id].sample()  # Random action for attack agent
+                q_values = action_log_probs.squeeze()
+                if q_values.numel() == 1 or len(available_actions) == 1:
+                    print(f"Agent {agent_id} appears to be dead or has only one action. Using index 0.")
+                    eval_actions[0][attack_agent_id] = 0
+                else:
+                    worst_action = torch.argmin(q_values).item()
+                    eval_actions[0][attack_agent_id] = worst_action
+                    print(f"Agent {attack_agent_id} worst action under current policy: {worst_action}")
             attacked_steps.append(cnt)
 
 
@@ -903,14 +920,17 @@ def main():
     parser.add_argument(
         "--reward",
         type=float,
-        default=-5.14,
+        default=-79.879,
         help="Reward value to restore the model."
     )
     parser.add_argument(
         "--filepath",
         type=str,
-        default="/deac/csc/vanbastelaerGrp/guptd23/RL_Project/HARL/examples/results/pettingzoo_mpe/simple_spread_v2-discrete/happo/installtest/seed-00042-2025-08-03-20-41-48/models",
+        default="/deac/csc/vanbastelaerGrp/guptd23/RL_Project/HARL/examples/results/pettingzoo_mpe/simple_spread_v3-discrete/hatrpo/Latest_3/seed-00001-2025-08-15-22-56-55/models",
         help="Filepath to restore the model from."
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Random seed."
     )
     args, unparsed_args = parser.parse_known_args()
 
@@ -957,7 +977,7 @@ def main():
     # Run evaluation without attack
     # results_normal, frob_norms_normal, sec_dir_derivatives_normal, frob_norms_matrix_history_normal, fault_timeline_normal, attacked_steps_normal = eval(runner, False, attack_agent_id)
     # Run evaluation with attack
-    results_attacked, frob_norms_atk, sec_dir_derivatives_atk, frob_norms_matrix_history_atk, fault_timeline_atk, attacked_steps_atk = eval(runner, attack_status=True, attack_agent_id=attack_agent_id)
+    results_attacked, frob_norms_atk, sec_dir_derivatives_atk, frob_norms_matrix_history_atk, fault_timeline_atk, attacked_steps_atk = eval(runner, attack_status=True, attack_agent_id=attack_agent_id, seed=args['seed'])
 
     log_dir = algo_args['attack']['log_dir']
     alg_name = algo_args['attack']['algo_name']

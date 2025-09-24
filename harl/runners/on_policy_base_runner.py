@@ -134,6 +134,7 @@ class OnPolicyBaseRunner:
                 self.actor_buffer.append(ac_bu)
 
             share_observation_space = self.envs.share_observation_space[0]
+            
             self.critic = VCritic(
                 {**algo_args["model"], **algo_args["algo"]},
                 share_observation_space,
@@ -274,8 +275,8 @@ class OnPolicyBaseRunner:
                         # format reward for filename (limit decimals)
                         self.save_with_reward(round(float(avg_reward), 3))
                         print(f"Best reward updated: {self.best_reward} at episode {self.best_reward_episode}. Saving model.")
-                # still save latest checkpoint if desired
-                # self.save()
+                    # still save latest checkpoint if desired
+                    # self.save()
 
             self.after_update()
 

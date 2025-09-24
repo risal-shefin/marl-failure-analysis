@@ -231,8 +231,7 @@ class StarCraft2Env(MultiAgentEnv):
         # Observations and state
         self.obs_own_health = obs_own_health
         self.obs_all_health = obs_all_health
-        self.obs_instead_of_state = True #state_config["use_obs_instead_of_state"]
-        print(f"DEBUG: obs_instead_of_state set to {self.obs_instead_of_state}")
+        self.obs_instead_of_state = state_config["use_obs_instead_of_state"]
         self.obs_last_action = obs_last_action
         self.use_global_state = state_config["use_global_state"]
         self.global_state_include_info = state_config["global_state_include_info"]
@@ -706,6 +705,7 @@ class StarCraft2Env(MultiAgentEnv):
 
             local_obs = self.stacked_local_obs.reshape(self.n_agents, -1)
             global_state = self.stacked_global_state.reshape(self.n_agents, -1)
+
         return local_obs, global_state, rewards, dones, infos, available_actions
 
     def get_agent_action(self, a_id, action):
@@ -714,7 +714,6 @@ class StarCraft2Env(MultiAgentEnv):
         assert avail_actions[action] == 1, "Agent {} cannot perform action {}".format(
             a_id, action
         )
-        
 
         unit = self.get_unit_by_id(a_id)
         tag = unit.tag
@@ -2252,19 +2251,19 @@ class StarCraft2Env(MultiAgentEnv):
         """Returns the random seed used by the environment."""
         self._seed = seed
 
-    def render(self):
-        """Use save_replay instead"""
-        pass
+    # def render(self):
+    #     """Use save_replay instead"""
+    #     return self.renderer.render(mode="rgb_array")
 
-    # def render(self, mode="rgb_array"):
-    #     if self.renderer is None:
-    #         from smac.env.starcraft2.render import StarCraft2Renderer
+    def render(self, mode="rgb_array"):
+        if self.renderer is None:
+            from smac.env.starcraft2.render import StarCraft2Renderer
 
-    #         self.renderer = StarCraft2Renderer(self, mode)
-    #     assert (
-    #         mode == self.renderer.mode
-    #     ), "mode must be consistent across render calls"
-    #     return self.renderer.render(mode)
+            self.renderer = StarCraft2Renderer(self, mode)
+        assert (
+            mode == self.renderer.mode
+        ), "mode must be consistent across render calls"
+        return self.renderer.render(mode)
 
     def _kill_all_units(self):
         """Kill all units on the map."""

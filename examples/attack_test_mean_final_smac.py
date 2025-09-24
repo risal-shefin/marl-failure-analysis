@@ -16,6 +16,33 @@ from matplotlib.patches import Patch
 from datetime import datetime
 import csv
 
+def load_taylor_history_csvs(csv_paths):
+    """
+    Load pre-computed Taylor history from CSV files for all agents.
+    
+    Args:
+        csv_paths: List of paths to CSV files for each agent
+        
+    Returns:
+        dict: {agent_id: {timestep: {'mean': float, 'std_dev': float}}}
+    """
+    taylor_history_data = {}
+    
+    for agent_id, csv_path in enumerate(csv_paths):
+        agent_data = {}
+        with open(csv_path, 'r') as file:
+            reader = csv.DictReader(file)
+            for row in reader:
+                timestep = int(row['timestep'])
+                mean = float(row['mean'])
+                std_dev = float(row['std_dev'])
+                agent_data[timestep] = {'mean': mean, 'std_dev': std_dev}
+        
+        taylor_history_data[agent_id] = agent_data
+        print(f"Loaded Taylor history for agent {agent_id} with {len(agent_data)} timesteps")
+    
+    return taylor_history_data
+
 # -------------- Ploting Starts Here -----------------
 def plot_results(results, results_attacked, atk_agent_id, logdir):
         os.makedirs(logdir, exist_ok=True)
@@ -255,14 +282,101 @@ def plot_contributor_barchart(fault_timeline, total_agents, logdir):
     print(f"Saved contributor bar chart to {out_path}")
 
 ############# PLOTING ENDS HERE #############
-def slice_avail(avail, agent_id):
-    """Extract available actions for a specific agent"""
-    if avail is None:
-        return None
-    first = avail[0]
-    if first is None:
-        return None
-    return avail[:, agent_id]
+
+def plot_taylor_error_with_historical_bounds(results_attacked, taylor_history_data, attacked_steps, atk_agent_id, logdir):
+    """
+    Plot Taylor expansion errors with historical bounds for all agents.
+    
+    Args:
+        results_attacked: List of timesteps, each containing Taylor errors for all agents
+        taylor_history_data: Historical statistics from CSV files
+        attacked_steps: List of timesteps when attacks occurred  
+        atk_agent_id: ID of the attacked agent
+        logdir: Directory to save the plot
+    """
+    n_agents = len(results_attacked[0])  # number of agents
+    n_timesteps = len(results_attacked)  # number of time steps
+    
+    # Create 3 subplots in a row
+    fig, axes = plt.subplots(1, n_agents, figsize=(5*n_agents, 5))
+    fig.suptitle(f'Taylor Error vs Historical Bounds (Attack on Agent {atk_agent_id})', fontsize=16, y=0.95)
+    
+    # Ensure axes is iterable even for single agent case
+    if n_agents == 1:
+        axes = [axes]
+    
+    for i in range(n_agents):
+        ax = axes[i]
+        
+        # Extract time series for agent i
+        timesteps = range(n_timesteps)
+        actual_errors = [results_attacked[t][i] for t in range(n_timesteps)]
+        
+        # Plot historical bounds if available
+        if i in taylor_history_data:
+            historical_data = taylor_history_data[i]
+            historical_means = []
+            historical_stds = []
+            
+            for t in timesteps:
+                if t in historical_data:
+                    historical_means.append(historical_data[t]['mean'])
+                    historical_stds.append(historical_data[t]['std_dev'])
+                else:
+                    # If no historical data for this timestep, use NaN
+                    historical_means.append(np.nan)
+                    historical_stds.append(np.nan)
+            
+            historical_means = np.array(historical_means)
+            historical_stds = np.array(historical_stds)
+            
+            # Calculate upper and lower bounds
+            upper_bound = historical_means + historical_stds
+            lower_bound = historical_means - historical_stds
+            
+            # Plot historical bounds as green filled area
+            valid_mask = ~np.isnan(historical_means)
+            if np.any(valid_mask):
+                ax.fill_between(timesteps, lower_bound, upper_bound, 
+                               color='green', alpha=0.3, label='Historical Mean ± Std')
+                ax.plot(timesteps, historical_means, 'g--', alpha=0.7, linewidth=1, label='Historical Mean')
+        
+        # Plot actual Taylor errors during attack as red curve
+        ax.plot(timesteps, actual_errors, 'r-', linewidth=2, label='Actual Taylor Error')
+        
+        # Mark attacked timesteps with vertical lines
+        if attacked_steps:
+            for attack_step in attacked_steps:
+                if attack_step < n_timesteps:
+                    ax.axvline(x=attack_step, color='orange', linestyle=':', alpha=0.7, linewidth=2)
+            # Add legend entry for attack markers (only once)
+            if attacked_steps and attacked_steps[0] < n_timesteps:
+                ax.axvline(x=attacked_steps[0], color='orange', linestyle=':', alpha=0.7, 
+                          linewidth=2, label='Attack Timesteps')
+        
+        # Highlight the attacked agent
+        if i == atk_agent_id:
+            ax.set_facecolor('#fff2f2')  # Light red background for attacked agent
+            ax.set_title(f'Agent {i} (ATTACKED)', fontweight='bold', color='red')
+        else:
+            ax.set_title(f'Agent {i}')
+            
+        ax.set_xlabel('Timestep')
+        ax.set_ylabel('Taylor Error')
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+        
+        # Set y-axis to start from 0 for better comparison
+        ax.set_ylim(bottom=0)
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
+    plt.savefig(os.path.join(logdir, f'taylor_error_vs_historical_bounds_attack_{atk_agent_id}.png'), 
+                dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved Taylor error vs historical bounds plot to {logdir}")
+
+############# PLOTING ENDS HERE #############
+
 # --------- COMPUTE TAYLOR POLICY ------------------
 def compute_taylor_policy(runner, eval_obs, eval_available_actions, eval_rnn_states):
         # states_tensor = torch.stack([torch.tensor(state_dict[k], dtype=torch.float32, requires_grad=True) for k in state_dict.keys()])
@@ -296,7 +410,7 @@ def compute_taylor_policy(runner, eval_obs, eval_available_actions, eval_rnn_sta
                 retain_graph=True,
             )[0]
 
-            eta_i = 0.001 * grad_i.sign() / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
+            eta_i = 0.01 * grad_i.sign() / torch.max(grad_i.norm(p=2), torch.tensor(1e-6))
 
             
             j_tilde = eval_actions_log_prob + torch.dot(grad_i.flatten(), eta_i.flatten())  #+ 0.5 * torch.dot(eta_i.flatten(), hvp.flatten())
@@ -320,12 +434,21 @@ def compute_taylor_policy(runner, eval_obs, eval_available_actions, eval_rnn_sta
 
         return delta_errors
 # ---------- Evaluation Loop --
-def eval(runner, attack_status=False, attack_agent_id=0,seed=23):
+def slice_avail(avail, agent_id):
+    """Extract available actions for a specific agent"""
+    if avail is None:
+        return None
+    first = avail[0]
+    if first is None:
+        return None
+    return avail[:, agent_id]
+
+def eval(runner, attack_status=False, attack_agent_id=0, seed=23, taylor_history_data=None):
     """Evaluate the model."""
     
     eval_episode = 0
 
-    eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset(seed=seed)
+    eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset()
 
     eval_rnn_states = np.zeros(
         (
@@ -364,7 +487,7 @@ def eval(runner, attack_status=False, attack_agent_id=0,seed=23):
     attacked_steps = []
     taylor_history = [[] for _ in range(runner.num_agents)]
     cnt = 0
-    
+
     while True:
         eval_rnn_states_backup = np.copy(eval_rnn_states)
         eval_actions_collector = []
@@ -383,32 +506,51 @@ def eval(runner, attack_status=False, attack_agent_id=0,seed=23):
 
         eval_actions = np.array(eval_actions_collector).transpose(1, 0, 2)
         
-        if  attack_status:
+        if attack_status:
             # mark attacked step
-            n_actions = runner.eval_envs.action_space[agent_id].n
-            avail_slice = slice_avail(eval_available_actions[:, agent_id], attack_agent_id)
+            # eval_actions[0][attack_agent_id] = runner.eval_envs.action_space[attack_agent_id].sample()  # Random action for attack agent
+            # print(f">>>> ",eval_actions[0][attack_agent_id])
+            n_actions = runner.eval_envs.action_space[attack_agent_id].n
+            avail_slice = slice_avail(eval_available_actions, attack_agent_id)
             if avail_slice is not None and avail_slice[0] is not None:
-                available_actions = np.where(avail_slice[0] > 0.5)[0]
+                        available_actions = np.where(avail_slice[0] > 0.5)[0]
             else:
                 available_actions = list(range(n_actions))
-            action_log_probs, dist_entropy, action_distribution = runner.actor[agent_id].evaluate_actions(
-                            eval_obs[:, agent_id].to(runner.device),
-                            eval_rnn_states[:, agent_id].to(runner.device),
-                            avail_slice.to(runner.device),
-                            eval_masks[:, agent_id].to(runner.device),
-                            slice_avail(eval_available_actions[:, agent_id], attack_agent_id),
+            
+            # exit("Exiting for debug")
+            # print(f"Available actions for agent {attack_agent_id} at timestep {cnt}: {available_actions}")
+            with torch.no_grad():
+                # print(f" [!!!] Attack launched on agent {attack_agent_id} at timestep: {cnt}")
+                obs_tensor = torch.FloatTensor(eval_obs[:, attack_agent_id])
+                rnn_tensor = torch.FloatTensor(eval_rnn_states[:, attack_agent_id])
+                mask_tensor = torch.FloatTensor(eval_masks[:, attack_agent_id])
+                
+                action_log_probs, dist_entropy, action_distribution = runner.actor[attack_agent_id].evaluate_actions(
+                            obs_tensor.to(runner.device),
+                            rnn_tensor.to(runner.device),
+                            available_actions,
+                            mask_tensor.to(runner.device),
+                            slice_avail(eval_available_actions, attack_agent_id),
                             None
                         )
-                        # Extract action probabilities and take argmin
-            q_values = action_log_probs.squeeze()
-            eval_actions[0][attack_agent_id] = runner.eval_envs.action_space[attack_agent_id].sample()  # Random action for attack agent
+                q_values = action_log_probs.squeeze()
+                if q_values.numel() == 1 or len(available_actions) == 1:
+                    # print(f"Agent {attack_agent_id} appears to be dead or has only one action. Using available action.")
+                    eval_actions[0][attack_agent_id] = available_actions[0]
+                else:
+                    # Get the index of the worst action within the available actions
+                    worst_action_idx = torch.argmin(q_values).item()
+                    # Map back to the actual action ID from available actions
+                    worst_action = available_actions[worst_action_idx]
+                    eval_actions[0][attack_agent_id] = worst_action
+                    print(f"Agent {attack_agent_id} worst action under current policy: {worst_action}")
             attacked_steps.append(cnt)
 
 
         # calculating taylor policy
         delta_errors = compute_taylor_policy(runner, eval_obs, eval_available_actions, eval_rnn_states_backup)
-        results_frob_norms = compute_frob_norms(runner, eval_obs, 1, eval_rnn_states_critic, eval_masks)
-        results_sec_dir_derivatives = compute_2nd_ord_dir_derivatives(runner, eval_obs, 1, eval_rnn_states_critic, eval_masks)
+        # results_frob_norms = compute_frob_norms(runner, eval_obs, 1, eval_rnn_states_critic, eval_masks)
+        # results_sec_dir_derivatives = compute_2nd_ord_dir_derivatives(runner, eval_obs, 1, eval_rnn_states_critic, eval_masks)
         # pairwise frob matrix for cascading analysis
         pairwise_frobs = compute_pairwise_frob_norms(runner, eval_obs, eval_rnn_states_critic, eval_masks)
         frob_norms_matrix_history.append(pairwise_frobs)
@@ -418,17 +560,26 @@ def eval(runner, attack_status=False, attack_agent_id=0,seed=23):
             taylor_approx_error = np.mean(result_deques[i])
             taylor_history[i].append(taylor_approx_error)
 
-            frob_norms_deques[i].append(results_frob_norms[i])
-            sec_dir_derivatives_deques[i].append(results_sec_dir_derivatives[i])
+            # frob_norms_deques[i].append(results_frob_norms[i])
+            # sec_dir_derivatives_deques[i].append(results_sec_dir_derivatives[i])
 
-            # Detect anomalies based on Taylor approximation error
-            if i not in fault_first_detected and len(taylor_history[i]) >= 10:
-                prev_mean = float(np.mean(taylor_history[i][:-1]))
-                prev_std = float(np.std(taylor_history[i][:-1]))
-                if prev_std < 1e-6:
-                    prev_std = 1e-6
-                if abs(taylor_approx_error - prev_mean) > 2.0 * prev_std:
+            # Detect anomalies based on Taylor approximation error using pre-computed history
+            if i not in fault_first_detected and cnt in taylor_history_data[i]:
+                historical_data = taylor_history_data[i][cnt]
+                historical_mean = historical_data['mean']
+                historical_std = historical_data['std_dev']
+                
+                # Ensure minimum std deviation to avoid division by zero
+                if historical_std < 1e-6:
+                    historical_std = 1e-6
+                
+                # Check if current error is outside historical bounds (mean ± std_dev)
+                lower_bound = historical_mean - historical_std
+                upper_bound = historical_mean + historical_std
+                
+                if taylor_approx_error < lower_bound or taylor_approx_error > upper_bound:
                     print(f" [!!!] Anomaly detected for agent {i} at timestep: {cnt}. Taylor Appx. Error: {taylor_approx_error}")
+                    print(f"     >> Historical bounds: [{lower_bound:.6f}, {upper_bound:.6f}], Mean: {historical_mean:.6f}, Std: {historical_std:.6f}")
                     fault_first_detected[i] = cnt
                     # Cascading Impact Analysis
                     prev_faults = [(f, tf) for f, tf in fault_first_detected.items() if f != i and tf < cnt]
@@ -448,8 +599,8 @@ def eval(runner, attack_status=False, attack_agent_id=0,seed=23):
                     })
 
         taylor_error_list.append([np.mean(list(result_deques[j])) for j in range(runner.num_agents)])
-        frob_norms_list.append([np.mean(frob_norms_deques[i]) for i in range(runner.num_agents)])
-        sec_dir_derivatives.append([np.mean(sec_dir_derivatives_deques[i]) for i in range(runner.num_agents)])
+        # frob_norms_list.append([np.mean(frob_norms_deques[i]) for i in range(runner.num_agents)])
+        # sec_dir_derivatives.append([np.mean(sec_dir_derivatives_deques[i]) for i in range(runner.num_agents)])
 
         (
             eval_obs,
@@ -505,7 +656,8 @@ def eval(runner, attack_status=False, attack_agent_id=0,seed=23):
 
         cnt += 1
     
-    return taylor_error_list, frob_norms_list, sec_dir_derivatives, frob_norms_matrix_history, fault_timeline, attacked_steps
+    # return taylor_error_list, frob_norms_list, sec_dir_derivatives, frob_norms_matrix_history, fault_timeline, attacked_steps
+    return taylor_error_list, None, None, frob_norms_matrix_history, fault_timeline, attacked_steps
 
 def compute_pairwise_frob_norms(runner, eval_obs, eval_rnn_states_critic, eval_masks):
     """Compute Frobenius norms of cross-agent Hessian blocks for all (i, j).
@@ -565,7 +717,7 @@ def compute_frob_norms(runner, eval_obs, vulnerable_agent_id, eval_rnn_states_cr
 
     # Create separate tensors for each agent's observations with gradient tracking
     agent_obs_tensors = []
-    obs_dim = runner.envs.observation_space[0].shape[0]  # Assuming all agents have same obs dim
+    # obs_dim = runner.envs.observation_space[0].shape[0]  # Assuming all agents have same obs dim
     n_agents = runner.num_agents
 
     for i in range(n_agents):
@@ -903,14 +1055,29 @@ def main():
     parser.add_argument(
         "--reward",
         type=float,
-        default=-5.14,
+        default=-79.879,
         help="Reward value to restore the model."
     )
     parser.add_argument(
         "--filepath",
         type=str,
-        default="/deac/csc/vanbastelaerGrp/guptd23/RL_Project/HARL/examples/results/pettingzoo_mpe/simple_spread_v2-discrete/happo/installtest/seed-00042-2025-08-03-20-41-48/models",
+        default="/deac/csc/vanbastelaerGrp/guptd23/RL_Project/HARL/examples/results/smac/3s_vs_3z/hatrpo/smac_3s_vs_3z/seed-00001-2025-09-03-22-49-28/models",
         help="Filepath to restore the model from."
+    )
+    parser.add_argument(
+        "--seed", type=int, default=23, help="Random seed."
+    )
+    parser.add_argument(
+        "--taylor_csv_agent0", type=str, default="", help="Path to CSV file with pre-computed Taylor history for agent 0."
+    )
+    parser.add_argument(
+        "--taylor_csv_agent1", type=str, default="", help="Path to CSV file with pre-computed Taylor history for agent 1."
+    )
+    parser.add_argument(
+        "--taylor_csv_agent2", type=str, default="", help="Path to CSV file with pre-computed Taylor history for agent 2."
+    )
+    parser.add_argument(
+        "--save_dir", type=str, default=None, help="Directory to save results."
     )
     args, unparsed_args = parser.parse_known_args()
 
@@ -933,6 +1100,7 @@ def main():
         env_args = all_config["env_args"]
     else:  # load config from corresponding yaml file
         algo_args, env_args = get_defaults_yaml_args(args["algo"], args["env"])
+    algo_args["seed"]["seed"]=args["seed"]
     update_args(unparsed_dict, algo_args, env_args)  # update args from command line
 
     if args["env"] == "dexhands":
@@ -945,7 +1113,7 @@ def main():
 
     # start training
     from harl.runners import RUNNER_REGISTRY
-
+# 
     algo_args['eval']['n_eval_rollout_threads'] = 1
     algo_args['eval']['eval_episodes'] = 1
     runner = RUNNER_REGISTRY[args["algo"]](args, algo_args, env_args)
@@ -954,29 +1122,45 @@ def main():
     
     attack_agent_id = args['attack_id']
     print(f"=== Evaluating with attack on agent {attack_agent_id} ===")
+    
+    # Load pre-computed Taylor history CSV files
+    csv_paths = [
+        args.get('taylor_csv_agent0', ''),
+        args.get('taylor_csv_agent1', ''), 
+        args.get('taylor_csv_agent2', '')
+    ]
+    taylor_history_data = load_taylor_history_csvs(csv_paths)
+    
     # Run evaluation without attack
-    # results_normal, frob_norms_normal, sec_dir_derivatives_normal, frob_norms_matrix_history_normal, fault_timeline_normal, attacked_steps_normal = eval(runner, False, attack_agent_id)
+    # results_normal, frob_norms_normal, sec_dir_derivatives_normal, frob_norms_matrix_history_normal, fault_timeline_normal, attacked_steps_normal = eval(runner, False, attack_agent_id, taylor_history_data=taylor_history_data)
     # Run evaluation with attack
-    results_attacked, frob_norms_atk, sec_dir_derivatives_atk, frob_norms_matrix_history_atk, fault_timeline_atk, attacked_steps_atk = eval(runner, attack_status=True, attack_agent_id=attack_agent_id)
+    results_attacked, frob_norms_atk, sec_dir_derivatives_atk, frob_norms_matrix_history_atk, fault_timeline_atk, attacked_steps_atk = eval(runner, attack_status=True, attack_agent_id=attack_agent_id, seed=args['seed'], taylor_history_data=taylor_history_data)
 
     log_dir = algo_args['attack']['log_dir']
     alg_name = algo_args['attack']['algo_name']
     date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-    log_path = os.path.join(log_dir, alg_name, date)
+    log_path = os.path.join(args['save_dir'], str(args['attack_id']), date)
+    # if args['save_dir'] is not None:
+    #     log_path = os.path.join(args['save_dir'], args['attack_id'], date)
+    # else:
+    #     log_path = os.path.join(log_dir, alg_name, date)
     os.makedirs(log_path, exist_ok=True)
-
+    print(f"Logging results to {log_path}")
     # plot_results(results_normal, results_attacked, atk_agent_id=attack_agent_id, logdir=log_path)
     # plot_frobs(frob_norms_normal, frob_norms_atk, attacked_steps_atk, attack_agent_id, log_path)
     # plot_sec_dir_derivatives(sec_dir_derivatives_normal, sec_dir_derivatives_atk, attacked_steps_atk, attack_agent_id, log_path)
 
     # Save matrices and include attacked steps for attacked run
     save_matrix_to_files(results_attacked, attacked_steps_atk, attack_agent_id, runner.num_agents, log_path, f'happo_taylor_error_atk_{attack_agent_id}.csv')
-    save_matrix_to_files(frob_norms_atk, attacked_steps_atk, attack_agent_id, runner.num_agents, log_path, f'happo_frobenius_norms_atk_{attack_agent_id}.csv')
-    save_matrix_to_files(sec_dir_derivatives_atk, attacked_steps_atk, attack_agent_id, runner.num_agents, log_path, f'happo_sec_dir_derivatives_atk_{attack_agent_id}.csv')
+    # save_matrix_to_files(frob_norms_atk, attacked_steps_atk, attack_agent_id, runner.num_agents, log_path, f'happo_frobenius_norms_atk_{attack_agent_id}.csv')
+    # save_matrix_to_files(sec_dir_derivatives_atk, attacked_steps_atk, attack_agent_id, runner.num_agents, log_path, f'happo_sec_dir_derivatives_atk_{attack_agent_id}.csv')
 
     # Plot fault timeline and contributor charts for attacked run
     plot_fault_timeline(fault_timeline_atk, runner.num_agents, log_path)
     plot_contributor_barchart(fault_timeline_atk, runner.num_agents, log_path)
+    
+    # Plot Taylor error vs historical bounds
+    plot_taylor_error_with_historical_bounds(results_attacked, taylor_history_data, attacked_steps_atk, attack_agent_id, log_path)
 
     # runner.run()
     runner.close()

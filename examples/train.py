@@ -40,6 +40,7 @@ def main():
             "dexhands",
             "smacv2",
             "lag",
+            "vms",
         ],
         help="Environment name. Choose from: smac, mamujoco, pettingzoo_mpe, gym, football, dexhands, smacv2, lag.",
     )

@@ -71,6 +71,19 @@ class VCritic:
         """
         values, rnn_states_critic = self.critic(cent_obs, rnn_states_critic, masks)
         return values, rnn_states_critic
+    
+    def get_values_with_grad(self, cent_obs, rnn_states_critic, masks):
+        """Get value function predictions.
+        Args:
+            cent_obs: (np.ndarray) centralized input to the critic.
+            rnn_states_critic: (np.ndarray) if critic is RNN, RNN states for critic.
+            masks: (np.ndarray) denotes points at which RNN states should be reset.
+        Returns:
+            values: (torch.Tensor) value function predictions.
+            rnn_states_critic: (torch.Tensor) updated critic network RNN states.
+        """
+        values, rnn_states_critic = self.critic(cent_obs, rnn_states_critic, masks, False)
+        return values, rnn_states_critic
 
     def cal_value_loss(
         self, values, value_preds_batch, return_batch, value_normalizer=None

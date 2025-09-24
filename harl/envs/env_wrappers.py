@@ -366,3 +366,7 @@ class ShareDummyVecEnv(ShareVecEnv):
                 env.render()
         else:
             raise NotImplementedError
+    
+    def save_replay(self):
+        for env in self.envs:
+            env.save_replay()

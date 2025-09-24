@@ -33,17 +33,31 @@ def get_shape_from_act_space(act_space):
     Args:
         act_space: (gym.spaces) action space
     Returns:
-        act_shape: (tuple) action shape
+        act_shape: (int) flattened action dimension expected by buffers/policies
     """
-    if act_space.__class__.__name__ == "Discrete":
-        act_shape = 1
-    elif act_space.__class__.__name__ == "MultiDiscrete":
-        act_shape = act_space.shape[0]
-    elif act_space.__class__.__name__ == "Box":
-        act_shape = act_space.shape[0]
-    elif act_space.__class__.__name__ == "MultiBinary":
-        act_shape = act_space.shape[0]
-    return act_shape
+    name = act_space.__class__.__name__
+    if name == "Discrete":
+        return 1
+    elif name == "MultiDiscrete":
+        return act_space.shape[0]
+    elif name == "Box":
+        return act_space.shape[0]
+    elif name == "MultiBinary":
+        return act_space.shape[0]
+    elif name == "Tuple":
+        total = 0
+        # Flatten subspaces similar to MultiDiscrete handling
+        for sp in getattr(act_space, "spaces", []):
+            sub = sp.__class__.__name__
+            if sub == "Discrete":
+                total += 1
+            elif sub in ("MultiDiscrete", "MultiBinary", "Box"):
+                total += sp.shape[0]
+            else:
+                raise NotImplementedError(f"Unsupported action subspace in Tuple: {sub}")
+        return total
+    else:
+        raise NotImplementedError(f"Unsupported action space type: {name}")
 
 
 def make_train_env(env_name, seed, n_threads, env_args):
@@ -79,7 +93,7 @@ def make_train_env(env_name, seed, n_threads, env_args):
                     "simple_spread_v2",
                     "simple_reference_v2",
                     "simple_speaker_listener_v3",
-                    "multiwalker_v9"
+                    "simple_spread_v3",
                 ], "only cooperative scenarios in MPE are supported"
                 env = PettingZooMPEEnv(env_args)
             elif env_name == "gym":
@@ -94,6 +108,10 @@ def make_train_env(env_name, seed, n_threads, env_args):
                 from harl.envs.lag.lag_env import LAGEnv
 
                 env = LAGEnv(env_args)
+            elif env_name == "vms":
+                from harl.envs.vmas.vmas_env import VMASEnv
+
+                env = VMASEnv(env_args)
             else:
                 print("Can not support the " + env_name + "environment.")
                 raise NotImplementedError
@@ -147,10 +165,15 @@ def make_eval_env(env_name, seed, n_threads, env_args):
                 from harl.envs.lag.lag_env import LAGEnv
 
                 env = LAGEnv(env_args)
+            elif env_name == "vms":
+                from harl.envs.vmas.vmas_env import VMASEnv
+
+                env = VMASEnv(env_args)
             else:
                 print("Can not support the " + env_name + "environment.")
                 raise NotImplementedError
-            env.seed(seed * 50000 + rank * 10000)
+            # env.seed(seed * 50000 + rank * 10000)
+            env.seed(seed)
             return env
 
         return init_env
@@ -220,6 +243,11 @@ def make_render_env(env_name, seed, env_args):
 
         env = LAGEnv(env_args)
         env.seed(seed * 60000)
+    elif env_name == "vms":
+        from harl.envs.vmas.vmas_env import VMASEnv
+
+        env = VMASEnv({**env_args, "render_mode": "human"})
+        env.seed(seed * 60000)
     else:
         print("Can not support the " + env_name + "environment.")
         raise NotImplementedError
@@ -257,4 +285,6 @@ def get_num_agents(env, env_args, envs):
     elif env == "dexhands":
         return envs.n_agents
     elif env == "lag":
+        return envs.n_agents
+    elif env == "vms":
         return envs.n_agents

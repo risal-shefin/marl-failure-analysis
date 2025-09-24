@@ -307,6 +307,252 @@ def compute_second_order_observation_influences_happo(runner, obs, rnn_states_cr
     return results
 
 
+############# THREAT DETECTION FUNCTIONS #############
+
+def detect_threats_top_k(pairwise_frobs_history, attacked_agent_id, top_k=2):
+    """
+    Detect threats by analyzing if the attacked agent appears in top-k Frobenius values.
+    
+    Args:
+        pairwise_frobs_history: List of N x N matrices, one per timestep
+        attacked_agent_id: ID of the attacked agent
+        top_k: Number of top agents to consider
+        
+    Returns:
+        threat_data: Dictionary with threat detection results
+    """
+    if not pairwise_frobs_history:
+        return {
+            'timestamp': [],
+            'agent_id': [],
+            'attacked_agent_rank': [],
+            'is_threat': [],
+            'top_k_agents': [],
+            'threat_timesteps': set()
+        }
+    
+    n_agents = len(pairwise_frobs_history[0])
+    n_timesteps = len(pairwise_frobs_history)
+    
+    threat_data = {
+        'timestamp': [],
+        'agent_id': [],
+        'attacked_agent_rank': [],
+        'is_threat': [],
+        'top_k_agents': [],
+        'threat_timesteps': set()
+    }
+    
+    # For each timestamp
+    for t in range(n_timesteps):
+        frob_matrix = pairwise_frobs_history[t]
+        
+        # For each agent i (check if attacked agent influences agent i)
+        for i in range(n_agents):
+            # Get Frobenius values for how all agents influence agent i
+            agent_i_influences = [(j, frob_matrix[i][j]) for j in range(n_agents)]
+            
+            # Sort by Frobenius values in descending order
+            agent_i_influences.sort(key=lambda x: x[1], reverse=True)
+            
+            # Get top-k agents
+            top_k_agents = [agent_id for agent_id, _ in agent_i_influences[:top_k]]
+            
+            # Check if attacked agent is in top-k
+            is_threat = attacked_agent_id in top_k_agents
+            attacked_agent_rank = -1
+            
+            if is_threat:
+                # Find rank of attacked agent
+                for rank, (agent_id, _) in enumerate(agent_i_influences):
+                    if agent_id == attacked_agent_id:
+                        attacked_agent_rank = rank + 1  # 1-indexed
+                        break
+                threat_data['threat_timesteps'].add(t)
+            
+            # Store results
+            threat_data['timestamp'].append(t)
+            threat_data['agent_id'].append(i)
+            threat_data['attacked_agent_rank'].append(attacked_agent_rank)
+            threat_data['is_threat'].append(is_threat)
+            threat_data['top_k_agents'].append(top_k_agents.copy())
+    
+    return threat_data
+
+def save_threat_data_csv(threat_data, attacked_agent_id, top_k, logdir, window_str):
+    """
+    Save threat detection results to CSV file.
+    
+    Args:
+        threat_data: Dictionary with threat detection results
+        attacked_agent_id: ID of the attacked agent
+        top_k: Number of top agents considered
+        logdir: Directory to save the file
+        window_str: String describing the attack window
+    """
+    filepath = os.path.join(logdir, "raise_flag.csv")
+    
+    # Create header
+    header = [
+        "timestamp", 
+        "agent_id", 
+        "attacked_agent_id",
+        "attacked_agent_rank", 
+        "is_threat", 
+        f"top_{top_k}_agents"
+    ]
+    
+    with open(filepath, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(header)
+        
+        # Write data
+        for i in range(len(threat_data['timestamp'])):
+            row = [
+                threat_data['timestamp'][i],
+                threat_data['agent_id'][i],
+                attacked_agent_id,
+                threat_data['attacked_agent_rank'][i] if threat_data['is_threat'][i] else 'N/A',
+                1 if threat_data['is_threat'][i] else 0,
+                f"[{', '.join(map(str, threat_data['top_k_agents'][i]))}]"
+            ]
+            writer.writerow(row)
+    
+    # Print summary
+    total_entries = len(threat_data['timestamp'])
+    threat_entries = sum(threat_data['is_threat'])
+    threat_timesteps = len(threat_data['threat_timesteps'])
+    
+    print(f"Saved threat detection results to {filepath}")
+    print(f"Total entries: {total_entries}")
+    print(f"Threat entries: {threat_entries}")
+    print(f"Unique threat timesteps: {threat_timesteps}")
+
+def plot_threat_analysis_combined(fault_timeline, threat_data, pairwise_frobs_history, attacked_agent_id, total_agents, top_k, logdir):
+    """
+    Create combined visualization with fault timeline (top) and threat analysis (bottom).
+    
+    Args:
+        fault_timeline: List of fault events
+        threat_data: Dictionary with threat detection results
+        pairwise_frobs_history: List of N x N Frobenius matrices per timestep
+        attacked_agent_id: ID of the attacked agent
+        total_agents: Total number of agents
+        top_k: Number of top agents considered
+        logdir: Directory to save the plot
+    """
+    if not pairwise_frobs_history:
+        print("No Frobenius history data available for threat analysis plot.")
+        return
+    
+    n_timesteps = len(pairwise_frobs_history)
+    threat_timesteps = threat_data['threat_timesteps']
+    
+    # Create figure with 2 rows: fault timeline (top) and threat analysis (bottom)
+    fig = plt.figure(figsize=(15, 10))
+    
+    # Get consistent agent colors
+    agent_colors = get_agent_colors(total_agents)
+    
+    # === TOP ROW: FAULT TIMELINE ===
+    if len(fault_timeline) > 0:
+        # Create subplot for fault timeline (takes up top 30% of figure)
+        ax_fault = fig.add_subplot(2, 1, 1)
+        ax_fault.set_title('Fault Detection Timeline', fontsize=14, fontweight='bold', pad=20)
+        
+        # Plot fault timeline similar to existing function
+        for i, event in enumerate(fault_timeline):
+            fault_time = event['t']
+            fault_agent = event['agent']
+            ax_fault.scatter(fault_time, fault_agent, color='red', s=100, marker='x', linewidth=3)
+            ax_fault.annotate(f'Fault t={fault_time}', 
+                            xy=(fault_time, fault_agent),
+                            xytext=(10, 10), textcoords='offset points',
+                            fontsize=10, fontweight='bold', color='red')
+        
+        ax_fault.set_xlim(-1, n_timesteps)
+        ax_fault.set_ylim(-0.5, total_agents - 0.5)
+        ax_fault.set_xlabel('Timestep')
+        ax_fault.set_ylabel('Agent ID')
+        ax_fault.grid(True, alpha=0.3)
+        
+        # Add agent labels on y-axis
+        ax_fault.set_yticks(range(total_agents))
+        ax_fault.set_yticklabels([f'Agent {i}' for i in range(total_agents)])
+    else:
+        # No faults detected, create empty subplot
+        ax_fault = fig.add_subplot(2, 1, 1)
+        ax_fault.text(0.5, 0.5, 'No Faults Detected', 
+                     horizontalalignment='center', verticalalignment='center',
+                     transform=ax_fault.transAxes, fontsize=14)
+        ax_fault.set_title('Fault Detection Timeline', fontsize=14, fontweight='bold')
+    
+    # === BOTTOM ROW: THREAT ANALYSIS ===
+    # Create 3 subplots for agents 0, 1, 2
+    gs_bottom = fig.add_gridspec(1, 3, top=0.45, bottom=0.05, hspace=0.3, wspace=0.3)
+    
+    for agent_i in range(min(3, total_agents)):  # Show up to 3 agents
+        ax = fig.add_subplot(gs_bottom[0, agent_i])
+        
+        # Extract Frobenius time series for agent i (how others influence agent i)
+        timesteps = range(n_timesteps)
+        
+        # Plot Frobenius values for each influencing agent
+        for agent_j in range(total_agents):
+            frob_series = [pairwise_frobs_history[t][agent_i][agent_j] for t in range(n_timesteps)]
+            
+            # Use different line styles for attacked agent vs others
+            if agent_j == attacked_agent_id:
+                ax.plot(timesteps, frob_series, color='red', linewidth=3, 
+                       linestyle='-', alpha=0.9, label=f'Agent {agent_j} (Attacked)', marker='o', markersize=2)
+            else:
+                ax.plot(timesteps, frob_series, color=agent_colors[agent_j], linewidth=2, 
+                       linestyle='--', alpha=0.7, label=f'Agent {agent_j}')
+        
+        # Highlight threat timesteps with vertical bars
+        for t in threat_timesteps:
+            if t < n_timesteps:
+                # Check if this specific agent had a threat at this timestep
+                agent_threats_at_t = [
+                    idx for idx, (ts, ai) in enumerate(zip(threat_data['timestamp'], threat_data['agent_id']))
+                    if ts == t and ai == agent_i and threat_data['is_threat'][idx]
+                ]
+                
+                if agent_threats_at_t:
+                    ax.axvline(x=t, color='orange', alpha=0.6, linewidth=2, linestyle=':')
+                    
+                    # Add text annotation for the first few threats to avoid clutter
+                    if len([tt for tt in threat_timesteps if tt <= t]) <= 3:
+                        ax.text(t, ax.get_ylim()[1] * 0.9, f'Threat\nt={t}', 
+                               ha='center', va='top', fontsize=8, 
+                               bbox=dict(boxstyle='round,pad=0.3', facecolor='orange', alpha=0.7))
+        
+        # Styling
+        if agent_i == attacked_agent_id:
+            ax.set_facecolor('#fff8f8')  # Light red background for attacked agent
+            ax.set_title(f'Agent {agent_i} (ATTACKED)\nTop-{top_k} Threat Detection', 
+                        fontweight='bold', color='red', fontsize=12)
+        else:
+            ax.set_title(f'Agent {agent_i}\nTop-{top_k} Threat Detection', fontsize=12)
+        
+        ax.set_xlabel('Timestep')
+        ax.set_ylabel('Frobenius Norm')
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper right', fontsize=8)
+        ax.set_xlim(0, n_timesteps-1)
+    
+    # Overall title
+    fig.suptitle(f'Fault Detection and Top-{top_k} Threat Analysis (Attack on Agent {attacked_agent_id})', 
+                 fontsize=16, fontweight='bold', y=0.95)
+    
+    # Save plot
+    out_path = os.path.join(logdir, f'threat_analysis_combined_attack_{attacked_agent_id}_top{top_k}.png')
+    plt.savefig(out_path, dpi=300, bbox_inches='tight', pad_inches=0.2)
+    plt.show()
+    print(f"Saved combined threat analysis plot to {out_path}")
+
+############# THREAT DETECTION FUNCTIONS END #############
+
 # -------------- Ploting Starts Here -----------------
 def plot_results(results, results_attacked, atk_agent_id, logdir):
         os.makedirs(logdir, exist_ok=True)
@@ -701,551 +947,6 @@ def plot_pairwise_observation_influences(observation_influences_normal, observat
     plt.show()
     print(f"Saved pairwise observation influences plot to {out_path}")
 
-
-def plot_fault_timeline_action_influences(fault_timeline, action_influences_matrix_history, total_agents, logdir):
-    """
-    Plot fault timeline with action influence contributors instead of Frobenius norm influences.
-    Each fault event shows the action influences from other agents as contributors.
-    Additionally flags timesteps where faulty agents are among top-k influencers on non-faulty agents.
-    """
-    if len(fault_timeline) == 0:
-        print("No faults detected; skipping action influences fault timeline plot.")
-        return
-
-    # Parameters for top-k influence detection
-    k_top = 2  # Look for faulty agents in top-2 influencers
-    
-    # Create a mapping of when each agent was first detected as faulty
-    fault_detection_times = {}  # agent_id -> timestep when first detected as faulty
-    for event in fault_timeline:
-        if event['agent'] not in fault_detection_times:
-            fault_detection_times[event['agent']] = event['t']
-    
-    # Find the last fault detection timestep to stop flagging after this point
-    last_fault_detection_time = max(fault_detection_times.values()) if fault_detection_times else -1
-    
-    # Find the first fault detection timestep for mean calculation
-    first_fault_detection_time = min(fault_detection_times.values()) if fault_detection_times else -1
-    
-    # Find the first faulty agent (patient zero) - the one detected earliest
-    first_faulty_agent = None
-    if fault_detection_times:
-        first_faulty_agent = min(fault_detection_times.keys(), key=lambda agent: fault_detection_times[agent])
-    
-    # Create extended timeline with additional flagged timesteps
-    extended_timeline = []
-    
-    # Track already flagged (faulty_agent, target_agent) pairs to avoid duplicates
-    flagged_pairs = set()  # Set of (faulty_agent_id, target_agent_id) tuples
-    
-    # Add original fault detection events with exact timestep action influences (not mean)
-    for event in fault_timeline:
-        # Use exact timestep action influences for fault detection events (like original version)
-        faulty_agent = event['agent']
-        fault_timestep = event['t']
-        
-        # Get action influences at the exact fault timestep
-        if fault_timestep < len(action_influences_matrix_history):
-            action_influences = action_influences_matrix_history[fault_timestep][faulty_agent]
-            
-            # Create contributors dict from action influences (include all agents including self)
-            contribs = {}
-            for j in range(total_agents):
-                contribs[j] = abs(action_influences[j])  # Use absolute value of influence
-        else:
-            contribs = {}
-        
-        extended_timeline.append({
-            'type': 'fault_detection',
-            'agent': event['agent'],
-            't': event['t'],
-            'contribs': contribs,  # Use exact timestep influences, not mean
-            'description': f"Faulty agent {event['agent']}"
-        })
-    
-    # Find additional timesteps where faulty agents are top-k influencers on non-faulty agents
-    # Only check timesteps up to (but not including) the last fault detection
-    for t in range(min(len(action_influences_matrix_history), last_fault_detection_time)):
-        influences_at_t = action_influences_matrix_history[t]
-        
-        # Get the set of agents that are considered faulty at timestep t
-        faulty_agents_at_t = set()
-        for agent_id, detection_time in fault_detection_times.items():
-            if t >= detection_time:  # Only consider agent faulty from detection time onwards
-                faulty_agents_at_t.add(agent_id)
-        
-        # Skip if no agents are faulty at this timestep
-        if not faulty_agents_at_t:
-            continue
-        
-        # For each non-faulty agent at timestep t, check if any faulty agent is in top-k influencers
-        for non_faulty_agent in range(total_agents):
-            # Check if this agent is faulty at timestep t
-            is_faulty_at_t = non_faulty_agent in faulty_agents_at_t
-            if is_faulty_at_t:
-                continue  # Skip agents that are faulty at this timestep
-                
-            # Get influences on this non-faulty agent and rank them
-            agent_influences = [(j, abs(influences_at_t[non_faulty_agent][j])) for j in range(total_agents)]
-            # Sort by influence magnitude (descending)
-            ranked_influences = sorted(agent_influences, key=lambda x: x[1], reverse=True)
-            
-            # Check if any faulty agent is in top-k
-            top_k_agents = [agent_id for agent_id, _ in ranked_influences[:k_top]]
-            faulty_in_top_k = [agent_id for agent_id in top_k_agents if agent_id in faulty_agents_at_t]
-            
-            if faulty_in_top_k:
-                # Check if any of the faulty agents in top-k have already been flagged for this target
-                new_faulty_influencers = []
-                for faulty_agent in faulty_in_top_k:
-                    pair = (faulty_agent, non_faulty_agent)
-                    if pair not in flagged_pairs:
-                        new_faulty_influencers.append(faulty_agent)
-                        flagged_pairs.add(pair)  # Mark this pair as flagged
-                
-                # Only create an event if there are new faulty influencers to report
-                if new_faulty_influencers:
-                    # Check if this exact timestep+target combination is already in timeline
-                    already_exists = any(event['t'] == t and event.get('target_agent') == non_faulty_agent 
-                                       for event in extended_timeline)
-                    if not already_exists:
-                        # Use exact timestep action influences for top-k influence events (same as fault detection)
-                        if t < len(action_influences_matrix_history):
-                            action_influences = action_influences_matrix_history[t][non_faulty_agent]
-                            
-                            # Create contributors dict from action influences (include all agents including self)
-                            contribs = {}
-                            for j in range(total_agents):
-                                contribs[j] = abs(action_influences[j])  # Use absolute value of influence
-                        else:
-                            contribs = {}
-                        
-                        faulty_list = ', '.join(map(str, new_faulty_influencers))
-                        extended_timeline.append({
-                            'type': 'top_k_influence',
-                            'agent': non_faulty_agent,  # The affected agent
-                            'faulty_influencers': new_faulty_influencers,
-                            't': t,
-                            'contribs': contribs,  # Use exact timestep influences, same as fault detection
-                            'target_agent': non_faulty_agent,
-                            "description": f"Faulty agent {faulty_list} is among the top-{k_top} influencers of Agent {non_faulty_agent}"
-                        })
-    
-    # Sort extended timeline by timestep
-    extended_timeline.sort(key=lambda x: x['t'])
-    
-    if len(extended_timeline) == 0:
-        print("No events to display in action influences fault timeline.")
-        return
-    
-    k = len(extended_timeline)
-    fig = plt.figure(figsize=(max(8, 3*k), 6))  # Increased height for better visibility
-    gs = fig.add_gridspec(
-        3, k,
-        height_ratios=[1.0, 2, 0.1],
-        hspace=0.15
-    )
-
-    cmap = plt.get_cmap('tab20')
-    agent_colors = {i: cmap(i % 20) for i in range(total_agents)}
-
-    # --- Timeline axis (top row) ---
-    ax_timeline = fig.add_subplot(gs[0, :])
-    ax_timeline.axis('off')
-
-    arrow_y = 0.5
-    ax_timeline.annotate(
-        '', xy=(1, arrow_y), xytext=(0, arrow_y),
-        arrowprops=dict(arrowstyle='-|>', lw=2, color='gray'),
-        xycoords='axes fraction', textcoords='axes fraction'
-    )
-
-    # Milestones
-    for i, event in enumerate(extended_timeline):
-        frac_x = (i + 0.5) / k
-
-        # Different markers for different event types
-        if event['type'] == 'fault_detection':
-            marker_color = 'darkred'
-            marker_size = 12
-        else:  # top_k_influence
-            marker_color = 'orange'
-            marker_size = 10
-
-        # Circle marker
-        ax_timeline.plot(frac_x, arrow_y, 'o', color=marker_color, markersize=marker_size, 
-                        transform=ax_timeline.transAxes)
-
-        # Event description above (with line wrapping for long descriptions)
-        description = event['description']
-        if len(description) > 25:  # Wrap long descriptions
-            words = description.split()
-            lines = []
-            current_line = []
-            for word in words:
-                if len(' '.join(current_line + [word])) <= 25:
-                    current_line.append(word)
-                else:
-                    if current_line:
-                        lines.append(' '.join(current_line))
-                        current_line = [word]
-                    else:
-                        lines.append(word)
-            if current_line:
-                lines.append(' '.join(current_line))
-            description = '\n'.join(lines)
-
-        ax_timeline.text(frac_x, arrow_y + 0.15,
-                         description,
-                         ha='center', va='bottom',
-                         fontsize=9, fontweight='bold',
-                         transform=ax_timeline.transAxes)
-
-        # Timestep label below
-        ax_timeline.text(frac_x, arrow_y - 0.15,
-                         f"t = {event['t']}",
-                         ha='center', va='top',
-                         fontsize=10, color='darkblue',
-                         transform=ax_timeline.transAxes)
-
-    # --- Contributor charts (middle row) ---
-    for col, event in enumerate(extended_timeline):
-        ax = fig.add_subplot(gs[1, col])
-        
-        contribs = event.get('contribs', {})
-
-        # Check if this is the first faulty agent (patient zero) and a fault detection event
-        if (event['type'] == 'fault_detection' and 
-            event['agent'] == first_faulty_agent):
-            ax.axis('off')
-            ax.text(0.5, 0.5, 'Patient Zero',
-                    ha='center', va='center', fontsize=12, fontweight='bold', 
-                    style='italic', color='darkred')
-        elif len(contribs) == 0:
-            ax.axis('off')
-            ax.text(0.5, 0.5, 'No Data',
-                    ha='center', va='center', fontsize=10, style='italic')
-        else:
-            vals = np.array(list(contribs.values()), dtype=float)
-            if vals.sum() > 0:
-                vals /= vals.sum()  # Normalize to sum to 1
-            colors = [agent_colors[a] for a in contribs.keys()]
-
-            wedges, _, autotexts = ax.pie(
-                vals, autopct='%1.1f%%', startangle=90, colors=colors,
-                wedgeprops=dict(width=0.35, edgecolor='w')
-            )
-            for at in autotexts:
-                at.set_fontsize(8)
-                at.set_fontweight('bold')
-            
-            # Different title based on event type
-            title = f"Influences on Agent {event['agent']}"
-            # if event['type'] == 'fault_detection':
-            #     title = 'Contributors to Fault'
-            # else:
-            #     title = f"Influences on Agent {event['agent']}"
-            
-            ax.set_title(title, fontsize=10, pad=5)
-            ax.set_aspect('equal')
-
-    # --- Legend row (bottom row) ---
-    ax_legend = fig.add_subplot(gs[2, :])
-    ax_legend.axis('off')
-    legend_elements = [Patch(facecolor=agent_colors[i], label=f"Agent {i}") for i in range(total_agents)]
-    
-    # Add legend for event types
-    fault_marker = plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='darkred', 
-                             markersize=10, label='Fault Detection')
-    influence_marker = plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='orange', 
-                                 markersize=10, label=f'Vulnerable Top-{k_top} Influence')
-    legend_elements.extend([fault_marker, influence_marker])
-    
-    ax_legend.legend(handles=legend_elements, loc='center', ncol=min(len(legend_elements), 8),
-                     fontsize=9, frameon=False)
-
-    fig.suptitle('Fault Detection Timeline',
-                 fontsize=14, fontweight='bold', y=0.96)
-
-    out_path = os.path.join(logdir, 'fault_timeline_value_influences.png')
-    plt.savefig(out_path, dpi=300, bbox_inches='tight')
-    plt.show()
-    print(f"Saved enhanced action influences fault timeline plot to {out_path}")
-    print(f"Timeline includes {len([e for e in extended_timeline if e['type'] == 'fault_detection'])} fault detections and {len([e for e in extended_timeline if e['type'] == 'top_k_influence'])} top-{k_top} influence events")
-
-
-
-def plot_fault_timeline_action_influences_without_attack(fault_timeline, action_influences_matrix_history, total_agents, logdir):
-    """
-    Plot fault timeline with action influence contributors instead of Frobenius norm influences.
-    Each fault event shows the action influences from other agents as contributors.
-    Additionally flags timesteps where faulty agents are among top-k influencers on non-faulty agents.
-    """
-    if len(fault_timeline) == 0:
-        print("No faults detected; skipping action influences fault timeline plot.")
-        return
-
-    # Parameters for top-k influence detection
-    k_top = 2  # Look for faulty agents in top-2 influencers
-    
-    # Create a mapping of when each agent was first detected as faulty
-    fault_detection_times = {}  # agent_id -> timestep when first detected as faulty
-    for event in fault_timeline:
-        if event['agent'] not in fault_detection_times:
-            fault_detection_times[event['agent']] = event['t']
-    
-    # Find the last fault detection timestep to stop flagging after this point
-    last_fault_detection_time = max(fault_detection_times.values()) if fault_detection_times else -1
-    
-    # Find the first fault detection timestep for mean calculation
-    first_fault_detection_time = min(fault_detection_times.values()) if fault_detection_times else -1
-    
-    # Find the first faulty agent (patient zero) - the one detected earliest
-    first_faulty_agent = None
-    if fault_detection_times:
-        first_faulty_agent = min(fault_detection_times.keys(), key=lambda agent: fault_detection_times[agent])
-    
-    # Create extended timeline with additional flagged timesteps
-    extended_timeline = []
-    
-    # Track already flagged (faulty_agent, target_agent) pairs to avoid duplicates
-    flagged_pairs = set()  # Set of (faulty_agent_id, target_agent_id) tuples
-    
-    # Add original fault detection events with exact timestep action influences (not mean)
-    for event in fault_timeline:
-        # Use exact timestep action influences for fault detection events (like original version)
-        faulty_agent = event['agent']
-        fault_timestep = event['t']
-        
-        # Get action influences at the exact fault timestep
-        if fault_timestep < len(action_influences_matrix_history):
-            action_influences = action_influences_matrix_history[fault_timestep][faulty_agent]
-            
-            # Create contributors dict from action influences (include all agents including self)
-            contribs = {}
-            for j in range(total_agents):
-                contribs[j] = abs(action_influences[j])  # Use absolute value of influence
-        else:
-            contribs = {}
-        
-        extended_timeline.append({
-            'type': 'fault_detection',
-            'agent': event['agent'],
-            't': event['t'],
-            'contribs': contribs,  # Use exact timestep influences, not mean
-            'description': f"Faulty agent {event['agent']}"
-        })
-    
-    # Find additional timesteps where faulty agents are top-k influencers on non-faulty agents
-    # Only check timesteps up to (but not including) the last fault detection
-    for t in range(min(len(action_influences_matrix_history), last_fault_detection_time)):
-        influences_at_t = action_influences_matrix_history[t]
-        
-        # Get the set of agents that are considered faulty at timestep t
-        faulty_agents_at_t = set()
-        for agent_id, detection_time in fault_detection_times.items():
-            if t >= detection_time:  # Only consider agent faulty from detection time onwards
-                faulty_agents_at_t.add(agent_id)
-        
-        # Skip if no agents are faulty at this timestep
-        if not faulty_agents_at_t:
-            continue
-        
-        # For each non-faulty agent at timestep t, check if any faulty agent is in top-k influencers
-        for non_faulty_agent in range(total_agents):
-            # Check if this agent is faulty at timestep t
-            is_faulty_at_t = non_faulty_agent in faulty_agents_at_t
-            if is_faulty_at_t:
-                continue  # Skip agents that are faulty at this timestep
-                
-            # Get influences on this non-faulty agent and rank them
-            agent_influences = [(j, abs(influences_at_t[non_faulty_agent][j])) for j in range(total_agents)]
-            # Sort by influence magnitude (descending)
-            ranked_influences = sorted(agent_influences, key=lambda x: x[1], reverse=True)
-            
-            # Check if any faulty agent is in top-k
-            top_k_agents = [agent_id for agent_id, _ in ranked_influences[:k_top]]
-            faulty_in_top_k = [agent_id for agent_id in top_k_agents if agent_id in faulty_agents_at_t]
-            
-            if faulty_in_top_k:
-                # Check if any of the faulty agents in top-k have already been flagged for this target
-                new_faulty_influencers = []
-                for faulty_agent in faulty_in_top_k:
-                    pair = (faulty_agent, non_faulty_agent)
-                    if pair not in flagged_pairs:
-                        new_faulty_influencers.append(faulty_agent)
-                        flagged_pairs.add(pair)  # Mark this pair as flagged
-                
-                # Only create an event if there are new faulty influencers to report
-                if new_faulty_influencers:
-                    # Check if this exact timestep+target combination is already in timeline
-                    already_exists = any(event['t'] == t and event.get('target_agent') == non_faulty_agent 
-                                       for event in extended_timeline)
-                    if not already_exists:
-                        # Use exact timestep action influences for top-k influence events (same as fault detection)
-                        if t < len(action_influences_matrix_history):
-                            action_influences = action_influences_matrix_history[t][non_faulty_agent]
-                            
-                            # Create contributors dict from action influences (include all agents including self)
-                            contribs = {}
-                            for j in range(total_agents):
-                                contribs[j] = abs(action_influences[j])  # Use absolute value of influence
-                        else:
-                            contribs = {}
-                        
-                        faulty_list = ', '.join(map(str, new_faulty_influencers))
-                        extended_timeline.append({
-                            'type': 'top_k_influence',
-                            'agent': non_faulty_agent,  # The affected agent
-                            'faulty_influencers': new_faulty_influencers,
-                            't': t,
-                            'contribs': contribs,  # Use exact timestep influences, same as fault detection
-                            'target_agent': non_faulty_agent,
-                            "description": f"Faulty agent {faulty_list} is among the top-{k_top} influencers of Agent {non_faulty_agent}"
-                        })
-    
-    # Sort extended timeline by timestep
-    extended_timeline.sort(key=lambda x: x['t'])
-    
-    if len(extended_timeline) == 0:
-        print("No events to display in action influences fault timeline.")
-        return
-    
-    k = len(extended_timeline)
-    fig = plt.figure(figsize=(max(8, 3*k), 6))  # Increased height for better visibility
-    gs = fig.add_gridspec(
-        3, k,
-        height_ratios=[1.0, 2, 0.1],
-        hspace=0.15
-    )
-
-    cmap = plt.get_cmap('tab20')
-    agent_colors = {i: cmap(i % 20) for i in range(total_agents)}
-
-    # --- Timeline axis (top row) ---
-    ax_timeline = fig.add_subplot(gs[0, :])
-    ax_timeline.axis('off')
-
-    arrow_y = 0.5
-    ax_timeline.annotate(
-        '', xy=(1, arrow_y), xytext=(0, arrow_y),
-        arrowprops=dict(arrowstyle='-|>', lw=2, color='gray'),
-        xycoords='axes fraction', textcoords='axes fraction'
-    )
-
-    # Milestones
-    for i, event in enumerate(extended_timeline):
-        frac_x = (i + 0.5) / k
-
-        # Different markers for different event types
-        if event['type'] == 'fault_detection':
-            marker_color = 'darkred'
-            marker_size = 12
-        else:  # top_k_influence
-            marker_color = 'orange'
-            marker_size = 10
-
-        # Circle marker
-        ax_timeline.plot(frac_x, arrow_y, 'o', color=marker_color, markersize=marker_size, 
-                        transform=ax_timeline.transAxes)
-
-        # Event description above (with line wrapping for long descriptions)
-        description = event['description']
-        if len(description) > 25:  # Wrap long descriptions
-            words = description.split()
-            lines = []
-            current_line = []
-            for word in words:
-                if len(' '.join(current_line + [word])) <= 25:
-                    current_line.append(word)
-                else:
-                    if current_line:
-                        lines.append(' '.join(current_line))
-                        current_line = [word]
-                    else:
-                        lines.append(word)
-            if current_line:
-                lines.append(' '.join(current_line))
-            description = '\n'.join(lines)
-
-        ax_timeline.text(frac_x, arrow_y + 0.15,
-                         description,
-                         ha='center', va='bottom',
-                         fontsize=9, fontweight='bold',
-                         transform=ax_timeline.transAxes)
-
-        # Timestep label below
-        ax_timeline.text(frac_x, arrow_y - 0.15,
-                         f"t = {event['t']}",
-                         ha='center', va='top',
-                         fontsize=10, color='darkblue',
-                         transform=ax_timeline.transAxes)
-
-    # --- Contributor charts (middle row) ---
-    for col, event in enumerate(extended_timeline):
-        ax = fig.add_subplot(gs[1, col])
-        
-        contribs = event.get('contribs', {})
-
-        # Check if this is the first faulty agent (patient zero) and a fault detection event
-        if (event['type'] == 'fault_detection' and 
-            event['agent'] == first_faulty_agent):
-            ax.axis('off')
-            ax.text(0.5, 0.5, 'Patient Zero',
-                    ha='center', va='center', fontsize=12, fontweight='bold', 
-                    style='italic', color='darkred')
-        elif len(contribs) == 0:
-            ax.axis('off')
-            ax.text(0.5, 0.5, 'No Data',
-                    ha='center', va='center', fontsize=10, style='italic')
-        else:
-            vals = np.array(list(contribs.values()), dtype=float)
-            if vals.sum() > 0:
-                vals /= vals.sum()  # Normalize to sum to 1
-            colors = [agent_colors[a] for a in contribs.keys()]
-
-            wedges, _, autotexts = ax.pie(
-                vals, autopct='%1.1f%%', startangle=90, colors=colors,
-                wedgeprops=dict(width=0.35, edgecolor='w')
-            )
-            for at in autotexts:
-                at.set_fontsize(8)
-                at.set_fontweight('bold')
-            
-            # Different title based on event type
-            title = f"Influences on Agent {event['agent']}"
-            # if event['type'] == 'fault_detection':
-            #     title = 'Contributors to Fault'
-            # else:
-            #     title = f"Influences on Agent {event['agent']}"
-            
-            ax.set_title(title, fontsize=10, pad=5)
-            ax.set_aspect('equal')
-
-    # --- Legend row (bottom row) ---
-    ax_legend = fig.add_subplot(gs[2, :])
-    ax_legend.axis('off')
-    legend_elements = [Patch(facecolor=agent_colors[i], label=f"Agent {i}") for i in range(total_agents)]
-    
-    # Add legend for event types
-    fault_marker = plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='darkred', 
-                             markersize=10, label='Fault Detection')
-    influence_marker = plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='orange', 
-                                 markersize=10, label=f'Vulnerable Top-{k_top} Influence')
-    legend_elements.extend([fault_marker, influence_marker])
-    
-    ax_legend.legend(handles=legend_elements, loc='center', ncol=min(len(legend_elements), 8),
-                     fontsize=9, frameon=False)
-
-    fig.suptitle('Fault Detection Timeline',
-                 fontsize=14, fontweight='bold', y=0.96)
-
-    out_path = os.path.join(logdir, 'fault_timeline_value_influences_without_attack.png')
-    plt.savefig(out_path, dpi=300, bbox_inches='tight')
-    plt.show()
-    print(f"Saved enhanced action influences fault timeline plot to {out_path}")
-    print(f"Timeline includes {len([e for e in extended_timeline if e['type'] == 'fault_detection'])} fault detections and {len([e for e in extended_timeline if e['type'] == 'top_k_influence'])} top-{k_top} influence events")
-
 def plot_second_order_observation_influences(second_order_observation_influences_history, attacked_steps, atk_agent_id, logdir):
     """
     Plot the time series of second-order observation influences for each agent.
@@ -1421,264 +1122,6 @@ def plot_pairwise_frobs_comparison(pairwise_frobs_history_normal, pairwise_frobs
     plt.show()
     print(f"Saved pairwise Frobenius norms comparison plot to {out_path}")
 
-def plot_fault_timeline_pairwise_frobs_piecharts(pairwise_frobs_history_normal, fault_timeline, total_agents, logdir):
-    """
-    Plot pie charts showing pairwise Frobenius norm distributions for each fault event in the timeline.
-    Each pie chart shows how much each agent influences the faulty agent at that timestep.
-    
-    Args:
-        pairwise_frobs_history_normal: List of N×N normalized Frobenius norm matrices per timestep
-        fault_timeline: List of fault events, each with keys 'agent', 't', 'contribs'  
-        total_agents: Total number of agents
-        logdir: Directory to save the plot
-    """
-    if len(fault_timeline) == 0:
-        print("No faults detected; skipping pairwise frobs pie chart timeline plot.")
-        return
-        
-    if len(pairwise_frobs_history_normal) == 0:
-        print("No pairwise frobs history available; skipping pie chart timeline plot.")
-        return
-
-    k = len(fault_timeline)
-    fig, axes = plt.subplots(1, k, figsize=(5*k, 6))
-    
-    # Handle single subplot case
-    if k == 1:
-        axes = [axes]
-    
-    # Generate distinct colors for agents
-    cmap = plt.get_cmap('tab20')
-    agent_colors = [cmap(i % 20) for i in range(total_agents)]
-    
-    for idx, event in enumerate(fault_timeline):
-        ax = axes[idx]
-        faulty_agent = event['agent']
-        timestep = event['t']
-        
-        # Get the pairwise frobs matrix for this timestep
-        if timestep >= len(pairwise_frobs_history_normal):
-            print(f"Warning: Timestep {timestep} exceeds available history length {len(pairwise_frobs_history_normal)}")
-            continue
-            
-        frobs_matrix = pairwise_frobs_history_normal[timestep]
-        
-        # Extract the row corresponding to the faulty agent
-        # This shows how much each agent (including itself) influences the faulty agent
-        influences = frobs_matrix[faulty_agent]
-        
-        # Create labels and filter out very small values for cleaner visualization
-        labels = []
-        values = []
-        colors = []
-        threshold = 0.01  # Only show influences > 1%
-        
-        for agent_id in range(total_agents):
-            if influences[agent_id] > threshold:
-                if agent_id == faulty_agent:
-                    labels.append(f'Agent {agent_id} (Self)')
-                else:
-                    labels.append(f'Agent {agent_id}')
-                values.append(influences[agent_id])
-                colors.append(agent_colors[agent_id])
-        
-        # If all influences are below threshold, show top 3 anyway
-        if len(values) == 0:
-            sorted_influences = sorted(enumerate(influences), key=lambda x: x[1], reverse=True)
-            for agent_id, influence in sorted_influences[:3]:
-                if agent_id == faulty_agent:
-                    labels.append(f'Agent {agent_id} (Self)')
-                else:
-                    labels.append(f'Agent {agent_id}')
-                values.append(influence)
-                colors.append(agent_colors[agent_id])
-        
-        # Create pie chart
-        wedges, texts, autotexts = ax.pie(
-            values, 
-            labels=labels, 
-            colors=colors,
-            autopct='%1.1f%%',
-            startangle=90,
-            textprops={'fontsize': 9}
-        )
-        
-        # Enhance percentage text
-        for autotext in autotexts:
-            autotext.set_color('white')
-            autotext.set_weight('bold')
-        
-        # Add title with timestamp
-        # ax.set_title(
-        #     f'Timestep {timestep}\nInfluences on Faulty Agent {faulty_agent}',
-        #     fontsize=12,
-        #     fontweight='bold',
-        #     pad=20
-        # )
-    
-    plt.suptitle(
-        'Pairwise Frobenius Norm Without Attack',
-        fontsize=16,
-        fontweight='bold',
-        y=0.95
-    )
-    
-    plt.tight_layout(rect=[0, 0, 1, 0.93])
-    
-    # Save the plot
-    out_path = os.path.join(logdir, 'fault_timeline_pairwise_frobs_piecharts_without_attack.png')
-    plt.savefig(out_path, dpi=300, bbox_inches='tight')
-    plt.show()
-    print(f"Saved pairwise frobs pie charts timeline to {out_path}")
-
-def plot_timesteps_pairwise_frobs_piecharts(pairwise_frobs_history_normal, timesteps_list, target_agent, total_agents, logdir):
-    """
-    Plot pie charts showing pairwise Frobenius norm distributions for specified timesteps.
-    Exactly like plot_fault_timeline_action_influences but takes custom timesteps instead of fault timeline.
-    Normal scenario - no fault detection or attack logic needed.
-    
-    Args:
-        pairwise_frobs_history_normal: List of N×N normalized Frobenius norm matrices per timestep
-        timesteps_list: List of specific timesteps to create pie charts for (e.g., [3, 5, 6, 7])
-        target_agent: The agent ID to show influences on
-        total_agents: Total number of agents
-        logdir: Directory to save the plot
-    """
-    if len(timesteps_list) == 0:
-        print("No timesteps provided; skipping timesteps pairwise frobs pie chart plot.")
-        return
-        
-    if len(pairwise_frobs_history_normal) == 0:
-        print("No pairwise frobs history available; skipping pie chart plot.")
-        return
-
-    # Filter valid timesteps
-    valid_timesteps = [t for t in timesteps_list if t < len(pairwise_frobs_history_normal)]
-    if len(valid_timesteps) == 0:
-        print(f"No valid timesteps found. Available range: 0-{len(pairwise_frobs_history_normal)-1}")
-        return
-
-    # Create timeline events from custom timesteps (simplified - no fault detection logic)
-    extended_timeline = []
-    for timestep in valid_timesteps:
-        # Get the pairwise frobs matrix for this timestep
-        frobs_matrix = pairwise_frobs_history_normal[timestep]
-        
-        # Extract influences on the target agent (like fault detection events)
-        influences = frobs_matrix[target_agent]
-        
-        # Create contributors dict from Frobenius norm influences (same as action_influences)
-        contribs = {}
-        for j in range(total_agents):
-            contribs[j] = abs(influences[j])  # Use absolute value of influence
-        
-        extended_timeline.append({
-            'type': 'timestep_analysis',
-            'agent': target_agent,  # The target agent we're analyzing
-            't': timestep,
-            'contribs': contribs,
-            'description': f"Influences on Agent {target_agent}"
-        })
-
-    k = len(extended_timeline)
-    fig = plt.figure(figsize=(max(8, 3*k), 6))  # Same as original function
-    gs = fig.add_gridspec(
-        3, k,
-        height_ratios=[1.0, 2, 0.1],
-        hspace=0.15
-    )
-
-    cmap = plt.get_cmap('tab20')
-    agent_colors = {i: cmap(i % 20) for i in range(total_agents)}
-
-    # --- Timeline axis (top row) ---
-    ax_timeline = fig.add_subplot(gs[0, :])
-    ax_timeline.axis('off')
-
-    arrow_y = 0.5
-    ax_timeline.annotate(
-        '', xy=(1, arrow_y), xytext=(0, arrow_y),
-        arrowprops=dict(arrowstyle='-|>', lw=2, color='gray'),
-        xycoords='axes fraction', textcoords='axes fraction'
-    )
-
-    # Milestones (simplified - no fault detection markers)
-    for i, event in enumerate(extended_timeline):
-        frac_x = (i + 0.5) / k
-
-        # Use consistent marker for timestep analysis (blue instead of red for normal scenario)
-        marker_color = 'darkblue'
-        marker_size = 12
-
-        # Circle marker
-        ax_timeline.plot(frac_x, arrow_y, 'o', color=marker_color, markersize=marker_size, 
-                        transform=ax_timeline.transAxes)
-
-        # Event description above
-        description = event['description']
-
-        ax_timeline.text(frac_x, arrow_y + 0.15,
-                         description,
-                         ha='center', va='bottom',
-                         fontsize=9, fontweight='bold',
-                         transform=ax_timeline.transAxes)
-
-        # Timestep label below
-        ax_timeline.text(frac_x, arrow_y - 0.15,
-                         f"t = {event['t']}",
-                         ha='center', va='top',
-                         fontsize=10, color='darkblue',
-                         transform=ax_timeline.transAxes)
-
-    # --- Contributor charts (middle row) ---
-    for col, event in enumerate(extended_timeline):
-        ax = fig.add_subplot(gs[1, col])
-        
-        contribs = event.get('contribs', {})
-
-        if len(contribs) == 0:
-            ax.axis('off')
-            ax.text(0.5, 0.5, 'No Data',
-                    ha='center', va='center', fontsize=10, style='italic')
-        else:
-            vals = np.array(list(contribs.values()), dtype=float)
-            if vals.sum() > 0:
-                vals /= vals.sum()  # Normalize to sum to 1
-            colors = [agent_colors[a] for a in contribs.keys()]
-
-            wedges, _, autotexts = ax.pie(
-                vals, autopct='%1.1f%%', startangle=90, colors=colors,
-                wedgeprops=dict(width=0.35, edgecolor='w')
-            )
-            for at in autotexts:
-                at.set_fontsize(8)
-                at.set_fontweight('bold')
-            
-            # title = f"Influences on Agent {event['agent']}"
-            ax.set_title(title, fontsize=10, pad=5)
-            ax.set_aspect('equal')
-
-    # --- Legend row (bottom row) ---
-    ax_legend = fig.add_subplot(gs[2, :])
-    ax_legend.axis('off')
-    legend_elements = [Patch(facecolor=agent_colors[i], label=f"Agent {i}") for i in range(total_agents)]
-    
-    # Add legend for timestep analysis (no fault markers needed for normal scenario)
-    timestep_marker = plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='darkblue', 
-                                markersize=10, label='Timestep Analysis')
-    legend_elements.append(timestep_marker)
-    
-    ax_legend.legend(handles=legend_elements, loc='center', ncol=min(len(legend_elements), 8),
-                     fontsize=9, frameon=False)
-
-    fig.suptitle('Pairwise Frobenius Norm Analysis Timeline',
-                 fontsize=14, fontweight='bold', y=0.96)
-
-    out_path = os.path.join(logdir, f'timesteps_pairwise_frobs_timeline_agent_{target_agent}.png')
-    plt.savefig(out_path, dpi=300, bbox_inches='tight')
-    plt.show()
-    print(f"Saved timesteps pairwise frobs timeline for agent {target_agent} at timesteps {valid_timesteps} to {out_path}")
-
 ############# PLOTING ENDS HERE #############
 
 # --------- COMPUTE TAYLOR POLICY ------------------
@@ -1747,7 +1190,7 @@ def slice_avail(avail, agent_id):
         return None
     return avail[:, agent_id]
 
-def eval(runner, attack_status=False, attack_agent_id=0, seed=23, taylor_history_data=None, min_window=0, max_window=None):
+def eval(runner, attack_status=False, attack_agent_id=0, seed=23, taylor_history_data=None, min_window=0, max_window=None, top_k=2):
     """Evaluate the model."""
     
     eval_episode = 0
@@ -1794,7 +1237,7 @@ def eval(runner, attack_status=False, attack_agent_id=0, seed=23, taylor_history
     pairwise_second_order_influences_history = []  # list of N x N pair
     taylor_history = [[] for _ in range(runner.num_agents)]
     cnt = 0
-
+    first_faulty_timestep = None
     while True:
         eval_rnn_states_backup = np.copy(eval_rnn_states)
         eval_actions_collector = []
@@ -1879,7 +1322,7 @@ def eval(runner, attack_status=False, attack_agent_id=0, seed=23, taylor_history
         # pairwise frob matrix for cascading analysis
         pairwise_frobs = compute_pairwise_frob_norms(runner, eval_obs, eval_rnn_states_critic, eval_masks)
         frob_norms_matrix_history.append(pairwise_frobs)
-
+        
         for i in range(runner.num_agents):
             result_deques[i].append(delta_errors[i])
             taylor_approx_error = np.mean(result_deques[i])
@@ -1902,7 +1345,9 @@ def eval(runner, attack_status=False, attack_agent_id=0, seed=23, taylor_history
                 lower_bound = historical_mean - historical_std
                 upper_bound = historical_mean + historical_std
                 
-                if taylor_approx_error < lower_bound or taylor_approx_error > upper_bound:
+                if taylor_approx_error < lower_bound*0.5 or taylor_approx_error > upper_bound*2:
+                    if first_faulty_timestep is None:
+                        first_faulty_timestep = cnt
                     print(f" [!!!] Anomaly detected for agent {i} at timestep: {cnt}. Taylor Appx. Error: {taylor_approx_error}")
                     print(f"     >> Historical bounds: [{lower_bound:.6f}, {upper_bound:.6f}], Mean: {historical_mean:.6f}, Std: {historical_std:.6f}")
                     fault_first_detected[i] = cnt
@@ -1910,10 +1355,14 @@ def eval(runner, attack_status=False, attack_agent_id=0, seed=23, taylor_history
                     prev_faults = [(f, tf) for f, tf in fault_first_detected.items() if f != i and tf < cnt]
                     contribs = {}
                     if len(prev_faults) > 0:
-                        for f, tf in prev_faults:
-                            values_over_time = [frob_norms_matrix_history[tau][i][f] for tau in range(tf, cnt + 1) if tau < len(frob_norms_matrix_history)]
+                        # for f, tf in prev_faults:
+                        #     values_over_time = [frob_norms_matrix_history[tau][i][f] for tau in range(tf, cnt + 1) if tau < len(frob_norms_matrix_history)]
+                        #     if len(values_over_time) > 0:
+                        #         contribs[f] = float(np.mean(values_over_time))
+                        for agent_id in range(runner.num_agents):
+                            values_over_time = [frob_norms_matrix_history[tau][i][agent_id] for tau in range(first_faulty_timestep, cnt + 1) if tau < len(frob_norms_matrix_history)]
                             if len(values_over_time) > 0:
-                                contribs[f] = float(np.mean(values_over_time))
+                                contribs[agent_id] = float(np.mean(values_over_time))
                         if len(contribs) > 0:
                             ranked = sorted(contribs.items(), key=lambda x: x[1], reverse=True)
                             print(f"     >> Potential contributors to fault in agent {i} (mean ||H_{{i,f}}||_F from t_f to {cnt}): {ranked}")
@@ -1981,8 +1430,11 @@ def eval(runner, attack_status=False, attack_agent_id=0, seed=23, taylor_history
 
         cnt += 1
     
+    # Perform threat detection analysis
+    threat_data = detect_threats_top_k(pairwise_frobs_history, attack_agent_id, top_k)
+    
     # return taylor_error_list, frob_norms_list, sec_dir_derivatives, frob_norms_matrix_history, fault_timeline, attacked_steps
-    return taylor_error_list,pairwise_frobs_history, pairwise_obs_influences_history, pairwise_second_order_influences_history, frob_norms_matrix_history, fault_timeline, attacked_steps
+    return taylor_error_list, pairwise_frobs_history, pairwise_obs_influences_history, pairwise_second_order_influences_history, frob_norms_matrix_history, fault_timeline, attacked_steps, threat_data
 
 def compute_pairwise_frob_norms(runner, eval_obs, eval_rnn_states_critic, eval_masks):
     """Compute Frobenius norms of cross-agent Hessian blocks for all (i, j).
@@ -2416,10 +1868,7 @@ def main():
         "--max_window", type=int, default=None, help="Maximum timestep for attack window (inclusive). If None, attacks until episode ends."
     )
     parser.add_argument(
-        "--timesteps", type=str, default="", help="Comma-separated list of timesteps for pie charts (e.g., '3,5,6,7'). If empty, no timestep-specific pie charts will be generated."
-    )
-    parser.add_argument(
-        "--target_agent", type=int, default=0, help="Target agent ID for timestep pie charts (which agent to show influences on)."
+        "--top_k", type=int, default=2, help="Top-k agents to consider for threat detection based on Frobenius values."
     )
     args, unparsed_args = parser.parse_known_args()
 
@@ -2476,25 +1925,27 @@ def main():
     # Run evaluation without attack
     # results_normal, frob_norms_normal, sec_dir_derivatives_normal, frob_norms_matrix_history_normal, fault_timeline_normal, attacked_steps_normal = eval(runner, False, attack_agent_id, taylor_history_data=taylor_history_data)
     # Run evaluation with attack
-    results__normal, pairwise_frobs_history_normal, pairwise_obs_influences_history_normal, pairwise_second_order_influences_history_normal, frob_norms_matrix_history_atk_normal, fault_timeline_atk_normal, attacked_steps_atk_normal = eval(
+    results__normal, pairwise_frobs_history_normal, pairwise_obs_influences_history_normal, pairwise_second_order_influences_history_normal, frob_norms_matrix_history_atk_normal, fault_timeline_atk_normal, attacked_steps_atk_normal, threat_data_normal = eval(
         runner, 
         attack_status=False, 
         attack_agent_id=attack_agent_id, 
         seed=args['seed'], 
         taylor_history_data=taylor_history_data,
         min_window=args['min_window'],
-        max_window=args['max_window']
+        max_window=args['max_window'],
+        top_k=args['top_k']
     )
         
     # exit("Exiting")
-    results_attacked, pairwise_frobs_history,pairwise_obs_influences_history, pairwise_second_order_influences_history, frob_norms_matrix_history_atk, fault_timeline_atk, attacked_steps_atk = eval(
+    results_attacked, pairwise_frobs_history, pairwise_obs_influences_history, pairwise_second_order_influences_history, frob_norms_matrix_history_atk, fault_timeline_atk, attacked_steps_atk, threat_data_attacked = eval(
         runner, 
         attack_status=True, 
         attack_agent_id=attack_agent_id, 
         seed=args['seed'], 
         taylor_history_data=taylor_history_data,
         min_window=args['min_window'],
-        max_window=args['max_window']
+        max_window=args['max_window'],
+        top_k=args['top_k']
     )
 
     log_dir = algo_args['attack']['log_dir']
@@ -2543,31 +1994,42 @@ def main():
     # Plot fault timeline and contributor charts for attacked run
     plot_fault_timeline(fault_timeline_atk, runner.num_agents, log_path)
     plot_contributor_barchart(fault_timeline_atk, runner.num_agents, log_path)
-    plot_fault_timeline_action_influences(fault_timeline_atk,pairwise_frobs_history, runner.num_agents, log_path)
-    plot_fault_timeline_pairwise_frobs_piecharts(pairwise_frobs_history_normal, fault_timeline_atk, runner.num_agents, log_path)
-    
-    # Plot timestep-specific pie charts if timesteps are provided
-    if args['timesteps']:
-        try:
-            # Parse comma-separated timesteps string into list of integers
-            timesteps_list = [int(t.strip()) for t in args['timesteps'].split(',') if t.strip()]
-            if timesteps_list:
-                print(f"Creating pie charts for timesteps: {timesteps_list}")
-                plot_timesteps_pairwise_frobs_piecharts(
-                    pairwise_frobs_history_normal=pairwise_frobs_history_normal,
-                    timesteps_list=timesteps_list,
-                    target_agent=args['target_agent'],
-                    total_agents=runner.num_agents,
-                    logdir=log_path
-                )
-            else:
-                print("No valid timesteps provided in --timesteps argument")
-        except ValueError as e:
-            print(f"Error parsing timesteps argument: {e}")
-            print("Please provide timesteps as comma-separated integers (e.g., '3,5,6,7')")
     
     # Plot Taylor error vs historical bounds
     plot_taylor_error_with_historical_bounds(results_attacked, taylor_history_data, attacked_steps_atk, attack_agent_id, log_path)
+
+    # === NEW THREAT DETECTION ANALYSIS ===
+    # Save threat detection results to CSV
+    save_threat_data_csv(threat_data_attacked, attack_agent_id, args['top_k'], log_path, window_str)
+    
+    # Plot combined threat analysis visualization
+    plot_threat_analysis_combined(
+        fault_timeline_atk, 
+        threat_data_attacked, 
+        pairwise_frobs_history, 
+        attack_agent_id, 
+        runner.num_agents, 
+        args['top_k'], 
+        log_path
+    )
+    
+    # Print threat detection summary
+    if threat_data_attacked['threat_timesteps']:
+        print(f"\n=== THREAT DETECTION SUMMARY ===")
+        print(f"Top-{args['top_k']} Analysis: Agent {attack_agent_id} detected as potential threat")
+        print(f"Threat detected at timesteps: {sorted(list(threat_data_attacked['threat_timesteps']))}")
+        print(f"Total unique threat timesteps: {len(threat_data_attacked['threat_timesteps'])}")
+        
+        # Show some example threat instances
+        threat_instances = [(i, threat_data_attacked['timestamp'][i], threat_data_attacked['agent_id'][i], threat_data_attacked['attacked_agent_rank'][i]) 
+                          for i in range(len(threat_data_attacked['is_threat'])) if threat_data_attacked['is_threat'][i]]
+        
+        print(f"Sample threat instances (first 5):")
+        for i, (idx, t, agent, rank) in enumerate(threat_instances[:5]):
+            print(f"  - Timestep {t}: Agent {attack_agent_id} ranked #{rank} in top-{args['top_k']} influencers of Agent {agent}")
+    else:
+        print(f"\n=== THREAT DETECTION SUMMARY ===")
+        print(f"Top-{args['top_k']} Analysis: No threats detected for Agent {attack_agent_id}")
 
     # runner.run()
     runner.close()

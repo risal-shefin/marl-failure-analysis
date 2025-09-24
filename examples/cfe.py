@@ -570,14 +570,14 @@ def branch_rollout_value(
                         rnn[:, aid] = _t2n(rnn_next)
                         actions_col.append(_t2n(a))
             else:
-                if aid in coalition_allows_react:
+                if aid in coalition_allows_react: #0,1
                     a, rnn_next = runner.actor[aid].act(
                         obs[:, aid], rnn[:, aid], masks[:, aid], slice_avail(avail, aid), deterministic=True,
                     )
                     rnn[:, aid] = _t2n(rnn_next)
                     actions_col.append(_t2n(a))
                 else:
-                    if k < len(baseline_actions):
+                    if k < len(baseline_actions): # 2,5,3
                         a_idx = int(baseline_actions[k][0, aid, 0])
                         a_np = np.array([[a_idx]], dtype=np.int64)
                         actions_col.append(a_np)

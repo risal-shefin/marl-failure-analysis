@@ -1,5 +1,5 @@
 import copy
-import gym
+import gymnasium as gym
 
 
 class GYMEnv:

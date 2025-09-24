@@ -20,4 +20,6 @@ LOGGER_REGISTRY = {
     "dexhands": DexHandsLogger,
     "smacv2": SMACv2Logger,
     "lag": LAGLogger,
+    # register vmas using the same logger as pettingzoo_mpe for now
+    "vms": PettingZooMPELogger,
 }

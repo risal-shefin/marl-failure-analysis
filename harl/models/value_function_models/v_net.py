@@ -45,7 +45,7 @@ class VNet(nn.Module):
 
         self.to(device)
 
-    def forward(self, cent_obs, rnn_states, masks):
+    def forward(self, cent_obs, rnn_states, masks, do_tpdv=True):
         """Compute actions from the given inputs.
         Args:
             cent_obs: (np.ndarray / torch.Tensor) observation inputs into network.
@@ -55,6 +55,8 @@ class VNet(nn.Module):
             values: (torch.Tensor) value function predictions.
             rnn_states: (torch.Tensor) updated RNN hidden states.
         """
+        # if do_tpdv
+        #     cent_obs = check(cent_obs).to(**self.tpdv)
         cent_obs = check(cent_obs).to(**self.tpdv)
         rnn_states = check(rnn_states).to(**self.tpdv)
         masks = check(masks).to(**self.tpdv)

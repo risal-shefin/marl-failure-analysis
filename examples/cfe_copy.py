@@ -21,6 +21,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from harl.utils.configs_tools import get_defaults_yaml_args, update_args
 from harl.utils.trans_tools import _t2n
 from harl.runners import RUNNER_REGISTRY
+from tqdm import tqdm
 
 
 # ------------------------------- Util helpers -------------------------------
@@ -126,7 +127,7 @@ def compute_taylor_policy(runner, eval_obs, eval_available_actions, eval_rnn_sta
         (runner.algo_args["eval"]["n_eval_rollout_threads"], runner.num_agents, 1),
         dtype=np.float32,
     )
-    for agent_id in range(runner.num_agents):
+    for agent_id in tqdm(range(runner.num_agents), desc="Computing Taylor Errors"):
         cur_obs = eval_obs[:, agent_id]
         avail_slice = (eval_available_actions[:, agent_id]
                        if (eval_available_actions is not None) and (eval_available_actions[0] is not None)
@@ -163,7 +164,7 @@ def compute_frob_norms(runner, eval_obs, vulnerable_agent_id, eval_rnn_states_cr
     eval_obs = torch.tensor(eval_obs, dtype=torch.float32)
     agent_obs_tensors = []
     n_agents = runner.num_agents
-    for i in range(n_agents):
+    for i in tqdm(range(n_agents), desc="Computing Frobenius Norms"):
         agent_obs = eval_obs[0][i].clone().detach()
         agent_obs_tensor = agent_obs.clone().detach().requires_grad_(True)
         agent_obs_tensors.append(agent_obs_tensor)
@@ -199,7 +200,7 @@ def compute_2nd_ord_dir_derivatives(runner, eval_obs, vulnerable_agent_id, eval_
     eval_obs = torch.tensor(eval_obs, dtype=torch.float32)
     agent_obs_tensors = []
     n_agents = runner.num_agents
-    for i in range(n_agents):
+    for i in tqdm(range(n_agents), desc="Computing 2nd Order Derivatives"):
         agent_obs = eval_obs[0][i].clone().detach()
         agent_obs_tensor = agent_obs.clone().detach().requires_grad_(True)
         agent_obs_tensors.append(agent_obs_tensor)
@@ -432,7 +433,7 @@ def run_attacked_episode_with_metrics(runner, attacked_id, seed=23, min_window=0
         actions_col = []
         for aid in range(n_agents):
             if (aid == attacked_id) and in_window(t, min_window, max_window):
-                derived_seed = seed * 100003 + t * 1009 + attacked_id * 101
+                derived_seed = seed #* 100003 + t * 1009 + attacked_id * 101
                 worst_idx = pick_worst_action_by_sampling(
                     runner, attacked_id,
                     eval_obs[:, attacked_id], rnn[:, attacked_id], masks[:, attacked_id],
@@ -496,7 +497,7 @@ def branch_rollout_value(
     # at t: if inside window, force worst for attacked; else baseline
     actions_t = baseline_actions[branch_t].copy()
     if in_window(branch_t, min_window, max_window):
-        derived_seed = seed * 100003 + branch_t * 1009 + attacked_id * 101
+        derived_seed = seed #* 100003 + branch_t * 1009 + attacked_id * 101
         worst_a = pick_worst_action_by_sampling(
             runner, attacked_id,
             obs[:, attacked_id], rnn[:, attacked_id], masks[:, attacked_id],
@@ -514,9 +515,9 @@ def branch_rollout_value(
             break
         actions_col = []
         for aid in range(n_agents):
-            if aid == attacked_id:
+            if aid == attacked_id and aid in coalition_allows_react:
                 if in_window(k, min_window, max_window):
-                    derived_seed = seed * 100003 + k * 1009 + attacked_id * 101
+                    derived_seed = seed #* 100003 + k * 1009 + attacked_id * 101
                     worst_idx = pick_worst_action_by_sampling(
                         runner, attacked_id,
                         obs[:, attacked_id], rnn[:, attacked_id], masks[:, attacked_id],
@@ -537,6 +538,18 @@ def branch_rollout_value(
                         )
                         rnn[:, aid] = _t2n(rnn_next)
                         actions_col.append(_t2n(a))
+            elif aid == attacked_id and aid not in coalition_allows_react:
+                if k < len(baseline_actions):
+                    a_idx = int(0) #int(baseline_actions[k][0, aid, 0]) #
+                    a_np = np.array([[a_idx]], dtype=np.int64)
+                    actions_col.append(a_np)
+                else:
+                    a, rnn_next = runner.actor[aid].act(
+                        obs[:, aid], rnn[:, aid], masks[:, aid],
+                        slice_avail(avail, aid), deterministic=True,
+                    )
+                    rnn[:, aid] = _t2n(rnn_next)
+                    actions_col.append(_t2n(a))
             else:
                 if aid in coalition_allows_react:
                     a, rnn_next = runner.actor[aid].act(
@@ -546,17 +559,18 @@ def branch_rollout_value(
                     rnn[:, aid] = _t2n(rnn_next)
                     actions_col.append(_t2n(a))
                 else:
-                    if k < len(baseline_actions):
-                        a_idx = int(baseline_actions[k][0, aid, 0])
-                        a_np = np.array([[a_idx]], dtype=np.int64)
-                        actions_col.append(a_np)
-                    else:
-                        a, rnn_next = runner.actor[aid].act(
-                            obs[:, aid], rnn[:, aid], masks[:, aid],
-                            slice_avail(avail, aid), deterministic=True,
-                        )
-                        rnn[:, aid] = _t2n(rnn_next)
-                        actions_col.append(_t2n(a))
+                    actions_col.append(np.array([[0]], dtype=np.int64))  # always take action 0 for non-reacting agents
+                    # if k < len(baseline_actions):
+                    #     a_idx =  int(baseline_actions[k][0, aid, 0])
+                    #     a_np = np.array([[a_idx]], dtype=np.int64)
+                    #     actions_col.append(a_np)
+                    # else:
+                    #     a, rnn_next = runner.actor[aid].act(
+                    #         obs[:, aid], rnn[:, aid], masks[:, aid],
+                    #         slice_avail(avail, aid), deterministic=True,
+                    #     )
+                    #     rnn[:, aid] = _t2n(rnn_next)
+                    #     actions_col.append(_t2n(a))
 
         actions = np.array(actions_col).transpose(1, 0, 2)
         obs, share_obs, rewards, dones, infos, avail = runner.eval_envs.step(actions)
@@ -571,7 +585,8 @@ def branch_rollout_value(
 
 
 def tot_ase_and_shapley_at_t(runner, seed, baseline_actions, branch_t, attacked_id, min_window, max_window):
-    all_non_attacked = [a for a in range(runner.num_agents) if a != attacked_id]
+    all_non_attacked = [a for a in range(runner.num_agents)]
+    # all_non_attacked = [a for a in range(runner.num_agents) if a != attacked_id]
     cache = {}
     def v_of(S_frozen):
         if S_frozen in cache:
@@ -605,27 +620,59 @@ def tot_ase_and_shapley_at_t(runner, seed, baseline_actions, branch_t, attacked_
 
 # --------------------------------- Restore ---------------------------------
 
-def restore(runner, reward, episode, filepath):
-    for agent_id in range(runner.num_agents):
-        policy_actor_state_dict = torch.load(
-            os.path.join(filepath, f"actor_agent{agent_id}_reward_{reward}_episode_{episode}.pt"),
-            weights_only=False
-        )
-        runner.actor[agent_id].actor.load_state_dict(policy_actor_state_dict)
-    if not runner.algo_args["render"]["use_render"]:
-        policy_critic_state_dict = torch.load(
-            os.path.join(filepath, f"critic_agent_reward_{reward}_episode_{episode}.pt"),
-            weights_only=False
-        )
-        runner.critic.critic.load_state_dict(policy_critic_state_dict)
-        if runner.value_normalizer is not None:
-            value_normalizer_state_dict = torch.load(
-                os.path.join(filepath, f"value_normalizer_reward_{reward}_episode_{episode}.pt"),
-                weights_only=False
+# def restore(runner, reward, episode, filepath):
+#     for agent_id in range(runner.num_agents):
+#         policy_actor_state_dict = torch.load(
+#             os.path.join(filepath, f"actor_agent{agent_id}_reward_{reward}_episode_{episode}.pt"),
+#             weights_only=False
+#         )
+#         runner.actor[agent_id].actor.load_state_dict(policy_actor_state_dict)
+#     if not runner.algo_args["render"]["use_render"]:
+#         policy_critic_state_dict = torch.load(
+#             os.path.join(filepath, f"critic_agent_reward_{reward}_episode_{episode}.pt"),
+#             weights_only=False
+#         )
+#         runner.critic.critic.load_state_dict(policy_critic_state_dict)
+#         if runner.value_normalizer is not None:
+#             value_normalizer_state_dict = torch.load(
+#                 os.path.join(filepath, f"value_normalizer_reward_{reward}_episode_{episode}.pt"),
+#                 weights_only=False
+#             )
+#             runner.value_normalizer.load_state_dict(value_normalizer_state_dict)
+
+def restore(runner,reward,episode=None,filepath="/deac/csc/vanbastelaerGrp/guptd23/RL_Project/HARL/examples/results/pettingzoo_mpe/simple_spread_v3-discrete/happo/Latest_5/seed-00001-2025-08-15-22-58-50/models"):
+        """Restore model parameters."""
+        for agent_id in range(runner.num_agents):
+            policy_actor_state_dict = torch.load(
+                str(filepath)
+                + "/actor_agent"
+                + str(agent_id)
+                + "_" + str(reward)
+                # + "_episode_" + str(episode)
+                + ".pt",
+                weights_only=False  # Explicitly set to suppress warning
             )
-            runner.value_normalizer.load_state_dict(value_normalizer_state_dict)
-
-
+            runner.actor[agent_id].actor.load_state_dict(policy_actor_state_dict)
+        if not runner.algo_args["render"]["use_render"]:
+            policy_critic_state_dict = torch.load(
+                str(filepath)
+                + "/critic_agent"
+                + "_" + str(reward)
+                # + "_episode_" + str(episode)
+                + ".pt",
+                weights_only=False  # Explicitly set to suppress warning
+            )
+            runner.critic.critic.load_state_dict(policy_critic_state_dict)
+            if runner.value_normalizer is not None:
+                value_normalizer_state_dict = torch.load(
+                    str(filepath)
+                    + "/value_normalizer"
+                    + "_" + str(reward)
+                    # + "_episode_" + str(episode)
+                    + ".pt",
+                    weights_only=False  # Explicitly set to suppress warning
+                )
+                runner.value_normalizer.load_state_dict(value_normalizer_state_dict)
 # ----------------------------------- Main -----------------------------------
 
 def main():
@@ -640,6 +687,7 @@ def main():
     parser.add_argument("--exp_name", type=str, default="cfe_eval")
     parser.add_argument("--load_config", type=str, default="")
     parser.add_argument("--attack_id", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--restore_dir", type=str, default="")
     parser.add_argument("--restore_reward", type=str, default="")
     parser.add_argument("--restore_episode", type=str, default="")
@@ -687,11 +735,12 @@ def main():
     # build runner
     runner = RUNNER_REGISTRY[main_args["algo"]](main_args, algo_args, env_args)
     if (args.restore_dir != "") and (args.restore_reward != "") and (args.restore_episode != ""):
-        restore(runner, args.restore_reward, args.restore_episode, args.restore_dir)
+        restore(runner, args.restore_reward, None, args.restore_dir)
     runner.prep_training()
 
     attacked_id = args.attack_id
-    seed = 23
+    print(f"Attacked Agent:{attacked_id} | Attack Window:[{args.min_window}, {args.max_window}]")
+    seed = args.seed
 
     # 1) Baseline episode with metrics
     (baseline_actions, base_return, T,
@@ -709,7 +758,7 @@ def main():
     timesteps = list(range(T))
     totASE_series = []
     shapley_series = []
-    for t in timesteps:
+    for t in tqdm(timesteps, desc="Computing tot-ASE and Shapley values"):
         tot_ase_t, shap_vec_t, v_all, v_empty = tot_ase_and_shapley_at_t(
             runner=runner, seed=seed, baseline_actions=baseline_actions,
             branch_t=t, attacked_id=attacked_id,
