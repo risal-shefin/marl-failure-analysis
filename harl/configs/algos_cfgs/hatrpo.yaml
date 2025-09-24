@@ -121,3 +121,7 @@ algo:
 logger:
   # logging directory
   log_dir: "./results"
+
+attack:
+  log_dir: "./results/attack"
+  algo_name: "hatrpo"
