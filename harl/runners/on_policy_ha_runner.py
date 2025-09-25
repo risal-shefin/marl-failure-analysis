@@ -127,7 +127,7 @@ class OnPolicyHARunner(OnPolicyBaseRunner):
         # update critic
         critic_train_info = self.critic.train(self.critic_buffer, self.value_normalizer)
 
-        if self.use_centralized_q:
+        if self.use_centralized_q: #. I made it always true see config file 
             q_train_info = self._train_centralized_q_functions()
             for key, value in q_train_info.items():
                 critic_train_info[key] = value

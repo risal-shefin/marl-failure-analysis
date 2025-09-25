@@ -33,7 +33,6 @@ class CentralizedQFunction:
         self.lr = args["critic_lr"]
         self.opti_eps = args["opti_eps"]
         self.weight_decay = args["weight_decay"]
-
         self.q_net = CentralizedQNet(args, cent_obs_space, act_space, device)
 
         self.optimizer = torch.optim.Adam(
@@ -58,9 +57,10 @@ class CentralizedQFunction:
 
         self.q_net.eval()
 
-    def get_q_values(self, cent_obs, actions):
+    def get_q_values(self, cent_obs, actions, gradNeed=False):
         """Evaluate Q values."""
-
+        if gradNeed:
+            return self.q_net(cent_obs, actions)
         with torch.no_grad():
             return self.q_net(cent_obs, actions)
 
@@ -175,8 +175,11 @@ class CentralizedQFunction:
 
     def restore(self, model_dir, agent_id, suffix=""):
         """Restore the Q network parameters if present."""
-
+        # print(f"Model dir: {model_dir}")
         state_dict = torch.load(
-            str(model_dir) + f"/central_q_agent{agent_id}{suffix}.pt"
+            str(model_dir) + f"/central_q_agent{agent_id}_{suffix}.pt"
         )
+        # print(f"State dict:{state_dict}")
+        first_key = list(state_dict.keys())[0]
+        # print(f"First key: {first_key}, shape: {state_dict[first_key].shape}")
         self.q_net.load_state_dict(state_dict)

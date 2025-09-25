@@ -13,7 +13,7 @@ from harl.utils.trpo_util import (
 )
 from harl.algorithms.actors.on_policy_base import OnPolicyBase
 from harl.models.policy_models.stochastic_policy import StochasticPolicy
-
+from harl.algorithms.critics.centralized_q import CentralizedQFunction
 
 class HATRPO(OnPolicyBase):
     def __init__(self, args, obs_space, act_space, device=torch.device("cpu")):
@@ -29,11 +29,13 @@ class HATRPO(OnPolicyBase):
         ), "only continuous and discrete action space is supported by HATRPO."
         super(HATRPO, self).__init__(args, obs_space, act_space, device)
 
-        self.use_centralized_q = args.get("use_centralized_q", False)
+        self.use_centralized_q = args.get("use_centralized_q", True)
         self.kl_threshold = args["kl_threshold"]
         self.ls_step = args["ls_step"]
         self.accept_ratio = args["accept_ratio"]
         self.backtrack_coeff = args["backtrack_coeff"]
+        
+        
 
     def update(self, sample):
         """Update actor networks.
