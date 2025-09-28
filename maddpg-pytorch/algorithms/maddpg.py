@@ -106,7 +106,7 @@ class MADDPG(object):
         for a, obs, mask in zip(self.agents, observations, action_masks):
             logit = a.policy(obs)
             if mask is not None:
-                logit = logit.masked_fill(mask == 0, float('-inf'))
+                logit = logit.masked_fill(mask == 0, float('-1e9'))
             logits.append(logit)
         return logits
 

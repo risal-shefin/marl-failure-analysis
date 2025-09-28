@@ -155,14 +155,14 @@ def get_episode_data(env, maddpg, config, logdir, ref_vals, ref_std_devs, detect
             # Apply different detection methods
             if detection_method == 'mean_std':
                 detection_value = np.mean(result_deques[i])
-                threshold_exceeded = abs(detection_value - ref_vals[i][cnt]) > K_SIGMA * ref_std_devs[i][cnt]
+                threshold_exceeded = abs(detection_value - ref_vals[i][cnt]) > K_SIGMA * ref_std_devs[i][cnt] and not np.isclose(detection_value, ref_vals[i][cnt], rtol=1e-5, atol=1e-5)
             elif detection_method == 'median_mad':
                 detection_value = np.mean(result_deques[i])
-                threshold_exceeded = abs(detection_value - ref_vals[i][cnt]) > K_SIGMA * ref_std_devs[i][cnt]
+                threshold_exceeded = abs(detection_value - ref_vals[i][cnt]) > K_SIGMA * ref_std_devs[i][cnt] and not np.isclose(detection_value, ref_vals[i][cnt], rtol=1e-5, atol=1e-5)
             elif detection_method == 'diff':
                 if cnt > 0:
                     current_diff = results[i] - prev_errors[i]
-                    threshold_exceeded = abs(current_diff - ref_vals[i][cnt]) > K_SIGMA * ref_std_devs[i][cnt]
+                    threshold_exceeded = abs(current_diff - ref_vals[i][cnt]) > K_SIGMA * ref_std_devs[i][cnt] and not np.isclose(current_diff, ref_vals[i][cnt], rtol=1e-5, atol=1e-5)
                     detection_value = current_diff
                 else:
                     threshold_exceeded = False

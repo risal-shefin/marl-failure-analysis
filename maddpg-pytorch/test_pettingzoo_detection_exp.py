@@ -26,7 +26,8 @@ from matplotlib.patches import Patch
 USE_CUDA = torch.cuda.is_available()
 DEVICE = 'gpu' if USE_CUDA else 'cpu'
 torch_device = torch.device("cuda" if USE_CUDA else "cpu")
-K_SIGMA = 0.9
+K_SIGMA = 1.0
+DEFAULT_INFLUENCE_DECAY_LAMBDA = 0.3
 
 def preprocess_env_atari(env):
     # as per openai baseline's MaxAndSKip wrapper, maxes over the last 2 frames
@@ -177,16 +178,16 @@ def compute_pairwise_frob_norms(maddpg, obs, actions, action_spaces):
 
     for i in range(N):
         critic_val = maddpg.agents[i].critic(vf_in).mean()
-        grad_i = torch.autograd.grad(critic_val, torch_obs[i], create_graph=True, retain_graph=True)[0]
-        # grad_i = torch.autograd.grad(critic_val, actions[i], create_graph=True, retain_graph=True)[0]
+        # grad_i = torch.autograd.grad(critic_val, torch_obs[i], create_graph=True, retain_graph=True)[0]
+        grad_i = torch.autograd.grad(critic_val, actions[i], create_graph=True, retain_graph=True)[0]
 
         for j in range(N):
             hessian_matrix = []
             for k in range(grad_i.shape[1]):
                 second_grad = torch.autograd.grad(
                     grad_i[0, k],
-                    torch_obs[j],
-                    # actions[j],  # Change to actions[j] to compute cross-agent action Hessian
+                    # torch_obs[j],
+                    actions[j],  # Change to actions[j] to compute cross-agent action Hessian
                     retain_graph=True,
                     allow_unused=True
                 )[0]
@@ -404,6 +405,124 @@ def compute_second_order_observation_influences(maddpg, obs, actions, action_spa
     return results
 
 
+def collect_agent_q_values(maddpg, obs, actions, action_spaces):
+    """Return the critic output for each agent given observations and actions at a timestep."""
+    if maddpg.discrete_action:
+        one_hot_actions = []
+        for i, action in enumerate(actions):
+            one_hot = np.zeros(action_spaces[i].n)
+            one_hot[action] = 1.0
+            one_hot_actions.append(one_hot)
+        actions = one_hot_actions
+
+    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
+    torch_actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
+    vf_in = torch.cat((*torch_obs, *torch_actions), dim=1)
+
+    q_values = []
+    for agent in maddpg.agents:
+        critic_val = agent.critic(vf_in).mean().item()
+        q_values.append(critic_val)
+
+    return q_values
+
+
+def get_patient_zero_detection(fault_timeline):
+    """Return the patient zero agent id and detection timestep from the fault timeline."""
+    if not fault_timeline:
+        return None, None
+
+    earliest_event = min(
+        fault_timeline,
+        key=lambda event: event.get('t', float('inf'))
+    )
+    return earliest_event.get('agent'), earliest_event.get('t')
+
+
+def compute_decayed_action_influence(action_influences_matrix_history, patient_zero_time, lambda_decay):
+    """Compute cumulative decayed pairwise influences results[i][j][t] after patient zero detection."""
+    if not action_influences_matrix_history or patient_zero_time is None:
+        return []
+
+    num_timesteps = len(action_influences_matrix_history)
+    num_agents = len(action_influences_matrix_history[0])
+
+    patient_zero_index = int(patient_zero_time)
+    if patient_zero_index < 0:
+        patient_zero_index = 0
+
+    if patient_zero_index >= num_timesteps:
+        return [[[0.0 for _ in range(num_timesteps)] for _ in range(num_agents)] for _ in range(num_agents)]
+
+    results = [[[0.0 for _ in range(num_timesteps)] for _ in range(num_agents)] for _ in range(num_agents)]
+    cumulative_influence = [[0.0 for _ in range(num_agents)] for _ in range(num_agents)]
+
+    for t in range(patient_zero_index, num_timesteps):
+        decay_weight = math.exp(-lambda_decay * (t - patient_zero_index))
+
+        for i in range(num_agents):
+            for j in range(num_agents):
+                if j == i:
+                    continue
+
+                increment = abs(action_influences_matrix_history[t][i][j]) * decay_weight
+                cumulative_influence[i][j] += increment
+                results[i][j][t] = cumulative_influence[i][j]
+
+    return results
+
+
+def save_decayed_action_influence_csv(influence_tensor, logdir, filename_prefix, start_timestep=0):
+    """Persist decayed pairwise influence tensor to per-target CSVs with timestep headers."""
+    if not influence_tensor:
+        print("No decayed action influence data to save.")
+        return
+
+    num_targets = len(influence_tensor)
+    if num_targets == 0:
+        print("Decayed action influence tensor is empty.")
+        return
+
+    num_sources = len(influence_tensor[0])
+    num_timesteps = len(influence_tensor[0][0]) if num_sources > 0 else 0
+    if num_timesteps == 0:
+        print("Decayed action influence tensor has no timestep data.")
+        return
+
+    start_index = int(start_timestep)
+    if start_index < 0:
+        start_index = 0
+
+    if start_index >= num_timesteps:
+        print("Start timestep is beyond available influence data; skipping save.")
+        return
+
+    timestep_range = range(start_index, num_timesteps)
+    header = ["agent_id"] + list(timestep_range)
+
+    for target_agent in range(num_targets):
+        filepath = os.path.join(logdir, f"{filename_prefix}_target_{target_agent}.csv")
+
+        with open(filepath, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(header)
+
+            for source_agent in range(num_sources):
+                if source_agent == target_agent:
+                    continue
+
+                row = [source_agent]
+                row.extend(influence_tensor[target_agent][source_agent][start_index:])
+                writer.writerow(row)
+
+            # Include self-influence row (expected to remain zeros)
+            self_row = [target_agent]
+            self_row.extend(influence_tensor[target_agent][target_agent][start_index:])
+            writer.writerow(self_row)
+
+        print(f"Saved decayed action influence data for target agent {target_agent} to {filepath}")
+
+
 # second order directional derivative
 def compute_2nd_ord_dir_derivatives(maddpg, obs, actions, action_spaces, vulnerable_agent_id):
     # if not maddpg.discrete_action:
@@ -449,7 +568,7 @@ def compute_2nd_ord_dir_derivatives(maddpg, obs, actions, action_spaces, vulnera
 
 def get_episode_data(env, maddpg, config, logdir, ref_vals, ref_std_devs, detection_method='mean_std', do_attack=False, atk_agent_id=-1, seed=None):
     # obs = env.reset()
-    obs = env.reset(seed=seed) if seed else env.reset()
+    obs = env.reset(seed=seed)
     # obs = env.reset(seed=12345) # better for speaker_listener_v3
     episode_reward = 0
     episode_rewards = [0 for _ in range(maddpg.nagents)]
@@ -468,6 +587,7 @@ def get_episode_data(env, maddpg, config, logdir, ref_vals, ref_std_devs, detect
     second_order_action_influences_history = []  # list over timesteps of N x N second-order action influence matrices (∂²Q_i/(∂a_j)²)
     observation_influences_matrix_history = []  # list over timesteps of N x N observation influence matrices
     second_order_observation_influences_history = []  # list over timesteps of N x N second-order observation influence matrices (∂²Q_i/(∂obs_j)²)
+    q_values_history = []  # list over timesteps of per-agent critic values
     do_start_attack = False
     attack_step_remaining = 15
 
@@ -516,6 +636,7 @@ def get_episode_data(env, maddpg, config, logdir, ref_vals, ref_std_devs, detect
             # if do_attack and np.random.rand() < 0.75:
             # if do_attack and cnt >= config.atk_start_step and cnt <= config.atk_end_step:
             if do_start_attack and attack_step_remaining > 0:
+            # if do_attack and cnt == 6:
                 actions[env.possible_agents[atk_agent_id]] = torch.argmin(action_logits[atk_agent_id]).item()
                 attacked_steps.append(cnt)
                 attack_step_remaining -= 1
@@ -551,6 +672,7 @@ def get_episode_data(env, maddpg, config, logdir, ref_vals, ref_std_devs, detect
         second_order_observation_influences = compute_second_order_observation_influences(maddpg, obs, list(actions.values()), env.action_space)
         second_order_observation_influences_history.append(second_order_observation_influences)
         results_sec_dir_derivatives = compute_2nd_ord_dir_derivatives(maddpg, obs, list(actions.values()), env.action_space, atk_agent_id)
+        q_values_history.append(collect_agent_q_values(maddpg, obs, list(actions.values()), env.action_space))
 
         for i in range(maddpg.nagents):
             result_deques[i].append(results[i])
@@ -558,14 +680,14 @@ def get_episode_data(env, maddpg, config, logdir, ref_vals, ref_std_devs, detect
             # Apply different detection methods
             if detection_method == 'mean_std':
                 detection_value = np.mean(result_deques[i])
-                threshold_exceeded = abs(detection_value - ref_vals[i][cnt]) > K_SIGMA * ref_std_devs[i][cnt]
+                threshold_exceeded = abs(detection_value - ref_vals[i][cnt]) > K_SIGMA * ref_std_devs[i][cnt] and not np.isclose(detection_value, ref_vals[i][cnt], rtol=1e-5, atol=1e-5)
             elif detection_method == 'median_mad':
                 detection_value = np.mean(result_deques[i])
-                threshold_exceeded = abs(detection_value - ref_vals[i][cnt]) > K_SIGMA * ref_std_devs[i][cnt]
+                threshold_exceeded = abs(detection_value - ref_vals[i][cnt]) > K_SIGMA * ref_std_devs[i][cnt] and not np.isclose(detection_value, ref_vals[i][cnt], rtol=1e-5, atol=1e-5)
             elif detection_method == 'diff':
                 if cnt > 0:
                     current_diff = results[i] - prev_errors[i]
-                    threshold_exceeded = abs(current_diff - ref_vals[i][cnt]) > K_SIGMA * ref_std_devs[i][cnt]
+                    threshold_exceeded = abs(current_diff - ref_vals[i][cnt]) > K_SIGMA * ref_std_devs[i][cnt] and not np.isclose(current_diff, ref_vals[i][cnt], rtol=1e-5, atol=1e-5)
                     detection_value = current_diff
                 else:
                     threshold_exceeded = False
@@ -622,7 +744,7 @@ def get_episode_data(env, maddpg, config, logdir, ref_vals, ref_std_devs, detect
         imageio.mimsave(os.path.join(logdir, f'{config.env_id}_episode_atk_{atk_agent_id if do_attack else "free"}.gif'), frames, duration=125)
         print(f"Saved gif of episode to {logdir}")
     print("")
-    return metric_vals, attacked_steps, frob_norms_list, sec_dir_derivatives, frob_norms_matrix_history, fault_timeline, action_influences_matrix_history, second_order_action_influences_history, observation_influences_matrix_history, second_order_observation_influences_history
+    return metric_vals, attacked_steps, frob_norms_list, sec_dir_derivatives, frob_norms_matrix_history, fault_timeline, action_influences_matrix_history, second_order_action_influences_history, observation_influences_matrix_history, second_order_observation_influences_history, q_values_history
 
 
 def plot_results(results_attacked, attacked_steps, atk_agent_id, ref_vals, ref_std_devs, logdir, detection_method='mean_std'):
@@ -1627,6 +1749,274 @@ def plot_normal_scenario_action_influences_stacked(timesteps, agents, action_inf
     plt.show()
     print(f"Saved normal scenario stacked action influences plot to {out_path}")
     print(f"Normal scenario plot includes {k} timesteps corresponding to fault detection events")
+
+
+def plot_normal_scenario_frob_norms_stacked(timesteps, agents, frob_norms_matrix_history_normal, total_agents, logdir):
+    """
+    Plot stacked bar charts for Frobenius norm influences in the normal (unattacked) scenario.
+    Uses the same timesteps and agents as the fault detection timeline for direct comparison.
+    
+    Args:
+        timesteps: List of timesteps to plot (from fault detection timeline)
+        agents: List of agents to show Frobenius norm influences for (from fault detection timeline)
+        frob_norms_matrix_history_normal: Normal scenario Frobenius norm matrices data
+        total_agents: Total number of agents
+        logdir: Directory to save the plot
+    """
+    if len(timesteps) == 0:
+        print("No timesteps provided; skipping normal scenario stacked Frobenius norms plot.")
+        return
+
+    k = len(timesteps)
+    fig = plt.figure(figsize=(min(12, 0.7 * k + 4), 5))  # Reduced base width and increased coefficient for tighter spacing
+    
+    # Create a single plot for just the stacked bar chart
+    ax_main = plt.subplot(1, 1, 1)  # Single plot without timeline
+
+    agent_colors = get_agent_colors(total_agents)
+
+    # --- Main stacked bar chart ---
+    if k == 0:
+        ax_main.text(0.5, 0.5, 'No events to display',
+                     ha='center', va='center', fontsize=12, style='italic',
+                     transform=ax_main.transAxes)
+        ax_main.axis('off')
+    else:
+        # Use index-based positioning to handle multiple events at same timestep
+        bar_width = 0.6  # Decreased bar width to 0.6
+        
+        # Plot stacked bars for each event (using index-based positioning)
+        for i, (timestep, agent) in enumerate(zip(timesteps, agents)):
+            # Get Frobenius norm matrix at the specified timestep (if available)
+            if timestep < len(frob_norms_matrix_history_normal):
+                frob_matrix = frob_norms_matrix_history_normal[timestep]
+                
+                # Create contributors dict from Frobenius norm influences (include all agents including self)
+                contribs = {}
+                for j in range(total_agents):
+                    contribs[j] = abs(frob_matrix[agent][j])  # Use absolute value of Frobenius norm influence
+            else:
+                contribs = {}
+
+            if len(contribs) == 0:
+                # No data case
+                ax_main.text(i, 0.5, 'No\nData',
+                            ha='center', va='center', fontsize=9, style='italic',
+                            color='gray')
+                ax_main.bar(i, 1, bar_width, color='lightgray', alpha=0.3)
+                
+            else:
+                # Prepare data for stacked bar chart - ensure no duplicates
+                # Sort by agent ID for consistent ordering
+                sorted_agents = sorted(contribs.keys())
+                influences = [contribs[agent_id] for agent_id in sorted_agents]
+                
+                # Normalize influences to sum to 1 for percentage representation
+                total_influence = sum(influences)
+                if total_influence > 0:
+                    influences = [influence / total_influence for influence in influences]
+                
+                colors = [agent_colors[agent_id] for agent_id in sorted_agents]
+                
+                # Create stacked bar chart with proper tracking
+                bottom = 0
+                labeled_segments = []  # Track which segments get labels to avoid overlap
+                
+                for agent_id, influence, color in zip(sorted_agents, influences, colors):
+                    bar = ax_main.bar(i, influence, bar_width, bottom=bottom, 
+                                        color=color, edgecolor='white', linewidth=0.5)
+                    
+                    # Store segment info for potential labeling
+                    labeled_segments.append({
+                        'agent_id': agent_id,
+                        'influence': influence,
+                        'bottom': bottom,
+                        'height': influence
+                    })
+                    
+                    bottom += influence
+
+                for seg in labeled_segments:
+                    label_y = seg['bottom'] + seg['height'] / 2
+                    ax_main.text(i, label_y, f'{seg["influence"]*100:.0f}%', 
+                                ha='center', va='center', fontsize=8, fontweight='bold',
+                                color='white')
+
+            # Add title above each bar with better formatting
+            title_parts = f"Frob Influence\nAgent {agent}".split('\n')
+            ax_main.text(i, 1.02, '\n'.join(title_parts),
+                        ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+        # Customize the main plot
+        ax_main.set_xlim(-0.5, k - 0.5)  # Restore proper margins to show all bars
+        ax_main.set_ylim(0, 1)
+        ax_main.set_ylabel('Frobenius Norm Influence', fontsize=12, fontweight='bold')
+        
+        # Set x-ticks to show event indices with timestep info
+        ax_main.set_xticks(range(k))
+        x_labels = []
+        for i, timestep in enumerate(timesteps):
+            # Create labels that show both index and timestep
+            label = f"t={timestep}"
+            x_labels.append(label)
+        ax_main.set_xticklabels(x_labels, fontsize=9, ha='center')
+        
+        # Add grid for better readability
+        ax_main.grid(True, axis='y', alpha=0.3, linestyle='--')
+        ax_main.grid(True, axis='x', alpha=0.2, linestyle=':')
+
+    # Create legend at the bottom
+    legend_elements = [Patch(facecolor=agent_colors[i], label=f"Agent {i}") for i in range(total_agents)]
+    
+    fig.legend(handles=legend_elements, loc='lower center', 
+               bbox_to_anchor=(0.5, 0.02), ncol=min(len(legend_elements), 10),
+               fontsize=9, frameon=True, fancybox=True, shadow=True)
+
+    fig.suptitle('Normal Scenario: Frobenius Norm Influence Analysis',
+                 fontsize=16, fontweight='bold', y=0.95)
+
+    # Adjust layout to make room for legend
+    plt.tight_layout(rect=[0.05, 0.08, 1, 0.92])
+
+    out_path = os.path.join(logdir, 'normal_scenario_frob_norms_stacked.png')
+    plt.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved normal scenario stacked Frobenius norms plot to {out_path}")
+    print(f"Normal scenario Frobenius norms plot includes {k} timesteps corresponding to fault detection events")
+
+
+def plot_attacked_scenario_frob_norms_stacked(timesteps, agents, frob_norms_matrix_history, total_agents, logdir):
+    """
+    Plot stacked bar charts for Frobenius norm influences in the attacked scenario.
+    Uses the same timesteps and agents as the fault detection timeline for direct comparison.
+    
+    Args:
+        timesteps: List of timesteps to plot (from fault detection timeline)
+        agents: List of agents to show Frobenius norm influences for (from fault detection timeline)
+        frob_norms_matrix_history: Attacked scenario Frobenius norm matrices data
+        total_agents: Total number of agents
+        logdir: Directory to save the plot
+    """
+    if len(timesteps) == 0:
+        print("No timesteps provided; skipping attacked scenario stacked Frobenius norms plot.")
+        return
+
+    k = len(timesteps)
+    fig = plt.figure(figsize=(min(12, 0.7 * k + 4), 5))  # Reduced base width and increased coefficient for tighter spacing
+    
+    # Create a single plot for just the stacked bar chart
+    ax_main = plt.subplot(1, 1, 1)  # Single plot without timeline
+
+    agent_colors = get_agent_colors(total_agents)
+
+    # --- Main stacked bar chart ---
+    if k == 0:
+        ax_main.text(0.5, 0.5, 'No events to display',
+                     ha='center', va='center', fontsize=12, style='italic',
+                     transform=ax_main.transAxes)
+        ax_main.axis('off')
+    else:
+        # Use index-based positioning to handle multiple events at same timestep
+        bar_width = 0.6  # Decreased bar width to 0.6
+        
+        # Plot stacked bars for each event (using index-based positioning)
+        for i, (timestep, agent) in enumerate(zip(timesteps, agents)):
+            # Get Frobenius norm matrix at the specified timestep (if available)
+            if timestep < len(frob_norms_matrix_history):
+                frob_matrix = frob_norms_matrix_history[timestep]
+                
+                # Create contributors dict from Frobenius norm influences (include all agents including self)
+                contribs = {}
+                for j in range(total_agents):
+                    contribs[j] = abs(frob_matrix[agent][j])  # Use absolute value of Frobenius norm influence
+            else:
+                contribs = {}
+
+            if len(contribs) == 0:
+                # No data case
+                ax_main.text(i, 0.5, 'No\nData',
+                            ha='center', va='center', fontsize=9, style='italic',
+                            color='gray')
+                ax_main.bar(i, 1, bar_width, color='lightgray', alpha=0.3)
+                
+            else:
+                # Prepare data for stacked bar chart - ensure no duplicates
+                # Sort by agent ID for consistent ordering
+                sorted_agents = sorted(contribs.keys())
+                influences = [contribs[agent_id] for agent_id in sorted_agents]
+                
+                # Normalize influences to sum to 1 for percentage representation
+                total_influence = sum(influences)
+                if total_influence > 0:
+                    influences = [influence / total_influence for influence in influences]
+                
+                colors = [agent_colors[agent_id] for agent_id in sorted_agents]
+                
+                # Create stacked bar chart with proper tracking
+                bottom = 0
+                labeled_segments = []  # Track which segments get labels to avoid overlap
+                
+                for agent_id, influence, color in zip(sorted_agents, influences, colors):
+                    bar = ax_main.bar(i, influence, bar_width, bottom=bottom, 
+                                        color=color, edgecolor='white', linewidth=0.5)
+                    
+                    # Store segment info for potential labeling
+                    labeled_segments.append({
+                        'agent_id': agent_id,
+                        'influence': influence,
+                        'bottom': bottom,
+                        'height': influence
+                    })
+                    
+                    bottom += influence
+
+                for seg in labeled_segments:
+                    label_y = seg['bottom'] + seg['height'] / 2
+                    ax_main.text(i, label_y, f'{seg["influence"]*100:.0f}%', 
+                                ha='center', va='center', fontsize=8, fontweight='bold',
+                                color='white')
+
+            # Add title above each bar with better formatting
+            title_parts = f"Frob Influence\nAgent {agent}".split('\n')
+            ax_main.text(i, 1.02, '\n'.join(title_parts),
+                        ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+        # Customize the main plot
+        ax_main.set_xlim(-0.5, k - 0.5)  # Restore proper margins to show all bars
+        ax_main.set_ylim(0, 1)
+        ax_main.set_ylabel('Frobenius Norm Influence', fontsize=12, fontweight='bold')
+        
+        # Set x-ticks to show event indices with timestep info
+        ax_main.set_xticks(range(k))
+        x_labels = []
+        for i, timestep in enumerate(timesteps):
+            # Create labels that show both index and timestep
+            label = f"t={timestep}"
+            x_labels.append(label)
+        ax_main.set_xticklabels(x_labels, fontsize=9, ha='center')
+        
+        # Add grid for better readability
+        ax_main.grid(True, axis='y', alpha=0.3, linestyle='--')
+        ax_main.grid(True, axis='x', alpha=0.2, linestyle=':')
+
+    # Create legend at the bottom
+    legend_elements = [Patch(facecolor=agent_colors[i], label=f"Agent {i}") for i in range(total_agents)]
+    
+    fig.legend(handles=legend_elements, loc='lower center', 
+               bbox_to_anchor=(0.5, 0.02), ncol=min(len(legend_elements), 10),
+               fontsize=9, frameon=True, fancybox=True, shadow=True)
+
+    fig.suptitle('Attacked Scenario: Frobenius Norm Influence Analysis',
+                 fontsize=16, fontweight='bold', y=0.95)
+
+    # Adjust layout to make room for legend
+    plt.tight_layout(rect=[0.05, 0.08, 1, 0.92])
+
+    out_path = os.path.join(logdir, 'attacked_scenario_frob_norms_stacked.png')
+    plt.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved attacked scenario stacked Frobenius norms plot to {out_path}")
+    print(f"Attacked scenario Frobenius norms plot includes {k} timesteps corresponding to fault detection events")
 
 
 def plot_action_influences(action_influences_matrix_history_normal, action_influences_matrix_history, attacked_steps, atk_agent_id, logdir):
@@ -2958,8 +3348,66 @@ def save_matrix_to_files(matrix, attacked_steps, attacked_agent_id, total_agents
     print(f"Saved {len(matrix)} timestep matrices to {filepath}")
 
 
+def save_q_values_csv(q_values, logdir, filename):
+    """Save raw per-agent Q-values over timesteps to CSV format."""
+    if len(q_values) == 0:
+        print(f"No Q-values recorded for {filename}; skipping save.")
+        return
+
+    num_agents = len(q_values[0])
+    timesteps = len(q_values)
+    header = ["agent_id"] + [f"timestep_{t}" for t in range(timesteps)]
+    filepath = os.path.join(logdir, filename)
+
+    with open(filepath, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(header)
+
+        for agent_id in range(num_agents):
+            row = [agent_id]
+            for t in range(timesteps):
+                row.append(q_values[t][agent_id])
+            writer.writerow(row)
+
+    print(f"Saved Q-values ({timesteps} timesteps) to {filepath}")
+
+
+def save_q_value_drop_csv(normal_q_values, attacked_q_values, logdir, filename):
+    """Save per-agent Q-value drop (attacked - normal) over timesteps to CSV format."""
+    if len(normal_q_values) == 0 or len(attacked_q_values) == 0:
+        print("No Q-values available to save.")
+        return
+
+    truncated_steps = min(len(normal_q_values), len(attacked_q_values))
+    if truncated_steps == 0:
+        print("No overlapping timesteps for Q-value comparison.")
+        return
+
+    num_agents = len(normal_q_values[0])
+    header = ["agent_id"] + [f"timestep_{t}" for t in range(truncated_steps)]
+    filepath = os.path.join(logdir, filename)
+
+    with open(filepath, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(header)
+
+        for agent_id in range(num_agents):
+            row = [agent_id]
+            for t in range(truncated_steps):
+                drop_val = attacked_q_values[t][agent_id] - normal_q_values[t][agent_id]
+                row.append(drop_val)
+            writer.writerow(row)
+
+    print(f"Saved Q-value drops ({truncated_steps} timesteps) to {filepath}")
+
+    if truncated_steps < len(normal_q_values) or truncated_steps < len(attacked_q_values):
+        print("Warning: Episodes ended at different lengths; truncated to minimum duration for comparison.")
+
+
 def run(config):
     maddpg = MADDPG.init_from_save(config.model_path, test_mode=True)
+    np.random.seed(config.seed)
+    torch.manual_seed(config.seed)
 
     # create a log directory under runs/<env_id>/<timestamp> using os and getcwd
     cwd = os.getcwd()
@@ -2983,7 +3431,7 @@ def run(config):
             env = preprocess_env_atari(env)
 
     env = PettingZooWrapper.wrap_env(env)
-    env.reset()
+    env.reset(seed=config.seed)
 
     # maddpg.prep_rollouts(device=DEVICE)
     maddpg.prep_training(device=DEVICE)
@@ -3018,12 +3466,30 @@ def run(config):
     attacked_agent_id = config.attack_agent_id  # specify the agent to attack
     seed = config.seed
 
-    results_normal, _, frob_norms_normal, sec_dir_derivatives_normal, frob_norms_matrix_history_normal, _, action_influences_matrix_history_normal, second_order_action_influences_history_normal, observation_influences_matrix_history_normal, second_order_observation_influences_history_normal = get_episode_data(env, maddpg, config, logdir, ref_vals, ref_std_devs, config.detection_method, do_attack=False, atk_agent_id=attacked_agent_id, seed=seed)
+    results_normal, _, frob_norms_normal, sec_dir_derivatives_normal, frob_norms_matrix_history_normal, _, action_influences_matrix_history_normal, second_order_action_influences_history_normal, observation_influences_matrix_history_normal, second_order_observation_influences_history_normal, q_values_normal = get_episode_data(env, maddpg, config, logdir, ref_vals, ref_std_devs, config.detection_method, do_attack=False, atk_agent_id=attacked_agent_id, seed=seed)
 
-    results_attacked, attacked_steps, frob_norms_atk, sec_dir_derivatives_atk, frob_norms_matrix_history, fault_timeline, action_influences_matrix_history, second_order_action_influences_history, observation_influences_matrix_history, second_order_observation_influences_history = get_episode_data(env, maddpg, config, logdir, ref_vals, ref_std_devs, config.detection_method, do_attack=True, atk_agent_id=attacked_agent_id, seed=seed)
+    results_attacked, attacked_steps, frob_norms_atk, sec_dir_derivatives_atk, frob_norms_matrix_history, fault_timeline, action_influences_matrix_history, second_order_action_influences_history, observation_influences_matrix_history, second_order_observation_influences_history, q_values_attacked = get_episode_data(env, maddpg, config, logdir, ref_vals, ref_std_devs, config.detection_method, do_attack=True, atk_agent_id=attacked_agent_id, seed=seed)
     save_matrix_to_files(results_attacked, attacked_steps, attacked_agent_id, maddpg.nagents, logdir, f'maddpg_taylor_error_atk_{attacked_agent_id}.csv')
     save_matrix_to_files(frob_norms_atk, attacked_steps, attacked_agent_id, maddpg.nagents, logdir, f'maddpg_frobenius_norms_atk_{attacked_agent_id}.csv')
     save_matrix_to_files(sec_dir_derivatives_atk, attacked_steps, attacked_agent_id, maddpg.nagents, logdir, f'maddpg_sec_dir_derivatives_atk_{attacked_agent_id}.csv')
+    save_q_values_csv(q_values_normal, logdir, f'maddpg_q_values_normal_{attacked_agent_id}.csv')
+    save_q_values_csv(q_values_attacked, logdir, f'maddpg_q_values_attacked_{attacked_agent_id}.csv')
+    save_q_value_drop_csv(q_values_normal, q_values_attacked, logdir, f'maddpg_q_value_drop_attacked_{attacked_agent_id}.csv')
+
+    lambda_decay = getattr(config, 'influence_decay_lambda', DEFAULT_INFLUENCE_DECAY_LAMBDA)
+    patient_zero_agent, patient_zero_time = get_patient_zero_detection(fault_timeline)
+    if patient_zero_time is not None and action_influences_matrix_history:
+        patient_zero_index = int(patient_zero_time)
+        decayed_influence_matrix = compute_decayed_action_influence(action_influences_matrix_history, patient_zero_index, lambda_decay)
+        save_decayed_action_influence_csv(
+            decayed_influence_matrix,
+            logdir,
+            f'maddpg_decayed_action_influence_{attacked_agent_id}',
+            start_timestep=patient_zero_index
+        )
+        print(f"Patient zero detected: agent {patient_zero_agent} at timestep {patient_zero_index}. Decayed influence saved.")
+    else:
+        print("No patient zero detection found; skipping decayed action influence export.")
     
     # Save action influences matrix data - need to convert from N×N matrices per timestep to per-agent time series
     action_influences_per_agent = []
@@ -3059,6 +3525,10 @@ def run(config):
     timesteps, agents = plot_fault_timeline_action_influences_stacked(fault_timeline, action_influences_matrix_history, maddpg.nagents, logdir)
     plot_normal_scenario_action_influences_stacked(timesteps, agents, action_influences_matrix_history_normal, maddpg.nagents, logdir)
     
+    # Plot Frobenius norm influences stacked for both normal and attacked scenarios
+    plot_normal_scenario_frob_norms_stacked(timesteps, agents, frob_norms_matrix_history_normal, maddpg.nagents, logdir)
+    plot_attacked_scenario_frob_norms_stacked(timesteps, agents, frob_norms_matrix_history, maddpg.nagents, logdir)
+    
     plot_fault_timeline_second_order_action_influences(fault_timeline, second_order_action_influences_history, maddpg.nagents, logdir)
     plot_fault_timeline_observation_influences(fault_timeline, observation_influences_matrix_history, maddpg.nagents, logdir)
     plot_fault_timeline_second_order_observation_influences(fault_timeline, second_order_observation_influences_history, maddpg.nagents, logdir)
@@ -3080,6 +3550,8 @@ if __name__ == '__main__':
                         choices=['mean_std', 'median_mad', 'diff'],
                         help="Detection method to use: 'mean_std', 'median_mad', or 'diff'")
     parser.add_argument("--seed", type=int, default=23)
+    parser.add_argument("--influence_decay_lambda", type=float, default=DEFAULT_INFLUENCE_DECAY_LAMBDA,
+                        help="Exponential decay lambda applied when aggregating action influences after patient zero detection")
 
     config = parser.parse_args()
 

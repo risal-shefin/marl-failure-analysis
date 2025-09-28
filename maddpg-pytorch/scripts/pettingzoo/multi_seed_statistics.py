@@ -63,8 +63,8 @@ class MultiSeedExperimentRunner:
         cwd = os.getcwd()
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         env_type = 'discrete' if self.maddpg.discrete_action else 'continuous'
-        self.logdir = os.path.join(cwd, 'runs', f"{self.config.env_id}_{env_type}", 
-                                  f"{timestamp}_multi_seed_stats_{self.total_experiments}")
+        self.logdir = os.path.join(cwd, 'runs', f"{self.config.env_id}_{env_type}_multi_seed_detection_stats", 
+                                  f"{timestamp}_nagents{self.maddpg.nagents}_total_experiments{self.total_experiments}")
         os.makedirs(self.logdir, exist_ok=True)
         
         # Create environment
@@ -102,8 +102,8 @@ class MultiSeedExperimentRunner:
         
         for episode in tqdm(range(total_episodes), desc=f"Reference episodes (seed {seed})"):
             # Reset environment with seed
-            obs = self.env.reset(seed=seed) if hasattr(self.env, 'reset') else self.env.reset()
-            episode_results = []
+            obs = self.env.reset(seed=seed)
+            result_deques = [deque(maxlen=5) for _ in range(self.maddpg.nagents)]
             timestep = 0
             
             while True:
@@ -136,9 +136,10 @@ class MultiSeedExperimentRunner:
                 
                 # Store results for each agent at this timestep
                 for agent_id in range(self.maddpg.nagents):
+                    result_deques[agent_id].append(results[agent_id])
                     if timestep not in result_dataset[agent_id]:
                         result_dataset[agent_id][timestep] = []
-                    result_dataset[agent_id][timestep].append(results[agent_id])
+                    result_dataset[agent_id][timestep].append(np.mean(result_deques[agent_id]))
                 
                 # Environment step
                 next_obs, rewards, dones, infos = self.env.step(actions)
@@ -184,6 +185,7 @@ class MultiSeedExperimentRunner:
         action_influences_history = []
         q_values_history = []
         timestep = 0
+        episode_reward = 0
         
         while True:
             torch_obs = [Variable(torch.tensor([obs[i]], dtype=torch.float32).to(torch_device), requires_grad=False) 
@@ -216,10 +218,12 @@ class MultiSeedExperimentRunner:
             next_obs, rewards, dones, infos = self.env.step(actions)
             obs = next_obs
             timestep += 1
+            episode_reward += np.sum(rewards)
             
             if dones.all():
                 break
         
+        print("Episode reward (normal):", episode_reward)
         return {
             'action_influences_history': action_influences_history,
             'q_values_history': q_values_history,
@@ -334,8 +338,8 @@ class MultiSeedExperimentRunner:
                 
                 if timestep < len(ref_vals[i]) and timestep < len(ref_std_devs[i]):
                     detection_value = np.mean(result_deques[i])
-                    threshold_exceeded = abs(detection_value - ref_vals[i][timestep]) > \
-                                       K_SIGMA * ref_std_devs[i][timestep]
+                    threshold_exceeded = abs(detection_value - ref_vals[i][timestep]) > K_SIGMA * ref_std_devs[i][timestep] \
+                                         and not np.isclose(detection_value, ref_vals[i][timestep], rtol=1e-5, atol=1e-5)
                     
                     if threshold_exceeded and i not in fault_first_detected:
                         fault_first_detected[i] = timestep
@@ -439,7 +443,7 @@ class MultiSeedExperimentRunner:
             
             # Check if exceeds threshold (mean ± K_SIGMA * std_dev)
             threshold = K_SIGMA * ref_std
-            if taylor_deviation > threshold:
+            if taylor_deviation > threshold and not np.isclose(taylor_error, ref_mean, rtol=1e-5, atol=1e-5):
                 exceed_count += 1
         
         # Compute exceed rate
@@ -634,26 +638,28 @@ class MultiSeedExperimentRunner:
                     exceed_rate_expectation_correct += 1
                 
                 # Log failed expectations
-                failed_expectations.append({
-                    'seed': seed,
-                    'agent_i_influencer_attacked': pair_result['agent_i'],
-                    'agent_j_influenced_observed': pair_result['agent_j'],
-                    'q_drop_max_failed': not q_drop_max_better,
-                    'q_drop_weighted_failed': not q_drop_weighted_better,
-                    'taylor_max_failed': not taylor_max_better,
-                    'taylor_weighted_failed': not taylor_weighted_better,
-                    'exceed_rate_failed': not exceed_rate_better,
-                    'high_q_drop_max': high_metrics['max_q_drop'],
-                    'low_q_drop_max': low_metrics['max_q_drop'],
-                    'high_q_drop_weighted': high_metrics['weighted_q_drop_sum'],
-                    'low_q_drop_weighted': low_metrics['weighted_q_drop_sum'],
-                    'high_taylor_max': high_metrics['max_abs_taylor_deviation'],
-                    'low_taylor_max': low_metrics['max_abs_taylor_deviation'],
-                    'high_taylor_weighted': high_metrics['weighted_taylor_deviation_sum'],
-                    'low_taylor_weighted': low_metrics['weighted_taylor_deviation_sum'],
-                    'high_exceed_rate': high_metrics['exceed_rate'],
-                    'low_exceed_rate': low_metrics['exceed_rate']
-                })
+                if not q_drop_max_better and not q_drop_weighted_better and \
+                   not taylor_max_better and not taylor_weighted_better and not exceed_rate_better:
+                    failed_expectations.append({
+                        'seed': seed,
+                        'agent_i_influencer_attacked': pair_result['agent_i'],
+                        'agent_j_influenced_observed': pair_result['agent_j'],
+                        'q_drop_max_failed': not q_drop_max_better,
+                        'q_drop_weighted_failed': not q_drop_weighted_better,
+                        'taylor_max_failed': not taylor_max_better,
+                        'taylor_weighted_failed': not taylor_weighted_better,
+                        'exceed_rate_failed': not exceed_rate_better,
+                        'high_q_drop_max': high_metrics['max_q_drop'],
+                        'low_q_drop_max': low_metrics['max_q_drop'],
+                        'high_q_drop_weighted': high_metrics['weighted_q_drop_sum'],
+                        'low_q_drop_weighted': low_metrics['weighted_q_drop_sum'],
+                        'high_taylor_max': high_metrics['max_abs_taylor_deviation'],
+                        'low_taylor_max': low_metrics['max_abs_taylor_deviation'],
+                        'high_taylor_weighted': high_metrics['weighted_taylor_deviation_sum'],
+                        'low_taylor_weighted': low_metrics['weighted_taylor_deviation_sum'],
+                        'high_exceed_rate': high_metrics['exceed_rate'],
+                        'low_exceed_rate': low_metrics['exceed_rate']
+                    })
         
         total_experiments = len(self.experiment_results)
         
@@ -742,9 +748,9 @@ class MultiSeedExperimentRunner:
                 'seed', 'agent_i_influencer_attacked', 'agent_j_influenced_observed', 'max_influence_t', 'min_influence_t',
                 'high_patient_zero', 'high_patient_time', 'low_patient_zero', 'low_patient_time',
                 'high_max_q_drop', 'high_weighted_q_drop_sum', 'high_max_abs_taylor_deviation',
-                'high_weighted_taylor_deviation_sum', 'high_exceed_rate',
+                'high_weighted_taylor_deviation_sum', 'high_exceed_rate', 'high_window_length',
                 'low_max_q_drop', 'low_weighted_q_drop_sum', 'low_max_abs_taylor_deviation',
-                'low_weighted_taylor_deviation_sum', 'low_exceed_rate',
+                'low_weighted_taylor_deviation_sum', 'low_exceed_rate', 'low_window_length',
                 'episode_length'
             ]
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)

@@ -33,7 +33,7 @@ def create_environment(config, maddpg):
             env = env_func.parallel_env(
                 continuous_actions=not maddpg.discrete_action, 
                 render_mode='rgb_array', 
-                N=3
+                N=maddpg.nagents
             )
         else:
             env = env_func.parallel_env(
