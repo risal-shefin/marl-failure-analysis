@@ -3,6 +3,7 @@ import argparse
 from collections import deque
 import sys
 import os
+# from sqlalchemy import values
 import yaml
 # Add HARL to Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,7 +16,8 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 from datetime import datetime
 import csv
-
+import warnings
+warnings.filterwarnings("ignore")
 def load_taylor_history_csvs(csv_paths):
     """
     Load pre-computed Taylor history from CSV files for all agents.
@@ -44,6 +46,614 @@ def load_taylor_history_csvs(csv_paths):
     return taylor_history_data
 
 # -------------- Ploting Starts Here -----------------
+def plot_fault_timeline_action_influences_stacked(fault_timeline, action_influences_matrix_history, total_agents, logdir):
+    """
+    Plot fault timeline with stacked bar charts for action influence contributors.
+    Each fault event shows the action influences from other agents as contributors in a stacked bar format.
+    Additionally flags ALL timesteps where faulty agents are among top-k influencers on non-faulty agents.
+    """
+    if len(fault_timeline) == 0:
+        print("No faults detected; skipping stacked action influences fault timeline plot.")
+        return
+
+    # Parameters for top-k influence detection
+    k_top = 2  # Look for faulty agents in top-2 influencers
+    
+    # Create a mapping of when each agent was first detected as faulty
+    fault_detection_times = {}  # agent_id -> timestep when first detected as faulty
+    for event in fault_timeline:
+        if event['agent'] not in fault_detection_times:
+            fault_detection_times[event['agent']] = event['t']
+    
+    # Find the last fault detection timestep to stop flagging after this point
+    last_fault_detection_time = max(fault_detection_times.values()) if fault_detection_times else -1
+    
+    # Find the first fault detection timestep for mean calculation
+    first_fault_detection_time = min(fault_detection_times.values()) if fault_detection_times else -1
+    
+    # Find the first faulty agent (patient zero) - the one detected earliest
+    first_faulty_agent = None
+    if fault_detection_times:
+        first_faulty_agent = min(fault_detection_times.keys(), key=lambda agent: fault_detection_times[agent])
+    
+    # Create extended timeline with additional flagged timesteps
+    extended_timeline = []
+    
+    # Add original fault detection events with exact timestep action influences
+    for event in fault_timeline:
+        faulty_agent = event['agent']
+        fault_timestep = event['t']
+        
+        # Get action influences at the exact fault timestep
+        if fault_timestep < len(action_influences_matrix_history):
+            action_influences = action_influences_matrix_history[fault_timestep][faulty_agent]
+            
+            # Create contributors dict from action influences (include all agents including self)
+            contribs = {}
+            for j in range(total_agents):
+                contribs[j] = abs(action_influences[j])  # Use absolute value of influence
+        else:
+            contribs = {}
+        
+        extended_timeline.append({
+            'type': 'fault_detection',
+            'agent': event['agent'],
+            't': event['t'],
+            'contribs': contribs,
+            'description': f"Faulty agent {event['agent']}"
+        })
+    
+    # Get timesteps that already have fault detection events
+    fault_detection_timesteps = set(event['t'] for event in fault_timeline)
+    
+    # Find ALL timesteps where faulty agents are top-k influencers on non-faulty agents
+    # Only check timesteps up to (but not including) the last fault detection
+    # Skip timesteps that already have fault detection events
+    for t in range(min(len(action_influences_matrix_history), last_fault_detection_time)):
+        # Skip if this timestep already has a fault detection event
+        if t in fault_detection_timesteps:
+            continue
+            
+        influences_at_t = action_influences_matrix_history[t]
+        
+        # Get the set of agents that are considered faulty at timestep t
+        faulty_agents_at_t = set()
+        for agent_id, detection_time in fault_detection_times.items():
+            if t >= detection_time:  # Only consider agent faulty from detection time onwards
+                faulty_agents_at_t.add(agent_id)
+        
+        # Skip if no agents are faulty at this timestep
+        if not faulty_agents_at_t:
+            continue
+        
+        # For each non-faulty agent at timestep t, check if any faulty agent is in top-k influencers
+        for non_faulty_agent in range(total_agents):
+            # Check if this agent is faulty at timestep t
+            is_faulty_at_t = non_faulty_agent in faulty_agents_at_t
+            if is_faulty_at_t:
+                continue  # Skip agents that are faulty already
+                
+            # Get influences on this non-faulty agent and rank them
+            agent_influences = [(j, abs(influences_at_t[non_faulty_agent][j])) for j in range(total_agents)]
+            # Sort by influence magnitude (descending)
+            ranked_influences = sorted(agent_influences, key=lambda x: x[1], reverse=True)
+            
+            # Check if any faulty agent is in top-k
+            top_k_agents = [agent_id for agent_id, _ in ranked_influences[:k_top]]
+            faulty_in_top_k = [agent_id for agent_id in top_k_agents if agent_id in faulty_agents_at_t]
+            
+            if faulty_in_top_k:
+                # Include ALL such timesteps, not just first occurrence per (faulty_agent, target_agent) pair
+                # Use exact timestep action influences for top-k influence events
+                if t < len(action_influences_matrix_history):
+                    action_influences = action_influences_matrix_history[t][non_faulty_agent]
+                    
+                    # Create contributors dict from action influences (include all agents including self)
+                    contribs = {}
+                    for j in range(total_agents):
+                        contribs[j] = abs(action_influences[j])  # Use absolute value of influence
+                else:
+                    contribs = {}
+                
+                faulty_list = ', '.join(map(str, faulty_in_top_k))
+                description_lines = [
+                    "Faulty",
+                    "Influence", 
+                    f"A{faulty_list}→A{non_faulty_agent}"
+                ]
+                extended_timeline.append({
+                    'type': 'top_k_influence',
+                    'agent': non_faulty_agent,  # The affected agent
+                    'faulty_influencers': faulty_in_top_k,
+                    't': t,
+                    'contribs': contribs,
+                    'target_agent': non_faulty_agent,
+                    "description": "\n".join(description_lines)
+                })
+    
+    # Sort extended timeline by timestep
+    extended_timeline.sort(key=lambda x: x['t'])
+    
+    if len(extended_timeline) == 0:
+        print("No events to display in stacked action influences fault timeline.")
+        return
+    
+    k = len(extended_timeline)
+    fig = plt.figure(figsize=(max(12, 0.7 * k + 4), 6))
+    
+    # Create a grid layout with tighter spacing
+    gs = fig.add_gridspec(2, 1, height_ratios=[0.8, 2.5], hspace=0.1)  # Reduced hspace from default
+    ax_timeline = fig.add_subplot(gs[0, 0])  # Timeline on top
+    ax_main = fig.add_subplot(gs[1, 0])  # Main stacked bar chart
+
+    agent_colors = get_agent_colors(total_agents)
+
+    # --- Timeline axis (top) ---
+    ax_timeline.axis('off')
+
+    if k > 0:
+        # Get timesteps for x-axis positioning
+        timesteps = [event['t'] for event in extended_timeline]
+        min_t, max_t = min(timesteps), max(timesteps)
+        
+        # Draw timeline arrow
+        arrow_y = 0.5
+        ax_timeline.annotate(
+            '', xy=(0.95, arrow_y), xytext=(0.05, arrow_y),
+            arrowprops=dict(arrowstyle='-|>', lw=2, color='gray'),
+            xycoords='axes fraction', textcoords='axes fraction'
+        )
+
+        # Milestones
+        for i, event in enumerate(extended_timeline):
+            # Map event index to x position (0.1 to 0.9 range) to handle multiple events at same timestep
+            frac_x = (i + 0.5) / k
+
+            # Different markers for different event types
+            if event['type'] == 'fault_detection':
+                marker_color = 'darkred'
+                marker_size = 12
+            else:  # top_k_influence
+                marker_color = 'orange'
+                marker_size = 10
+
+            # Circle marker
+            ax_timeline.plot(frac_x, arrow_y, 'o', color=marker_color, markersize=marker_size, 
+                            transform=ax_timeline.transAxes)
+
+            # Event description above (with better line wrapping)
+            description = event['description']
+            # Check if description already has newlines (properly formatted)
+            if '\n' in description:
+                # Keep the existing newlines - don't override them
+                pass
+            elif len(description) > 20:  # Only wrap if no newlines and too long
+                words = description.split()
+                lines = []
+                current_line = []
+                for word in words:
+                    if len(' '.join(current_line + [word])) <= 20:
+                        current_line.append(word)
+                    else:
+                        if current_line:
+                            lines.append(' '.join(current_line))
+                            current_line = [word]
+                        else:
+                            lines.append(word)
+                if current_line:
+                    lines.append(' '.join(current_line))
+                description = '\n'.join(lines)
+
+            ax_timeline.text(frac_x, arrow_y + 0.1,
+                             description,
+                             ha='center', va='bottom',
+                             fontsize=8, fontweight='bold',
+                             transform=ax_timeline.transAxes)
+
+            # Timestep label below
+            ax_timeline.text(frac_x, arrow_y - 0.1,
+                             f"t = {event['t']}",
+                             ha='center', va='top',
+                             fontsize=10, color='darkblue',
+                             transform=ax_timeline.transAxes)
+
+    # --- Main stacked bar chart (bottom) ---
+    if k == 0:
+        ax_main.text(0.5, 0.5, 'No events to display',
+                     ha='center', va='center', fontsize=12, style='italic',
+                     transform=ax_main.transAxes)
+        ax_main.axis('off')
+    else:
+        # Use index-based positioning to handle multiple events at same timestep
+        bar_width = 0.6  # Decreased bar width to 0.6
+        
+        # Plot stacked bars for each event (using index-based positioning)
+        for i, event in enumerate(extended_timeline):
+            contribs = event.get('contribs', {})
+            
+            # Check if this is the first faulty agent (patient zero) and a fault detection event
+            if (event['type'] == 'fault_detection' and 
+                event['agent'] == first_faulty_agent):
+                # Patient Zero - write vertically to avoid overlap
+                ax_main.text(i, 0.5, 'P\na\nt\ni\ne\nn\nt\n \nZ\ne\nr\no',
+                            ha='center', va='center', fontsize=10, fontweight='bold', 
+                            style='italic', color='darkred', rotation=0)
+                
+                # Add a subtle background bar to indicate the position
+                ax_main.bar(i, 1, bar_width, color='lightgray', alpha=0.3, 
+                           edgecolor='darkred', linewidth=2)
+                
+            elif len(contribs) == 0:
+                # No data case
+                ax_main.text(i, 0.5, 'No\nData',
+                            ha='center', va='center', fontsize=9, style='italic',
+                            color='gray')
+                ax_main.bar(i, 1, bar_width, color='lightgray', alpha=0.3)
+                
+            else:
+                # Prepare data for stacked bar chart - ensure no duplicates
+                # Sort by agent ID for consistent ordering
+                sorted_agents = sorted(contribs.keys())
+                influences = [contribs[agent_id] for agent_id in sorted_agents]
+                
+                # Normalize influences to sum to 1 for percentage representation
+                total_influence = sum(influences)
+                if total_influence > 0:
+                    influences = [influence / total_influence for influence in influences]
+                
+                colors = [agent_colors[agent_id] for agent_id in sorted_agents]
+                
+                # Create stacked bar chart with proper tracking
+                bottom = 0
+                labeled_segments = []  # Track which segments get labels to avoid overlap
+                
+                for agent_id, influence, color in zip(sorted_agents, influences, colors):
+                    bar = ax_main.bar(i, influence, bar_width, bottom=bottom, 
+                                        color=color, edgecolor='white', linewidth=0.5)
+                    
+                    # Store segment info for potential labeling
+                    labeled_segments.append({
+                        'agent_id': agent_id,
+                        'influence': influence,
+                        'bottom': bottom,
+                        'height': influence
+                    })
+                    
+                    bottom += influence
+
+                for seg in labeled_segments:
+                    label_y = seg['bottom'] + seg['height'] / 2
+                    ax_main.text(i, label_y, f'{seg["influence"]*100:.0f}%', 
+                                ha='center', va='center', fontsize=8, fontweight='bold',
+                                color='white')
+
+            # Add title above each bar with better formatting
+            title_parts = f"Influence on\nAgent {event['agent']}".split('\n')
+            ax_main.text(i, 1.02, '\n'.join(title_parts),
+                        ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+        # Customize the main plot
+        ax_main.set_xlim(-0.3, k - 0.7)  # Reduced margins to decrease gaps between bars
+        ax_main.set_ylim(0, 1)
+        ax_main.set_ylabel('Influence', fontsize=12, fontweight='bold')
+        
+        # Set x-ticks to show event indices with timestep info
+        ax_main.set_xticks(range(k))
+        x_labels = []
+        for i, event in enumerate(extended_timeline):
+            # Create labels that show both index and timestep
+            label = f"t={event['t']}"
+            x_labels.append(label)
+        ax_main.set_xticklabels(x_labels, fontsize=9, ha='center')
+        
+        # Add grid for better readability
+        ax_main.grid(True, axis='y', alpha=0.3, linestyle='--')
+        ax_main.grid(True, axis='x', alpha=0.2, linestyle=':')
+
+    # Create legend at the bottom
+    legend_elements = [Patch(facecolor=agent_colors[i], label=f"Agent {i}") for i in range(total_agents)]
+    
+    # Add legend for event types
+    fault_marker = plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='darkred', 
+                             markersize=10, label='Fault Detection')
+    influence_marker = plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='orange', 
+                                 markersize=10, label=f'Vulnerable Top-{k_top} Influence')
+    legend_elements.extend([fault_marker, influence_marker])
+    
+    fig.legend(handles=legend_elements, loc='lower center', 
+               bbox_to_anchor=(0.5, 0.02), ncol=min(len(legend_elements), 10),
+               fontsize=9, frameon=True, fancybox=True, shadow=True)
+
+    fig.suptitle('Fault Detection Timeline with Action Influence Analysis',
+                 fontsize=16, fontweight='bold', y=0.98)  # Moved title up slightly
+
+    # Adjust layout to make room for legend and reduce margins
+    plt.tight_layout(rect=[0.05, 0.08, 1, 0.96])  # Adjusted top margin
+
+    out_path = os.path.join(logdir, 'fault_timeline_action_influences_stacked.png')
+    plt.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved stacked action influences fault timeline plot to {out_path}")
+    print(f"Stacked timeline includes {len([e for e in extended_timeline if e['type'] == 'fault_detection'])} fault detections and {len([e for e in extended_timeline if e['type'] == 'top_k_influence'])} top-{k_top} influence events")
+    
+    # Return timesteps and agents for comparison plotting
+    timesteps = [event['t'] for event in extended_timeline]
+    agents = [event['agent'] for event in extended_timeline]
+    return timesteps, agents
+
+def plot_fault_timeline_action_influences(fault_timeline, action_influences_matrix_history, total_agents, logdir):
+    """
+    Plot fault timeline with action influence contributors instead of Frobenius norm influences.
+    Each fault event shows the action influences from other agents as contributors.
+    Additionally flags timesteps where faulty agents are among top-k influencers on non-faulty agents.
+    """
+    if len(fault_timeline) == 0:
+        print("No faults detected; skipping action influences fault timeline plot.")
+        return
+
+    # Parameters for top-k influence detection
+    k_top = 2  # Look for faulty agents in top-2 influencers
+    
+    # Create a mapping of when each agent was first detected as faulty
+    fault_detection_times = {}  # agent_id -> timestep when first detected as faulty
+    for event in fault_timeline:
+        if event['agent'] not in fault_detection_times:
+            fault_detection_times[event['agent']] = event['t']
+    
+    # Find the last fault detection timestep to stop flagging after this point
+    last_fault_detection_time = max(fault_detection_times.values()) if fault_detection_times else -1
+    
+    # Find the first fault detection timestep for mean calculation
+    first_fault_detection_time = min(fault_detection_times.values()) if fault_detection_times else -1
+    
+    # Find the first faulty agent (patient zero) - the one detected earliest
+    first_faulty_agent = None
+    if fault_detection_times:
+        first_faulty_agent = min(fault_detection_times.keys(), key=lambda agent: fault_detection_times[agent])
+    
+    # Create extended timeline with additional flagged timesteps
+    extended_timeline = []
+    
+    # Track already flagged (faulty_agent, target_agent) pairs to avoid duplicates
+    flagged_pairs = set()  # Set of (faulty_agent_id, target_agent_id) tuples
+    
+    # Add original fault detection events with exact timestep action influences (not mean)
+    for event in fault_timeline:
+        # Use exact timestep action influences for fault detection events (like original version)
+        faulty_agent = event['agent']
+        fault_timestep = event['t']
+        
+        # Get action influences at the exact fault timestep
+        if fault_timestep < len(action_influences_matrix_history):
+            action_influences = action_influences_matrix_history[fault_timestep][faulty_agent]
+            
+            # Create contributors dict from action influences (include all agents including self)
+            contribs = {}
+            for j in range(total_agents):
+                contribs[j] = abs(action_influences[j])  # Use absolute value of influence
+        else:
+            contribs = {}
+        
+        extended_timeline.append({
+            'type': 'fault_detection',
+            'agent': event['agent'],
+            't': event['t'],
+            'contribs': contribs,  # Use exact timestep influences, not mean
+            'description': f"Faulty agent {event['agent']}"
+        })
+    
+    # Find additional timesteps where faulty agents are top-k influencers on non-faulty agents
+    # Only check timesteps up to (but not including) the last fault detection
+    for t in range(min(len(action_influences_matrix_history), last_fault_detection_time)):
+        influences_at_t = action_influences_matrix_history[t]
+        
+        # Get the set of agents that are considered faulty at timestep t
+        faulty_agents_at_t = set()
+        for agent_id, detection_time in fault_detection_times.items():
+            if t >= detection_time:  # Only consider agent faulty from detection time onwards
+                faulty_agents_at_t.add(agent_id)
+        
+        # Skip if no agents are faulty at this timestep
+        if not faulty_agents_at_t:
+            continue
+        
+        # For each non-faulty agent at timestep t, check if any faulty agent is in top-k influencers
+        for non_faulty_agent in range(total_agents):
+            # Check if this agent is faulty at timestep t
+            is_faulty_at_t = non_faulty_agent in faulty_agents_at_t
+            if is_faulty_at_t:
+                continue  # Skip agents that are faulty at this timestep
+                
+            # Get influences on this non-faulty agent and rank them
+            agent_influences = [(j, abs(influences_at_t[non_faulty_agent][j])) for j in range(total_agents)]
+            # Sort by influence magnitude (descending)
+            ranked_influences = sorted(agent_influences, key=lambda x: x[1], reverse=True)
+            
+            # Check if any faulty agent is in top-k
+            top_k_agents = [agent_id for agent_id, _ in ranked_influences[:k_top]]
+            faulty_in_top_k = [agent_id for agent_id in top_k_agents if agent_id in faulty_agents_at_t]
+            
+            if faulty_in_top_k:
+                # Check if any of the faulty agents in top-k have already been flagged for this target
+                new_faulty_influencers = []
+                for faulty_agent in faulty_in_top_k:
+                    pair = (faulty_agent, non_faulty_agent)
+                    if pair not in flagged_pairs:
+                        new_faulty_influencers.append(faulty_agent)
+                        flagged_pairs.add(pair)  # Mark this pair as flagged
+                
+                # Only create an event if there are new faulty influencers to report
+                if new_faulty_influencers:
+                    # Check if this exact timestep+target combination is already in timeline
+                    already_exists = any(event['t'] == t and event.get('target_agent') == non_faulty_agent 
+                                       for event in extended_timeline)
+                    if not already_exists:
+                        # Use exact timestep action influences for top-k influence events (same as fault detection)
+                        if t < len(action_influences_matrix_history):
+                            action_influences = action_influences_matrix_history[t][non_faulty_agent]
+                            
+                            # Create contributors dict from action influences (include all agents including self)
+                            contribs = {}
+                            for j in range(total_agents):
+                                contribs[j] = abs(action_influences[j])  # Use absolute value of influence
+                        else:
+                            contribs = {}
+                        
+                        faulty_list = ', '.join(map(str, new_faulty_influencers))
+                        extended_timeline.append({
+                            'type': 'top_k_influence',
+                            'agent': non_faulty_agent,  # The affected agent
+                            'faulty_influencers': new_faulty_influencers,
+                            't': t,
+                            'contribs': contribs,  # Use exact timestep influences, same as fault detection
+                            'target_agent': non_faulty_agent,
+                            "description": f"Faulty agent {faulty_list} is among the top-{k_top} influencers of Agent {non_faulty_agent}"
+                        })
+    
+    # Sort extended timeline by timestep
+    extended_timeline.sort(key=lambda x: x['t'])
+    
+    if len(extended_timeline) == 0:
+        print("No events to display in action influences fault timeline.")
+        return
+    
+    k = len(extended_timeline)
+    fig = plt.figure(figsize=(max(8, 3*k), 6))  # Increased height for better visibility
+    gs = fig.add_gridspec(
+        3, k,
+        height_ratios=[1.0, 2, 0.1],
+        hspace=0.15
+    )
+
+    cmap = plt.get_cmap('tab20')
+    agent_colors = {i: cmap(i % 20) for i in range(total_agents)}
+
+    # --- Timeline axis (top row) ---
+    ax_timeline = fig.add_subplot(gs[0, :])
+    ax_timeline.axis('off')
+
+    arrow_y = 0.5
+    ax_timeline.annotate(
+        '', xy=(1, arrow_y), xytext=(0, arrow_y),
+        arrowprops=dict(arrowstyle='-|>', lw=2, color='gray'),
+        xycoords='axes fraction', textcoords='axes fraction'
+    )
+
+    # Milestones
+    for i, event in enumerate(extended_timeline):
+        frac_x = (i + 0.5) / k
+
+        # Different markers for different event types
+        if event['type'] == 'fault_detection':
+            marker_color = 'darkred'
+            marker_size = 12
+        else:  # top_k_influence
+            marker_color = 'orange'
+            marker_size = 10
+
+        # Circle marker
+        ax_timeline.plot(frac_x, arrow_y, 'o', color=marker_color, markersize=marker_size, 
+                        transform=ax_timeline.transAxes)
+
+        # Event description above (with line wrapping for long descriptions)
+        description = event['description']
+        if len(description) > 25:  # Wrap long descriptions
+            words = description.split()
+            lines = []
+            current_line = []
+            for word in words:
+                if len(' '.join(current_line + [word])) <= 25:
+                    current_line.append(word)
+                else:
+                    if current_line:
+                        lines.append(' '.join(current_line))
+                        current_line = [word]
+                    else:
+                        lines.append(word)
+            if current_line:
+                lines.append(' '.join(current_line))
+            description = '\n'.join(lines)
+
+        ax_timeline.text(frac_x, arrow_y + 0.15,
+                         description,
+                         ha='center', va='bottom',
+                         fontsize=9, fontweight='bold',
+                         transform=ax_timeline.transAxes)
+
+        # Timestep label below
+        ax_timeline.text(frac_x, arrow_y - 0.15,
+                         f"t = {event['t']}",
+                         ha='center', va='top',
+                         fontsize=10, color='darkblue',
+                         transform=ax_timeline.transAxes)
+
+    # --- Contributor charts (middle row) ---
+    for col, event in enumerate(extended_timeline):
+        ax = fig.add_subplot(gs[1, col])
+        
+        contribs = event.get('contribs', {})
+
+        # Check if this is the first faulty agent (patient zero) and a fault detection event
+        if (event['type'] == 'fault_detection' and 
+            event['agent'] == first_faulty_agent):
+            ax.axis('off')
+            ax.text(0.5, 0.5, 'Patient Zero',
+                    ha='center', va='center', fontsize=12, fontweight='bold', 
+                    style='italic', color='darkred')
+        elif len(contribs) == 0:
+            ax.axis('off')
+            ax.text(0.5, 0.5, 'No Data',
+                    ha='center', va='center', fontsize=10, style='italic')
+        else:
+            vals = np.array(list(contribs.values()), dtype=float)
+            if vals.sum() > 0:
+                vals /= vals.sum()  # Normalize to sum to 1
+            colors = [agent_colors[a] for a in contribs.keys()]
+
+            wedges, _, autotexts = ax.pie(
+                vals, autopct='%1.1f%%', startangle=90, colors=colors,
+                wedgeprops=dict(width=0.35, edgecolor='w')
+            )
+            for at in autotexts:
+                at.set_fontsize(8)
+                at.set_fontweight('bold')
+            
+            # Different title based on event type
+            title = f"Influences on Agent {event['agent']}"
+            # if event['type'] == 'fault_detection':
+            #     title = 'Contributors to Fault'
+            # else:
+            #     title = f"Influences on Agent {event['agent']}"
+            
+            ax.set_title(title, fontsize=10, pad=5)
+            ax.set_aspect('equal')
+
+    # --- Legend row (bottom row) ---
+    ax_legend = fig.add_subplot(gs[2, :])
+    ax_legend.axis('off')
+    legend_elements = [Patch(facecolor=agent_colors[i], label=f"Agent {i}") for i in range(total_agents)]
+    
+    # Add legend for event types
+    fault_marker = plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='darkred', 
+                             markersize=10, label='Fault Detection')
+    influence_marker = plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='orange', 
+                                 markersize=10, label=f'Vulnerable Top-{k_top} Influence')
+    legend_elements.extend([fault_marker, influence_marker])
+    
+    ax_legend.legend(handles=legend_elements, loc='center', ncol=min(len(legend_elements), 8),
+                     fontsize=9, frameon=False)
+
+    fig.suptitle('Fault Detection Timeline with Action Influence Analysis',
+                 fontsize=14, fontweight='bold', y=0.96)
+
+    out_path = os.path.join(logdir, 'fault_timeline_action_influences.png')
+    plt.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Saved enhanced action influences fault timeline plot to {out_path}")
+    print(f"Timeline includes {len([e for e in extended_timeline if e['type'] == 'fault_detection'])} fault detections and {len([e for e in extended_timeline if e['type'] == 'top_k_influence'])} top-{k_top} influence events")
+
+
+
 def plot_results(results, results_attacked, atk_agent_id, logdir):
         os.makedirs(logdir, exist_ok=True)
         n = len(results[0])  # number of agents
@@ -485,6 +1095,8 @@ def eval(runner, attack_status=False, attack_agent_id=0, seed=23, taylor_history
     fault_first_detected = {}  # agent_id -> first detected timestep
     fault_timeline = []
     attacked_steps = []
+    pairwise_action_value_influence_list = []
+    pairwise_action_value_influence_history = []
     taylor_history = [[] for _ in range(runner.num_agents)]
     cnt = 0
 
@@ -506,7 +1118,7 @@ def eval(runner, attack_status=False, attack_agent_id=0, seed=23, taylor_history
 
         eval_actions = np.array(eval_actions_collector).transpose(1, 0, 2)
         
-        if attack_status:
+        if attack_status and (cnt>=10 and cnt<=20):
             # mark attacked step
             # eval_actions[0][attack_agent_id] = runner.eval_envs.action_space[attack_agent_id].sample()  # Random action for attack agent
             # print(f">>>> ",eval_actions[0][attack_agent_id])
@@ -544,6 +1156,9 @@ def eval(runner, attack_status=False, attack_agent_id=0, seed=23, taylor_history
 
 
         # calculating taylor policy
+        pairwise_action_value_influence = compute_pairwise_action_influence(runner, eval_obs, eval_actions)
+        # exit("Exiting for debug")
+        pairwise_action_value_influence_history.append(pairwise_action_value_influence)
         delta_errors = compute_taylor_policy(runner, eval_obs, eval_available_actions, eval_rnn_states_backup)
         # results_frob_norms = compute_frob_norms(runner, eval_obs, 1, eval_rnn_states_critic, eval_masks)
         # results_sec_dir_derivatives = compute_2nd_ord_dir_derivatives(runner, eval_obs, 1, eval_rnn_states_critic, eval_masks)
@@ -573,7 +1188,7 @@ def eval(runner, attack_status=False, attack_agent_id=0, seed=23, taylor_history
                 lower_bound = historical_mean - historical_std
                 upper_bound = historical_mean + historical_std
                 
-                if taylor_approx_error < lower_bound or taylor_approx_error > upper_bound:
+                if taylor_approx_error < lower_bound*0.5 or taylor_approx_error > upper_bound*2.0:
                     print(f" [!!!] Anomaly detected for agent {i} at timestep: {cnt}. Taylor Appx. Error: {taylor_approx_error}")
                     print(f"     >> Historical bounds: [{lower_bound:.6f}, {upper_bound:.6f}], Mean: {historical_mean:.6f}, Std: {historical_std:.6f}")
                     fault_first_detected[i] = cnt
@@ -595,6 +1210,9 @@ def eval(runner, attack_status=False, attack_agent_id=0, seed=23, taylor_history
                     })
 
         taylor_error_list.append([np.mean(list(result_deques[j])) for j in range(runner.num_agents)])
+        # pairwise_action_value_influence_list.append(pairwise_action_value_influence)
+        
+        # exit("Exiting for debug")
         # frob_norms_list.append([np.mean(frob_norms_deques[i]) for i in range(runner.num_agents)])
         # sec_dir_derivatives.append([np.mean(sec_dir_derivatives_deques[i]) for i in range(runner.num_agents)])
 
@@ -652,8 +1270,55 @@ def eval(runner, attack_status=False, attack_agent_id=0, seed=23, taylor_history
 
         cnt += 1
     
+    print(f"Final Pairwise Action Value Influence List: {pairwise_action_value_influence_history}")
     # return taylor_error_list, frob_norms_list, sec_dir_derivatives, frob_norms_matrix_history, fault_timeline, attacked_steps
-    return taylor_error_list, None, None, frob_norms_matrix_history, fault_timeline, attacked_steps
+    return taylor_error_list, pairwise_action_value_influence_history, None, frob_norms_matrix_history, fault_timeline, attacked_steps
+
+
+def compute_pairwise_action_influence(runner, eval_obs, eval_actions):
+    """Compute Frobenius norms of cross-agent Hessian blocks for all (i, j).
+    Returns an N x N matrix where entry [i][j] approximates || \partial^2 v_i / (\partial obs_i \partial obs_j) ||_F.
+    """
+    eval_obs = torch.tensor(eval_obs, dtype=torch.float32)
+
+    agent_obs_tensors = []
+    n_agents = runner.num_agents
+    # assume eval_obs shape (1, n_agents, obs_dim)
+    for i in range(n_agents):
+        agent_obs = eval_obs[0][i].clone().detach()
+        agent_obs_tensor = torch.tensor(agent_obs, dtype=torch.float32, requires_grad=True)
+        agent_obs_tensors.append(agent_obs_tensor)
+
+    concatenated_obs = torch.cat(agent_obs_tensors, dim=0)
+    share_obs = concatenated_obs.unsqueeze(0)
+    concatenated_actions = torch.cat([torch.tensor(eval_actions[0][i], dtype=torch.float32,requires_grad=True) for i in range(n_agents)], dim=0).unsqueeze(0)
+    # concatenated_actions = torch.stack([torch.tensor(eval_actions[0][i], dtype=torch.float32, requires_grad=True) for i in range(n_agents)], dim=0)
+    # print(f"Concatenated actions shape: {concatenated_actions.shape}")
+    # print(f"Share obs shape: {share_obs.shape}")
+
+    N = n_agents
+    results = [[0.0 for _ in range(N)] for _ in range(N)]
+
+    for i in range(N):
+        # gradient of v_i wrt agent i obs
+        q_value = runner.central_q[i].get_q_values(
+            share_obs,
+            concatenated_actions,
+            gradNeed=True
+        ).squeeze()
+        # print(f"Q value for agent {i}: {q_value.item()}")
+        for j in range(N):
+            grad_i = torch.autograd.grad(q_value, agent_obs_tensors[j], create_graph=True, retain_graph=True)[0]
+            results[i][j] = grad_i.norm(p=2).item()
+
+    # print(f"full Results matrix before normalization: {results}")
+    # Normalize each row by its sum
+    for i in range(N):
+        row_sum = sum(results[i])
+        if row_sum > 0:
+            for j in range(N):
+                results[i][j] /= row_sum
+    return results
 
 def compute_pairwise_frob_norms(runner, eval_obs, eval_rnn_states_critic, eval_masks):
     """Compute Frobenius norms of cross-agent Hessian blocks for all (i, j).
@@ -769,19 +1434,35 @@ def compute_frob_norms(runner, eval_obs, vulnerable_agent_id, eval_rnn_states_cr
         # Convert to tensor and compute eigenvalues
         H = torch.stack(hessian_matrix)
 
-        # Compute eigenvalues
-        eigenvalues = torch.linalg.eigvals(H)
-        real_eigenvalues = eigenvalues.real
-        negative_count = (real_eigenvalues < 0).sum().item()
-        total_count = len(real_eigenvalues)
-        negative_ratio = negative_count / total_count if total_count > 0 else 0.0
-        results.append(negative_ratio)
-        continue
+        # # Compute eigenvalues
+        # eigenvalues = torch.linalg.eigvals(H)
+        # real_eigenvalues = eigenvalues.real
+        # negative_count = (real_eigenvalues < 0).sum().item()
+        # total_count = len(real_eigenvalues)
+        # negative_ratio = negative_count / total_count if total_count > 0 else 0.0
+        # results.append(negative_ratio)
+        # continue
 
         # Frobenius norm of the Hessian matrix
         results.append(H.norm(p='fro').item()) 
 
     return results
+
+
+def get_agent_colors(n_agents):
+    """
+    Get consistent color palette for agents across all plots.
+    
+    Args:
+        n_agents: Number of agents
+        
+    Returns:
+        dict: Dictionary mapping agent index to color
+    """
+    cmap = plt.get_cmap('tab20')
+    # cmap = plt.get_cmap('Set1')
+    agent_colors = {i: cmap(i % 20) for i in range(n_agents)}
+    return agent_colors
 
 # second order directional derivative
 def compute_2nd_ord_dir_derivatives(runner, eval_obs, vulnerable_agent_id, eval_rnn_states_critic, eval_masks):
@@ -963,45 +1644,47 @@ def save_matrix_to_files(matrix, attacked_steps, attacked_agent_id, total_agents
     
     print(f"Saved {len(matrix)} timestep matrices to {filepath}")
 
-def restore(runner, restore_dir, reward):
-    """Restore trained model from checkpoint"""
-    for agent_id in range(runner.num_agents):
-        policy_actor_state_dict = torch.load(
-            os.path.join(restore_dir, f"actor_agent{agent_id}_{reward}.pt"),
-            weights_only=False, map_location=torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-        )
-        runner.actor[agent_id].actor.load_state_dict(policy_actor_state_dict)
+# def restore(runner, restore_dir, reward):
+#     """Restore trained model from checkpoint"""
+#     for agent_id in range(runner.num_agents):
+#         policy_actor_state_dict = torch.load(
+#             os.path.join(restore_dir, f"actor_agent{agent_id}_{reward}.pt"),
+#             weights_only=False, map_location=torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+#         )
+#         runner.actor[agent_id].actor.load_state_dict(policy_actor_state_dict)
 
-# def restore(runner,reward,episode,filepath="/deac/csc/vanbastelaerGrp/guptd23/RL_Project/HARL/examples/results/pettingzoo_mpe/simple_spread_v2-discrete/happo/installtest/seed-00042-2025-08-03-20-41-48/models"):
-#         """Restore model parameters."""
-#         for agent_id in range(runner.num_agents):
-#             policy_actor_state_dict = torch.load(
-#                 str(filepath)
-#                 + "/actor_agent"
-#                 + str(agent_id)
-#                 + "_reward_" + str(reward)
-#                 + "_episode_" + str(episode)
-#                 + ".pt"
-#             )
-#             runner.actor[agent_id].actor.load_state_dict(policy_actor_state_dict)
-#         if not runner.algo_args["render"]["use_render"]:
-#             policy_critic_state_dict = torch.load(
-#                 str(filepath)
-#                 + "/critic_agent"
-#                 + "_reward_" + str(reward)
-#                 + "_episode_" + str(episode)
-#                 + ".pt"
-#             )
-#             runner.critic.critic.load_state_dict(policy_critic_state_dict)
-#             if runner.value_normalizer is not None:
-#                 value_normalizer_state_dict = torch.load(
-#                     str(filepath)
-#                     + "/value_normalizer"
-#                     + "_reward_" + str(reward)
-#                     + "_episode_" + str(episode)
-#                     + ".pt"
-#                 )
-#                 runner.value_normalizer.load_state_dict(value_normalizer_state_dict)
+def restore(runner,reward,filepath="/deac/csc/vanbastelaerGrp/guptd23/RL_Project/HARL/examples/results/pettingzoo_mpe/simple_spread_v2-discrete/happo/installtest/seed-00042-2025-08-03-20-41-48/models"):
+        """Restore model parameters."""
+        for agent_id in range(runner.num_agents):
+            policy_actor_state_dict = torch.load(
+                str(filepath)
+                + "/actor_agent"
+                + str(agent_id)
+                + "_" + str(reward)
+                + ".pt"
+            )
+            runner.actor[agent_id].actor.load_state_dict(policy_actor_state_dict)
+        
+            
+            runner.central_q[agent_id].restore(filepath,agent_id,reward)
+         
+           
+        if not runner.algo_args["render"]["use_render"]:
+            policy_critic_state_dict = torch.load(
+                str(filepath)
+                + "/critic_agent"
+                + "_" + str(reward)
+                + ".pt"
+            )
+            runner.critic.critic.load_state_dict(policy_critic_state_dict)
+            if runner.value_normalizer is not None:
+                value_normalizer_state_dict = torch.load(
+                    str(filepath)
+                    + "/value_normalizer"
+                    + "_" + str(reward)
+                    + ".pt"
+                )
+                runner.value_normalizer.load_state_dict(value_normalizer_state_dict)
 def main():
     """Main function."""
     parser = argparse.ArgumentParser(
@@ -1010,7 +1693,7 @@ def main():
     parser.add_argument(
         "--algo",
         type=str,
-        default="happo",
+        default="hatrpo",
         choices=[
             "happo",
             "hatrpo",
@@ -1069,16 +1752,16 @@ def main():
         "--seed", type=int, default=42, help="Random seed."
     )
     parser.add_argument(
-        "--taylor_csv_agent0", type=str, default="", help="Path to CSV file with pre-computed Taylor history for agent 0."
+        "--taylor_csv_agent0", type=str, default="/deac/csc/vanbastelaerGrp/guptd23/RL_Project/HARL/examples/taylor_calc_new/seed-376/hatrpo/0.1/2025-09-24-20-51-51/mappo_taylor_error_atk_free_agent_0.csv", help="Path to CSV file with pre-computed Taylor history for agent 0."
     )
     parser.add_argument(
-        "--taylor_csv_agent1", type=str, default="", help="Path to CSV file with pre-computed Taylor history for agent 1."
+        "--taylor_csv_agent1", type=str, default="/deac/csc/vanbastelaerGrp/guptd23/RL_Project/HARL/examples/taylor_calc_new/seed-376/hatrpo/0.1/2025-09-24-20-51-51/mappo_taylor_error_atk_free_agent_1.csv", help="Path to CSV file with pre-computed Taylor history for agent 1."
     )
     parser.add_argument(
-        "--taylor_csv_agent2", type=str, default="", help="Path to CSV file with pre-computed Taylor history for agent 2."
+        "--taylor_csv_agent2", type=str, default="/deac/csc/vanbastelaerGrp/guptd23/RL_Project/HARL/examples/taylor_calc_new/seed-376/hatrpo/0.1/2025-09-24-20-51-51/mappo_taylor_error_atk_free_agent_2.csv", help="Path to CSV file with pre-computed Taylor history for agent 2."
     )
     parser.add_argument(
-        "--save_dir", type=str, default=None, help="Directory to save results."
+        "--save_dir", type=str, default='/deac/csc/vanbastelaerGrp/guptd23/RL_Project/HARL/examples/Part-2/test', help="Directory to save results."
     )
     args, unparsed_args = parser.parse_known_args()
 
@@ -1113,11 +1796,14 @@ def main():
 
     # start training
     from harl.runners import RUNNER_REGISTRY
+
 # 
     algo_args['eval']['n_eval_rollout_threads'] = 1
     algo_args['eval']['eval_episodes'] = 1
     runner = RUNNER_REGISTRY[args["algo"]](args, algo_args, env_args)
-    restore(runner, args['filepath'],args['reward'])  # Restore the model with specific reward and episode
+    # print(f"Checking if centralize q is set : {algo_args['algo']['use_centralized_q']}")
+    restore(runner,args['reward'],args['filepath'])  # Restore the model with specific reward and episode
+    
     runner.prep_training()
     
     attack_agent_id = args['attack_id']
@@ -1132,12 +1818,13 @@ def main():
     taylor_history_data = load_taylor_history_csvs(csv_paths)
     
     # Run evaluation without attack
-    # results_normal, frob_norms_normal, sec_dir_derivatives_normal, frob_norms_matrix_history_normal, fault_timeline_normal, attacked_steps_normal = eval(runner, False, attack_agent_id, taylor_history_data=taylor_history_data)
+    # results_normal, pairwise_action_influence, sec_dir_derivatives_normal, frob_norms_matrix_history_normal, fault_timeline_normal, attacked_steps_normal = eval(runner, False, attack_agent_id, taylor_history_data=taylor_history_data)
     # Run evaluation with attack
-    results_attacked, frob_norms_atk, sec_dir_derivatives_atk, frob_norms_matrix_history_atk, fault_timeline_atk, attacked_steps_atk = eval(runner, attack_status=True, attack_agent_id=attack_agent_id, seed=args['seed'], taylor_history_data=taylor_history_data)
-
-    log_dir = algo_args['attack']['log_dir']
-    alg_name = algo_args['attack']['algo_name']
+    results_attacked, pairwise_action_influence_atk, sec_dir_derivatives_atk, frob_norms_matrix_history_atk, fault_timeline_atk, attacked_steps_atk = eval(runner, attack_status=True, attack_agent_id=attack_agent_id, seed=args['seed'], taylor_history_data=taylor_history_data)
+    
+   
+    # log_dir = algo_args['attack']['log_dir']
+    # alg_name = algo_args['attack']['algo_name']
     date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     log_path = os.path.join(args['save_dir'], str(args['attack_id']), date)
     # if args['save_dir'] is not None:
@@ -1161,7 +1848,7 @@ def main():
     
     # Plot Taylor error vs historical bounds
     plot_taylor_error_with_historical_bounds(results_attacked, taylor_history_data, attacked_steps_atk, attack_agent_id, log_path)
-
+    plot_fault_timeline_action_influences_stacked(fault_timeline=fault_timeline_atk, action_influences_matrix_history=pairwise_action_influence_atk,total_agents=runner.num_agents, logdir=log_path)
     # runner.run()
     runner.close()
 

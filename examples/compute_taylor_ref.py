@@ -438,9 +438,10 @@ def main():
     # start training
     from harl.runners import RUNNER_REGISTRY
     # log_dir = algo_args['attack']['log_dir']
-    alg_name = algo_args['attack']['algo_name']
+    alg_name = "hatrpo" #algo_args['attack']['algo_name']
     date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-    log_path = os.path.join(args['save_result_dir'], f"seed-{args['seed']}", alg_name, date)
+    randomness = args.get('randomness', 0.25)
+    log_path = os.path.join(args['save_result_dir'], f"seed-{args['seed']}", alg_name, str(randomness) ,date)
     # if args['save_result_dir'] is not None:
     #     log_path = os.path.join(args['save_result_dir'], alg_name, date)
     # else:
@@ -456,7 +457,6 @@ def main():
     print(f"Computing Taylor policy over {total_episodes} episodes...")
     # attack_agent_id = 2
     result_dataset = [{} for _ in range(runner.num_agents)]
-    randomness = args.get('randomness', 0.25)
     print(f"Randomness in eval set to {randomness}")
     for i in tqdm(range(total_episodes), desc="Processing episodes"):
         results = eval(runner,randomness=randomness,seed=args['seed'])  # Run evaluation
