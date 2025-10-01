@@ -30,6 +30,32 @@ from modules.metrics import (
     collect_agent_q_values
 )
 
+REF_TAYLOR_EPISODE_COUNT = 100
+WATCH_WINDOW = 15  # Number of timesteps to watch after attack timestep
+ATTACK_TS_FRACTION = 0.25  # Fraction of episode to consider for attack timesteps
+
+
+def get_agent_fault_detection_times(fault_timeline, agent_id):
+    """
+    Get all fault detection times for a specific agent from the fault timeline.
+    
+    Args:
+        fault_timeline: List of fault detection events
+        agent_id: ID of the agent to get detection times for
+        
+    Returns:
+        List of detection times for the specified agent (empty list if no detections)
+    """
+    if not fault_timeline:
+        return []
+    
+    detection_times = []
+    for event in fault_timeline:
+        if event.get('agent') == agent_id:
+            detection_times.append(event.get('t'))
+    
+    return sorted(detection_times)  # Sort chronologically
+
 
 class MultiSeedExperimentRunner:
     """
@@ -97,7 +123,7 @@ class MultiSeedExperimentRunner:
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
         
-        total_episodes = 1000  # Reduced from 5000 for faster computation
+        total_episodes = REF_TAYLOR_EPISODE_COUNT  # Reduced from 5000 for faster computation
         result_dataset = [{} for _ in range(self.maddpg.nagents)]
         
         for episode in tqdm(range(total_episodes), desc=f"Reference episodes (seed {seed})"):
@@ -237,7 +263,7 @@ class MultiSeedExperimentRunner:
             'episode_length': timestep
         }
     
-    def find_influence_timesteps(self, action_influences_history, agent_i, agent_j, first_quarter_steps):
+    def find_influence_timesteps(self, action_influences_history, agent_i, agent_j, atk_steps_limit, k_steps):
         """
         Find max and min influence timesteps of agent i on agent j in first 25% of episode.
         
@@ -245,13 +271,13 @@ class MultiSeedExperimentRunner:
             action_influences_history: List of action influence matrices
             agent_i: Index of influencing agent
             agent_j: Index of influenced agent (where action_influences_matrix[t][j][i] = influence of i on j)
-            first_quarter_steps: Number of steps in first quarter
+            atk_steps_limit: Last step that can be attacked
             
         Returns:
             Tuple of (max_influence_timestep, min_influence_timestep)
         """
         influences = []
-        for t in range(min(first_quarter_steps, len(action_influences_history))):
+        for t in range(min(atk_steps_limit, len(action_influences_history))):
             # Correct indexing: action_influences_matrix[t][j][i] = influence of i on j
             influence = abs(action_influences_history[t][agent_j][agent_i])
             influences.append((influence, t))
@@ -259,19 +285,25 @@ class MultiSeedExperimentRunner:
         # Sort by influence magnitude
         influences.sort(key=lambda x: x[0])
         
-        min_influence_t = influences[0][1]  # Lowest influence
-        max_influence_t = influences[-1][1]  # Highest influence
-        
-        return max_influence_t, min_influence_t
-    
-    def run_attacked_episode(self, seed, attack_agent_i, attack_start_t, ref_vals, ref_std_devs, observe_agent=None):
+        min_influences_t = []
+        max_influences_t = []
+        # Get k_steps minimum and maximum influences
+        min_influences_t = [t for _, t in influences[:k_steps]]  # k lowest influences
+        max_influences_t = [t for _, t in influences[-k_steps:]]  # k highest influences
+
+        min_influences_t.sort()
+        max_influences_t.sort()
+
+        return max_influences_t, min_influences_t
+
+    def run_attacked_episode(self, seed, attack_agent_i, attack_timesteps, ref_vals, ref_std_devs, observe_agent=None):
         """
         Run an episode with attack on specific agent at specific timesteps.
         
         Args:
             seed: Random seed for the episode
             attack_agent_i: Agent to attack (the influencing agent)
-            attack_start_t: Timestep to start attack
+            attack_timesteps: List of timesteps to attack
             ref_vals: Reference Taylor error values
             ref_std_devs: Reference standard deviations
             observe_agent: Agent to observe impact on (the influenced agent). If None, observe attack_agent_i
@@ -316,8 +348,14 @@ class MultiSeedExperimentRunner:
                 actions = {agent_name: agent_actions[i].squeeze() 
                          for i, agent_name in enumerate(self.env.possible_agents)}
             
-            # Apply attack if in attack window - attack the influencing agent (attack_agent_i)
-            if attack_start_t <= timestep <= attack_start_t + 1:
+            # Apply attack if current timestep is in any attack window - attack the influencing agent (attack_agent_i)
+            attack_active = False
+            for attack_t in attack_timesteps:
+                if attack_t <= timestep < attack_t + 5:
+                    attack_active = True
+                    break
+            # if timestep in attack_timesteps:
+            if attack_active:
                 if self.maddpg.discrete_action:
                     # Worst action attack for discrete action space
                     action_logits = self.maddpg.get_action_logits(torch_obs)
@@ -349,8 +387,9 @@ class MultiSeedExperimentRunner:
                     threshold_exceeded = abs(detection_value - ref_vals[i][timestep]) > K_SIGMA * ref_std_devs[i][timestep] \
                                          and not np.isclose(detection_value, ref_vals[i][timestep], rtol=1e-5, atol=1e-5)
                     
-                    if threshold_exceeded and i not in fault_first_detected:
-                        fault_first_detected[i] = timestep
+                    if threshold_exceeded:
+                        if i not in fault_first_detected:
+                            fault_first_detected[i] = timestep
                         fault_timeline.append({
                             'agent': i,
                             't': timestep,
@@ -378,7 +417,7 @@ class MultiSeedExperimentRunner:
             'taylor_errors_history': taylor_errors_history,
             'episode_length': timestep,
             'episode_reward': episode_reward,
-            'attack_timestep': attack_start_t,
+            'attack_timesteps': attack_timesteps,
             'attacked_agent': attack_agent_i,
             'observed_agent': observe_agent_id
         }
@@ -398,15 +437,18 @@ class MultiSeedExperimentRunner:
         Returns:
             Dictionary containing computed metrics
         """
-        attack_timestep = attack_results['attack_timestep']
+        attack_timesteps = attack_results['attack_timesteps']
         q_values_history = attack_results['q_values_history']
         rewards_history = attack_results['rewards_history']
         taylor_errors_history = attack_results['taylor_errors_history']
         episode_length = attack_results['episode_length']
         
-        # Define watchable window (attack timestep to next 15 timesteps)
-        window_start = attack_timestep
-        window_end = min(attack_timestep + 15, episode_length - 1)
+        # Define watchable window based on all attack timesteps
+        # Start from the earliest attack timestep and watch 15 timesteps from the first attack
+        min_attack_timestep = min(attack_timesteps)
+        max_attack_timestep = max(attack_timesteps)
+        window_start = min_attack_timestep
+        window_end = min(min_attack_timestep + WATCH_WINDOW, episode_length - 1)
         
         metrics = {
             'max_q_drop': 0.0,
@@ -448,8 +490,8 @@ class MultiSeedExperimentRunner:
             reward_drop = normal_reward - attacked_reward
             metrics['max_reward_drop'] = max(metrics['max_reward_drop'], reward_drop)
             
-            # Weighted drops
-            weight = self.gamma ** (t - attack_timestep)
+            # Weighted drops (use minimum attack timestep as reference for weight calculation)
+            weight = self.gamma ** (t - min_attack_timestep)
             metrics['weighted_q_drop_sum'] += weight * q_drop
             metrics['weighted_reward_drop_sum'] += weight * reward_drop
             
@@ -501,7 +543,7 @@ class MultiSeedExperimentRunner:
         
         # Step 3: Analyze all possible ordered pairs (i, j) where i influences j
         all_pair_results = []
-        first_quarter_steps = math.ceil(0.25 * episode_length)
+        atk_steps_limit = math.ceil(ATTACK_TS_FRACTION * episode_length)
         
         for agent_i in range(self.maddpg.nagents):  # influencing agent
             for agent_j in range(self.maddpg.nagents):  # influenced agent
@@ -512,7 +554,7 @@ class MultiSeedExperimentRunner:
                 
                 # Step 4: Find max and min influence timesteps of agent_i on agent_j in first 25%
                 max_influence_t, min_influence_t = self.find_influence_timesteps(
-                    action_influences_history, agent_i, agent_j, first_quarter_steps
+                    action_influences_history, agent_i, agent_j, atk_steps_limit, 1
                 )
                 
                 print(f"Max influence timestep: {max_influence_t}, Min influence timestep: {min_influence_t}")
@@ -530,6 +572,12 @@ class MultiSeedExperimentRunner:
                 high_patient_zero, high_patient_time = get_patient_zero_detection(high_influence_attack['fault_timeline'])
                 low_patient_zero, low_patient_time = get_patient_zero_detection(low_influence_attack['fault_timeline'])
                 
+                # Get fault detection times for influencing and influenced agents
+                high_influencer_fault_times = get_agent_fault_detection_times(high_influence_attack['fault_timeline'], agent_i)
+                high_influenced_fault_times = get_agent_fault_detection_times(high_influence_attack['fault_timeline'], agent_j)
+                low_influencer_fault_times = get_agent_fault_detection_times(low_influence_attack['fault_timeline'], agent_i)
+                low_influenced_fault_times = get_agent_fault_detection_times(low_influence_attack['fault_timeline'], agent_j)
+                
                 # Compute attack metrics
                 high_metrics = self.compute_attack_metrics(high_influence_attack, normal_q_values_history, normal_rewards_history, ref_vals, ref_std_devs, agent_j)
                 low_metrics = self.compute_attack_metrics(low_influence_attack, normal_q_values_history, normal_rewards_history, ref_vals, ref_std_devs, agent_j)
@@ -543,6 +591,10 @@ class MultiSeedExperimentRunner:
                     'high_patient_time': high_patient_time,
                     'low_patient_zero': low_patient_zero,
                     'low_patient_time': low_patient_time,
+                    'high_influencer_fault_detection_times': high_influencer_fault_times,
+                    'high_influenced_fault_detection_times': high_influenced_fault_times,
+                    'low_influencer_fault_detection_times': low_influencer_fault_times,
+                    'low_influenced_fault_detection_times': low_influenced_fault_times,
                     'high_metrics': high_metrics,
                     'low_metrics': low_metrics
                 }
@@ -550,7 +602,11 @@ class MultiSeedExperimentRunner:
                 all_pair_results.append(pair_result)
                 
                 print(f"High influence attack - Patient zero: {high_patient_zero} at time {high_patient_time}")
+                print(f"  Influencer (agent_{agent_i}) fault detection times: {high_influencer_fault_times}")
+                print(f"  Influenced (agent_{agent_j}) fault detection times: {high_influenced_fault_times}")
                 print(f"Low influence attack - Patient zero: {low_patient_zero} at time {low_patient_time}")
+                print(f"  Influencer (agent_{agent_i}) fault detection times: {low_influencer_fault_times}")
+                print(f"  Influenced (agent_{agent_j}) fault detection times: {low_influenced_fault_times}")
         
         result = {
             'seed': seed,
@@ -981,6 +1037,15 @@ class MultiSeedExperimentRunner:
             avg_high_exceed_rate = np.mean([m['exceed_rate'] for m in high_metrics_list])
             avg_low_exceed_rate = np.mean([m['exceed_rate'] for m in low_metrics_list])
             
+            # Calculate average delta metrics (high - low)
+            avg_delta_max_q_drop = np.mean([h['max_q_drop'] - l['max_q_drop'] for h, l in zip(high_metrics_list, low_metrics_list)])
+            avg_delta_weighted_q_drop_sum = np.mean([h['weighted_q_drop_sum'] - l['weighted_q_drop_sum'] for h, l in zip(high_metrics_list, low_metrics_list)])
+            avg_delta_max_reward_drop = np.mean([h['max_reward_drop'] - l['max_reward_drop'] for h, l in zip(high_metrics_list, low_metrics_list)])
+            avg_delta_weighted_reward_drop_sum = np.mean([h['weighted_reward_drop_sum'] - l['weighted_reward_drop_sum'] for h, l in zip(high_metrics_list, low_metrics_list)])
+            avg_delta_max_abs_taylor_deviation = np.mean([h['max_abs_taylor_deviation'] - l['max_abs_taylor_deviation'] for h, l in zip(high_metrics_list, low_metrics_list)])
+            avg_delta_weighted_taylor_deviation_sum = np.mean([h['weighted_taylor_deviation_sum'] - l['weighted_taylor_deviation_sum'] for h, l in zip(high_metrics_list, low_metrics_list)])
+            avg_delta_exceed_rate = np.mean([h['exceed_rate'] - l['exceed_rate'] for h, l in zip(high_metrics_list, low_metrics_list)])
+            
             # Store results for this pair
             pair_specific_results[pair_key] = {
                 'agent_i': agent_i,
@@ -1019,6 +1084,13 @@ class MultiSeedExperimentRunner:
                 'avg_low_taylor_weighted': avg_low_taylor_weighted,
                 'avg_high_exceed_rate': avg_high_exceed_rate,
                 'avg_low_exceed_rate': avg_low_exceed_rate,
+                'avg_delta_max_q_drop': avg_delta_max_q_drop,
+                'avg_delta_weighted_q_drop_sum': avg_delta_weighted_q_drop_sum,
+                'avg_delta_max_reward_drop': avg_delta_max_reward_drop,
+                'avg_delta_weighted_reward_drop_sum': avg_delta_weighted_reward_drop_sum,
+                'avg_delta_max_abs_taylor_deviation': avg_delta_max_abs_taylor_deviation,
+                'avg_delta_weighted_taylor_deviation_sum': avg_delta_weighted_taylor_deviation_sum,
+                'avg_delta_exceed_rate': avg_delta_exceed_rate,
                 'failed_expectations_count': len(failed_expectations),
                 'failed_expectations': failed_expectations,
                 'raw_pair_data': pair_data
@@ -1034,6 +1106,10 @@ class MultiSeedExperimentRunner:
             print(f"  Taylor Max Expectation Accuracy: {taylor_max_accuracy:.3f} ({taylor_max_expectation_correct}/{total_experiments_for_pair})")
             print(f"  Taylor Weighted Expectation Accuracy: {taylor_weighted_accuracy:.3f} ({taylor_weighted_expectation_correct}/{total_experiments_for_pair})")
             print(f"  Exceed Rate Expectation Accuracy: {exceed_rate_accuracy:.3f} ({exceed_rate_expectation_correct}/{total_experiments_for_pair})")
+            print(f"  Average Delta Q-Drop Max: {avg_delta_max_q_drop:.6f}")
+            print(f"  Average Delta Reward-Drop Max: {avg_delta_max_reward_drop:.6f}")
+            print(f"  Average Delta Taylor Max: {avg_delta_max_abs_taylor_deviation:.6f}")
+            print(f"  Average Delta Exceed Rate: {avg_delta_exceed_rate:.6f}")
             print(f"  Failed Expectations: {len(failed_expectations)}")
         
         return pair_specific_results
@@ -1120,10 +1196,14 @@ class MultiSeedExperimentRunner:
             fieldnames = [
                 'seed', 'agent_i_influencer_attacked', 'agent_j_influenced_observed', 'max_influence_t', 'min_influence_t',
                 'high_patient_zero', 'high_patient_time', 'low_patient_zero', 'low_patient_time',
+                'high_influencer_fault_detection_times', 'high_influenced_fault_detection_times',
+                'low_influencer_fault_detection_times', 'low_influenced_fault_detection_times',
                 'high_max_q_drop', 'high_weighted_q_drop_sum', 'high_max_reward_drop', 'high_weighted_reward_drop_sum',
                 'high_max_abs_taylor_deviation', 'high_weighted_taylor_deviation_sum', 'high_exceed_rate', 'high_window_length',
                 'low_max_q_drop', 'low_weighted_q_drop_sum', 'low_max_reward_drop', 'low_weighted_reward_drop_sum',
                 'low_max_abs_taylor_deviation', 'low_weighted_taylor_deviation_sum', 'low_exceed_rate', 'low_window_length',
+                'delta_max_q_drop', 'delta_weighted_q_drop_sum', 'delta_max_reward_drop', 'delta_weighted_reward_drop_sum',
+                'delta_max_abs_taylor_deviation', 'delta_weighted_taylor_deviation_sum', 'delta_exceed_rate',
                 'episode_length'
             ]
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -1145,6 +1225,10 @@ class MultiSeedExperimentRunner:
                         'high_patient_time': pair_result['high_patient_time'],
                         'low_patient_zero': pair_result['low_patient_zero'],
                         'low_patient_time': pair_result['low_patient_time'],
+                        'high_influencer_fault_detection_times': pair_result['high_influencer_fault_detection_times'],
+                        'high_influenced_fault_detection_times': pair_result['high_influenced_fault_detection_times'],
+                        'low_influencer_fault_detection_times': pair_result['low_influencer_fault_detection_times'],
+                        'low_influenced_fault_detection_times': pair_result['low_influenced_fault_detection_times'],
                         'episode_length': episode_length
                     }
                     
@@ -1155,6 +1239,17 @@ class MultiSeedExperimentRunner:
                     # Add low influence metrics
                     for key, value in pair_result['low_metrics'].items():
                         row[f'low_{key}'] = value
+                    
+                    # Add delta metrics (high - low)
+                    high_metrics = pair_result['high_metrics']
+                    low_metrics = pair_result['low_metrics']
+                    row['delta_max_q_drop'] = high_metrics['max_q_drop'] - low_metrics['max_q_drop']
+                    row['delta_weighted_q_drop_sum'] = high_metrics['weighted_q_drop_sum'] - low_metrics['weighted_q_drop_sum']
+                    row['delta_max_reward_drop'] = high_metrics['max_reward_drop'] - low_metrics['max_reward_drop']
+                    row['delta_weighted_reward_drop_sum'] = high_metrics['weighted_reward_drop_sum'] - low_metrics['weighted_reward_drop_sum']
+                    row['delta_max_abs_taylor_deviation'] = high_metrics['max_abs_taylor_deviation'] - low_metrics['max_abs_taylor_deviation']
+                    row['delta_weighted_taylor_deviation_sum'] = high_metrics['weighted_taylor_deviation_sum'] - low_metrics['weighted_taylor_deviation_sum']
+                    row['delta_exceed_rate'] = high_metrics['exceed_rate'] - low_metrics['exceed_rate']
                     
                     writer.writerow(row)
         
@@ -1202,6 +1297,10 @@ class MultiSeedExperimentRunner:
                     'avg_high_reward_drop_max', 'avg_low_reward_drop_max',
                     'avg_high_taylor_max', 'avg_low_taylor_max',
                     'avg_high_exceed_rate', 'avg_low_exceed_rate',
+                    'avg_delta_max_q_drop', 'avg_delta_weighted_q_drop_sum',
+                    'avg_delta_max_reward_drop', 'avg_delta_weighted_reward_drop_sum',
+                    'avg_delta_max_abs_taylor_deviation', 'avg_delta_weighted_taylor_deviation_sum',
+                    'avg_delta_exceed_rate',
                     'failed_expectations_count'
                 ]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -1231,6 +1330,13 @@ class MultiSeedExperimentRunner:
                         'avg_low_taylor_max': results['avg_low_taylor_max'],
                         'avg_high_exceed_rate': results['avg_high_exceed_rate'],
                         'avg_low_exceed_rate': results['avg_low_exceed_rate'],
+                        'avg_delta_max_q_drop': results['avg_delta_max_q_drop'],
+                        'avg_delta_weighted_q_drop_sum': results['avg_delta_weighted_q_drop_sum'],
+                        'avg_delta_max_reward_drop': results['avg_delta_max_reward_drop'],
+                        'avg_delta_weighted_reward_drop_sum': results['avg_delta_weighted_reward_drop_sum'],
+                        'avg_delta_max_abs_taylor_deviation': results['avg_delta_max_abs_taylor_deviation'],
+                        'avg_delta_weighted_taylor_deviation_sum': results['avg_delta_weighted_taylor_deviation_sum'],
+                        'avg_delta_exceed_rate': results['avg_delta_exceed_rate'],
                         'failed_expectations_count': results['failed_expectations_count']
                     }
                     writer.writerow(row)
@@ -1243,10 +1349,14 @@ class MultiSeedExperimentRunner:
                     fieldnames = [
                         'seed', 'agent_i_influencer_attacked', 'agent_j_influenced_observed', 'max_influence_t', 'min_influence_t',
                         'high_patient_zero', 'high_patient_time', 'low_patient_zero', 'low_patient_time',
+                        'high_influencer_fault_detection_times', 'high_influenced_fault_detection_times',
+                        'low_influencer_fault_detection_times', 'low_influenced_fault_detection_times',
                         'high_max_q_drop', 'high_weighted_q_drop_sum', 'high_max_reward_drop', 'high_weighted_reward_drop_sum',
                         'high_max_abs_taylor_deviation', 'high_weighted_taylor_deviation_sum', 'high_exceed_rate', 'high_window_length',
                         'low_max_q_drop', 'low_weighted_q_drop_sum', 'low_max_reward_drop', 'low_weighted_reward_drop_sum',
                         'low_max_abs_taylor_deviation', 'low_weighted_taylor_deviation_sum', 'low_exceed_rate', 'low_window_length',
+                        'delta_max_q_drop', 'delta_weighted_q_drop_sum', 'delta_max_reward_drop', 'delta_weighted_reward_drop_sum',
+                        'delta_max_abs_taylor_deviation', 'delta_weighted_taylor_deviation_sum', 'delta_exceed_rate',
                         'episode_length'
                     ]
                     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -1263,6 +1373,10 @@ class MultiSeedExperimentRunner:
                             'high_patient_time': data['high_patient_time'],
                             'low_patient_zero': data['low_patient_zero'],
                             'low_patient_time': data['low_patient_time'],
+                            'high_influencer_fault_detection_times': data['high_influencer_fault_detection_times'],
+                            'high_influenced_fault_detection_times': data['high_influenced_fault_detection_times'],
+                            'low_influencer_fault_detection_times': data['low_influencer_fault_detection_times'],
+                            'low_influenced_fault_detection_times': data['low_influenced_fault_detection_times'],
                             'episode_length': data['episode_length']
                         }
                         
@@ -1273,6 +1387,17 @@ class MultiSeedExperimentRunner:
                         # Add low influence metrics
                         for key, value in data['low_metrics'].items():
                             row[f'low_{key}'] = value
+                        
+                        # Add delta metrics (high - low)
+                        high_metrics = data['high_metrics']
+                        low_metrics = data['low_metrics']
+                        row['delta_max_q_drop'] = high_metrics['max_q_drop'] - low_metrics['max_q_drop']
+                        row['delta_weighted_q_drop_sum'] = high_metrics['weighted_q_drop_sum'] - low_metrics['weighted_q_drop_sum']
+                        row['delta_max_reward_drop'] = high_metrics['max_reward_drop'] - low_metrics['max_reward_drop']
+                        row['delta_weighted_reward_drop_sum'] = high_metrics['weighted_reward_drop_sum'] - low_metrics['weighted_reward_drop_sum']
+                        row['delta_max_abs_taylor_deviation'] = high_metrics['max_abs_taylor_deviation'] - low_metrics['max_abs_taylor_deviation']
+                        row['delta_weighted_taylor_deviation_sum'] = high_metrics['weighted_taylor_deviation_sum'] - low_metrics['weighted_taylor_deviation_sum']
+                        row['delta_exceed_rate'] = high_metrics['exceed_rate'] - low_metrics['exceed_rate']
                         
                         writer.writerow(row)
                 
