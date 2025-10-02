@@ -84,6 +84,7 @@ class MultiSeedExperimentRunner:
         # Results storage
         self.experiment_results = []
         self.failed_seeds = []
+        self.cumulative_influences_data = []  # Store cumulative influence data for all seeds
         
     def setup_experiment(self):
         """Set up the experiment environment and logging."""
@@ -541,6 +542,97 @@ class MultiSeedExperimentRunner:
         
         return metrics
     
+    def log_cumulative_influences(self, action_influences_history, seed, episode_length):
+        """
+        Store cumulative influence sums for each agent pair at each timestep.
+        Data will be written to a single CSV file later.
+        
+        Args:
+            action_influences_history: List of action influence matrices for each timestep
+            seed: Random seed for this experiment
+            episode_length: Length of the episode
+        """
+        print(f"Storing cumulative influences for seed {seed}...")
+        
+        # For each agent pair (i, j), compute and store cumulative influences
+        for agent_i in range(self.maddpg.nagents):
+            for agent_j in range(self.maddpg.nagents):
+                if agent_i == agent_j:
+                    continue  # Skip self-influence
+                
+                # Compute cumulative influence sum at each timestep
+                cumulative_influence = 0.0
+                timestep_cumulative_values = []
+                
+                for t in range(min(episode_length, len(action_influences_history))):
+                    # Get influence of agent_i on agent_j at timestep t
+                    # action_influences_history[t][j][i] = influence of i on j
+                    influence_value = action_influences_history[t][agent_j][agent_i]
+                    cumulative_influence += abs(influence_value)  # Use absolute value for cumulative sum
+                    timestep_cumulative_values.append(cumulative_influence)
+                
+                # Store the data for this agent pair
+                pair_data = {
+                    'seed': seed,
+                    'influencer_agent_id': agent_i,
+                    'influenced_agent_id': agent_j,
+                    'episode_length': episode_length,
+                    'cumulative_values': timestep_cumulative_values
+                }
+                
+                self.cumulative_influences_data.append(pair_data)
+        
+        print(f"Stored cumulative influences for seed {seed} ({self.maddpg.nagents * (self.maddpg.nagents - 1)} agent pairs)")
+    
+    def save_cumulative_influences_csv(self):
+        """
+        Save all cumulative influence data to a single CSV file.
+        """
+        if not self.cumulative_influences_data:
+            print("No cumulative influence data to save.")
+            return
+        
+        print("Saving cumulative influences to single CSV file...")
+        
+        # Find the maximum episode length to determine number of timestep columns
+        max_episode_length = max(data['episode_length'] for data in self.cumulative_influences_data)
+        
+        # Create timestep column names
+        timestep_columns = [f'timestep_{t}' for t in range(max_episode_length)]
+        
+        # Create CSV filename
+        csv_filename = 'cumulative_influences_all_seeds.csv'
+        csv_filepath = os.path.join(self.logdir, csv_filename)
+        
+        # Write to CSV file
+        with open(csv_filepath, 'w', newline='') as csvfile:
+            fieldnames = ['seed', 'influencer_agent_id', 'influenced_agent_id'] + timestep_columns
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            for pair_data in self.cumulative_influences_data:
+                row = {
+                    'seed': pair_data['seed'],
+                    'influencer_agent_id': pair_data['influencer_agent_id'],
+                    'influenced_agent_id': pair_data['influenced_agent_id']
+                }
+                
+                # Add cumulative values for each timestep
+                cumulative_values = pair_data['cumulative_values']
+                for t in range(max_episode_length):
+                    if t < len(cumulative_values):
+                        row[f'timestep_{t}'] = cumulative_values[t]
+                    else:
+                        row[f'timestep_{t}'] = ''  # Empty for timesteps beyond episode length
+                
+                writer.writerow(row)
+        
+        total_rows = len(self.cumulative_influences_data)
+        print(f"Saved cumulative influences CSV: {csv_filename}")
+        print(f"  Total rows: {total_rows}")
+        print(f"  Max episode length: {max_episode_length}")
+        print(f"  Timestep columns: timestep_0 to timestep_{max_episode_length - 1}")
+    
     def run_single_seed_experiment(self, seed):
         """
         Run complete experiment for a single seed.
@@ -564,6 +656,9 @@ class MultiSeedExperimentRunner:
         normal_q_values_history = normal_episode['q_values_history']
         normal_rewards_history = normal_episode['rewards_history']
         episode_length = normal_episode['episode_length']
+        
+        # Step 2.5: Log cumulative influences for each agent pair
+        self.log_cumulative_influences(action_influences_history, seed, episode_length)
         
         # Step 3: Analyze all possible ordered pairs (i, j) where i influences j
         all_pair_results = []
@@ -1442,6 +1537,9 @@ class MultiSeedExperimentRunner:
                         writer.writeheader()
                         writer.writerows(results['failed_expectations'])
         
+        # Save cumulative influences CSV
+        self.save_cumulative_influences_csv()
+        
         print(f"Results saved to {self.logdir}")
         print(f"- Accuracy results: {accuracy_file}")
         print(f"- Detailed results: {detailed_file}")
@@ -1453,6 +1551,7 @@ class MultiSeedExperimentRunner:
             print(f"- Pair-specific accuracy summary: {pair_summary_file}")
             print(f"- Pair-specific detailed results saved in: {pair_dir}")
             print(f"  * {len(pair_specific_results)} individual pair CSV files created")
+        print(f"- Cumulative influences: cumulative_influences_all_seeds.csv")
     
     def cleanup(self):
         """Clean up resources."""
