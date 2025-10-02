@@ -20,7 +20,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import traceback
 from harl.utils.configs_tools import get_defaults_yaml_args, update_args
 from harl.utils.trans_tools import _t2n 
-
+import time
 # Import all the modular components
 from modules.constants import DEVICE, K_SIGMA, torch_device,REWARD, FILEPATH, ATTACK_ID
 # from modules.environment import create_environment
@@ -31,6 +31,11 @@ from modules.detection import get_patient_zero_detection
 #     compute_pairwise_action_influences,
 #     collect_agent_q_values
 # )
+from harl.utils.envs_tools import (
+    make_eval_env
+)
+
+
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -87,13 +92,31 @@ class MultiSeedExperimentRunner:
         self.total_episodes = self.config.total_episodes #100 # This is for calculating taylor reference values
         self.K_SIGMA = self.config.K_SIGMA
         self.gamma = 0.99  # Discount factor for weighted metrics
-        
+        self.runner_args = None
+        self.runner_algo_args = None
+        self.runner_env_args = None
         # Results storage
         self.experiment_results = []
         self.failed_seeds = []
     
-    
-    def setup_experiment(self):
+    def create_environment(self, seed):
+        # First cleanup any existing environment
+        # self.cleanup_environment(self.runner)
+        
+        # Small delay to ensure cleanup is complete
+        
+        # time.sleep(1)
+        
+        # Create new environment
+        self.runner.eval_envs = make_eval_env(
+            self.runner_args["env"],
+            seed,
+            self.runner_algo_args["eval"]["n_eval_rollout_threads"],
+            self.runner_env_args,
+        )
+        
+        
+    def setup_experiment(self, initial_seed=0):
         def restore(runner,reward,filepath):
             """Restore model parameters."""
             for agent_id in range(runner.num_agents):
@@ -151,7 +174,7 @@ class MultiSeedExperimentRunner:
         parser.add_argument(
             "--env",
             type=str,
-            default="pettingzoo_mpe",
+            default="smac",
             choices=[
                 "smac",
                 "mamujoco",
@@ -231,9 +254,8 @@ class MultiSeedExperimentRunner:
             env_args = all_config["env_args"]
         else:  # load config from corresponding yaml file
             algo_args, env_args = get_defaults_yaml_args(args["algo"], args["env"])
-        # Set the number of agents in env_args instead of algo_args
-        env_args['N'] = self.config.N
-        print(f"Number of agents set to: {env_args['N']}")
+        #! Set initial seed for the runner setup
+        algo_args["seed"]["seed"]=initial_seed
         update_args(unparsed_dict, algo_args, env_args)  # update args from command line
 
         if args["env"] == "dexhands":
@@ -251,6 +273,13 @@ class MultiSeedExperimentRunner:
         algo_args['eval']['n_eval_rollout_threads'] = 1
         algo_args['eval']['eval_episodes'] = 1
         self.runner = RUNNER_REGISTRY[args["algo"]](args, algo_args, env_args)
+        self.runner_args = args
+        self.runner_algo_args = algo_args
+        self.runner_env_args = env_args
+        
+        print(f"args = {self.runner_args}")
+        print(f"algo_args = {self.runner_algo_args}")
+        print(f"env_args = {self.runner_env_args}")
         # print(f"Checking if centralize q is set : {algo_args['algo']['use_centralized_q']}")
         # restore(self.runner,args['reward'],args['filepath'])  # Restore the model with specific reward and episode
         restore(self.runner,self.config.reward,self.config.filepath)  
@@ -261,8 +290,8 @@ class MultiSeedExperimentRunner:
         cwd = os.getcwd()
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         env_type = 'discrete'
-        self.logdir = os.path.join(cwd, 'K-Final-Run', str(self.total_experiments), f"{args['env']}",
-                                  f"{timestamp}_multi_seed_stats_agent_{self.config.N}_sigma_{self.K_SIGMA}")
+        self.logdir = os.path.join(cwd, 'test-Run-K', str(self.total_experiments), f"{args['env']}",
+                                  f"{timestamp}_multi_seed_stats_sigma_{self.K_SIGMA}")
         os.makedirs(self.logdir, exist_ok=True)
         
         # Create environment
@@ -274,6 +303,12 @@ class MultiSeedExperimentRunner:
         
         print(f"Multi-seed experiment setup complete. Log directory: {self.logdir}")
         print(f"Will run {self.total_experiments} experiments")
+        # for env in self.runner.envs:
+        #     env.close()
+        # for env in self.runner.eval_envs.envs:
+        #     env.close() 
+        self.runner.eval_envs.close()
+        self.runner.envs.close()
 
     def compute_taylor_policy(self,runner, eval_obs, eval_available_actions, eval_rnn_states):
         # states_tensor = torch.stack([torch.tensor(state_dict[k], dtype=torch.float32, requires_grad=True) for k in state_dict.keys()])
@@ -334,8 +369,11 @@ class MultiSeedExperimentRunner:
     def compute_reference_taylor_error(self, runner, seed, total_episodes=1000, attack_status=False, attack_agent_id=0, randomness=0.25):
 
         results = [{} for _ in range(runner.num_agents)]
+        
         for episode in tqdm(range(total_episodes), desc="Taylor Compute episodes", total=total_episodes):
-            eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset(seed) if seed is not None else runner.eval_envs.reset()
+            self.create_environment(seed)
+            eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset() 
+            # print(f"eval_obs:{eval_obs}")
             result_deque = [deque(maxlen=5) for _ in range(runner.num_agents)]
             timestamp = 0
 
@@ -353,8 +391,8 @@ class MultiSeedExperimentRunner:
                 dtype=np.float32,
             )
             while True:
-                if np.random.random() < randomness:  # 10% chance to add noise to observations
-                    noise = np.random.normal(loc=0.0, scale=0.01, size=eval_obs.shape)
+                if np.random.random() < randomness:  # 25% chance to add noise to observations
+                    noise = np.random.normal(loc=0.0, scale=0.1, size=eval_obs.shape)
                     # print(f"----> Noise: {noise}")
                     eval_obs = eval_obs + noise
                 eval_actions_collector = []
@@ -468,6 +506,10 @@ class MultiSeedExperimentRunner:
                     #     eval_episode
                     # )  # logger callback at the end of evaluation
                     break
+                
+            # for env in runner.eval_envs.envs:
+            #     env.close()
+            runner.eval_envs.close()
             
         # Compute reference values and standard deviations
         ref_vals = [[] for _ in range(runner.num_agents)]
@@ -611,8 +653,8 @@ class MultiSeedExperimentRunner:
         """Evaluate the model."""
         
         eval_episode = 0
-
-        eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset(seed=seed) if seed is not None else runner.eval_envs.reset()
+        self.create_environment(seed)
+        eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset()
 
         eval_rnn_states = np.zeros(
             (
@@ -709,7 +751,9 @@ class MultiSeedExperimentRunner:
                         # print(f"Agent {agent_id} appears to be dead or has only one action. Using index 0.")
                         eval_actions[0][attack_agent_id] = 0
                     else:
-                        worst_action = torch.argmin(q_values).item()
+                        worst_action_idx = torch.argmin(q_values).item()
+                        # Map back to the actual action ID from available actions
+                        worst_action = available_actions[worst_action_idx]
                         eval_actions[0][attack_agent_id] = worst_action
                         # print(f"Agent {attack_agent_id} worst action under current policy: {worst_action}")
                 attacked_steps.append(cnt)
@@ -729,24 +773,26 @@ class MultiSeedExperimentRunner:
                 taylor_approx_error = np.mean(result_deques[i])
                 taylor_history[i].append(taylor_approx_error)
 
- 
-
                 # Detect anomalies based on Taylor approximation error using pre-computed history
-                historical_mean = ref_vals[i][cnt]  
-                historical_std = ref_std_devs[i][cnt]
-                # Ensure minimum std deviation to avoid division by zero
-                if historical_std < 1e-6:
-                    historical_std = 1e-6
-                
-                if abs(taylor_approx_error - historical_mean) > self.K_SIGMA * historical_std:
-                    # print(f" [!!!] Anomaly detected for agent {i} at timestep: {cnt}. Taylor Appx. Error: {taylor_approx_error}")
-                    # Record all fault timesteps for this agent
-                    fault_all_detected[i].append(cnt)
-                    fault_timeline.append({
-                            'agent': i,
-                            't': cnt,
-                            'contribs': {}
-                        })
+                # Add boundary check to prevent IndexError
+                if cnt < len(ref_vals[i]) and cnt < len(ref_std_devs[i]):
+                    historical_mean = ref_vals[i][cnt]  
+                    historical_std = ref_std_devs[i][cnt]
+                    # Ensure minimum std deviation to avoid division by zero
+                    if historical_std < 1e-6:
+                        historical_std = 1e-6
+                    
+                    if abs(taylor_approx_error - historical_mean) > self.K_SIGMA * historical_std:
+                        print(" @ Agent:", i, " @ Timestep:", cnt)
+                        print(" >>>>>>> ", taylor_approx_error, historical_mean, historical_std)
+                        # print(f" [!!!] Anomaly detected for agent {i} at timestep: {cnt}. Taylor Appx. Error: {taylor_approx_error}")
+                        # Record all fault timesteps for this agent
+                        fault_all_detected[i].append(cnt)
+                        fault_timeline.append({
+                                'agent': i,
+                                't': cnt,
+                                'contribs': {}
+                            })
                     # Record first fault detection if not already recorded
                     # if i not in fault_first_detected:
                     #     fault_first_detected[i] = cnt
@@ -837,6 +883,8 @@ class MultiSeedExperimentRunner:
 
             cnt += 1
         
+        for env in runner.eval_envs.envs:
+            env.close()
         
 
         if attack_status:
@@ -977,26 +1025,26 @@ class MultiSeedExperimentRunner:
         
         return metrics
 
-    def run_single_seed_experiment(self, runner, seed):
+    def run_single_seed_experiment(self, runner):
         """
         Run complete experiment for a single seed.
+        The seed is already set by update_seed_for_experiment() before calling this method.
         
-        Args:
-            seed: Random seed for the experiment
-            
         Returns:
             Dictionary containing experiment results for all agent pairs
         """
+        current_seed = runner.algo_args["seed"]["seed"]
         print(f"\n{'='*50}")
-        print(f"Running experiment for seed {seed}")
+        print(f"Running experiment for seed {current_seed}")
         print(f"{'='*50}")
         
         # Step 1: Compute reference Taylor error
-        ref_vals, ref_std_devs = self.compute_reference_taylor_error(runner,seed,total_episodes=self.total_episodes, attack_status=False, attack_agent_id=0, randomness=0.25)
+        ref_vals, ref_std_devs = self.compute_reference_taylor_error(runner, seed=current_seed, total_episodes=self.total_episodes, attack_status=False, attack_agent_id=0, randomness=0.25)
         
-        # print(f"### Ref vals :{ref_vals} and Ref std devs : {ref_std_devs}")
+        print(f"### Ref vals :{ref_vals} and Ref std devs : {ref_std_devs}")
+        # exit("Exiting after ref vals for debug")
         # Step 2: Run normal episode
-        normal_episode = self.eval(runner=self.runner, attack_status=False, seed=seed, ref_vals=ref_vals, ref_std_devs=ref_std_devs, collect_q_flag=True, min_window=0, max_window=0, observe_agent=None)
+        normal_episode = self.eval(runner=self.runner, attack_status=False, seed=current_seed, ref_vals=ref_vals, ref_std_devs=ref_std_devs, collect_q_flag=True, min_window=0, max_window=0, observe_agent=None)
         action_influences_history = normal_episode['action_influences_history']
         normal_q_values_history = normal_episode['q_values_history']
         episode_length = normal_episode['episode_length']
@@ -1010,6 +1058,8 @@ class MultiSeedExperimentRunner:
             for agent_j in range(self.runner.num_agents):  # influenced agent
                 if agent_i == agent_j:
                     continue  # Skip self
+                # if agent_i != 1 or agent_j != 2:
+                #     continue  # TEMP: Only analyze pair (1, 2) for faster testing
                 
                 # print(f"\nAnalyzing pair: agent_{agent_i} influences agent_{agent_j}")
                 
@@ -1021,8 +1071,8 @@ class MultiSeedExperimentRunner:
                 # print(f"Max influence timestep: {max_influence_t}, Min influence timestep: {min_influence_t}")
                 
                 # Step 5: Run attacked episodes - attack agent_i (influencer), observe impact on agent_j (influenced)
-                high_influence_attack = self.eval(runner=self.runner, attack_status=True, attack_agent_id=agent_i, seed=seed, ref_vals=ref_vals, ref_std_devs=ref_std_devs, collect_q_flag=True, min_window=max_influence_t, max_window=max_influence_t+5, observe_agent=agent_j)
-                low_influence_attack = self.eval(runner=self.runner, attack_status=True, attack_agent_id=agent_i, seed=seed, ref_vals=ref_vals, ref_std_devs=ref_std_devs, collect_q_flag=True, min_window=min_influence_t, max_window=min_influence_t+5, observe_agent=agent_j)
+                high_influence_attack = self.eval(runner=self.runner, attack_status=True, attack_agent_id=agent_i, seed=current_seed, ref_vals=ref_vals, ref_std_devs=ref_std_devs, collect_q_flag=True, min_window=max_influence_t, max_window=max_influence_t+5, observe_agent=agent_j)
+                low_influence_attack = self.eval(runner=self.runner, attack_status=True, attack_agent_id=agent_i, seed=current_seed, ref_vals=ref_vals, ref_std_devs=ref_std_devs, collect_q_flag=True, min_window=min_influence_t, max_window=min_influence_t+5, observe_agent=agent_j)
                 # Get fault detection times for influencing and influenced agents
                 high_influencer_fault_times = get_agent_fault_detection_times(high_influence_attack['fault_timeline'], agent_i)
                 high_influenced_fault_times = get_agent_fault_detection_times(high_influence_attack['fault_timeline'], agent_j)
@@ -1067,7 +1117,7 @@ class MultiSeedExperimentRunner:
                 # print(f"  Influenced (agent_{agent_j}) fault detection times: {low_influenced_fault_times}")
         
         result = {
-            'seed': seed,
+            'seed': current_seed,
             'episode_length': episode_length,
             'pair_results': all_pair_results,
             'total_pairs': len(all_pair_results)
@@ -1077,6 +1127,66 @@ class MultiSeedExperimentRunner:
         
         return result
 
+    def update_seed_for_experiment(self, runner, seed):
+        """
+        Update seed for current experiment iteration without recreating environment.
+        
+        Args:
+            runner: The runner instance
+            seed: New seed value to set
+        """
+        # Update algo_args seed - এটাই main way
+        runner.algo_args["seed"]["seed"] = seed
+        
+        # Update random seeds for reproducibility
+        import random
+        import numpy as np
+        import torch
+        
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        
+        # # SMAC environment এর জন্য seed update করার চেষ্টা করি
+        # # eval_envs এর seed update করি
+        # if hasattr(runner, 'eval_envs') and runner.eval_envs is not None:
+        #     if hasattr(runner.eval_envs, 'seed'):
+        #         print("Hits .seed &&&&&&")
+        #         runner.eval_envs.seed(seed)
+        #         # IMPORTANT: Reset environment after seeding
+        #         runner.eval_envs.reset()
+        #     # Vectorized environment এর ক্ষেত্রে
+        #     elif hasattr(runner.eval_envs, 'envs'):
+        #         for env in runner.eval_envs.envs:
+        #             if hasattr(env, 'seed'):
+        #                 print("Hits eval_envs.seed &&&&&&")
+        #                 env.seed(seed)
+        #             # SMAC StarCraft2Env এর ক্ষেত্রে _seed attribute আপডেট করি
+        #             if hasattr(env, '_seed'):
+        #                 env._seed = seed
+        #         # Reset all environments after seeding
+        #         runner.eval_envs.reset()
+                        
+        # # # Training envs এর seed update করি
+        # # if hasattr(runner, 'envs') and runner.envs is not None:
+        # #     if hasattr(runner.envs, 'seed'):
+        # #         runner.envs.seed(seed)
+        # #         # Reset training environment after seeding
+        # #         runner.envs.reset()
+        # #     elif hasattr(runner.envs, 'envs'):
+        # #         for env in runner.envs.envs:
+        # #             if hasattr(env, 'seed'):
+        # #                 env.seed(seed)
+        # #             if hasattr(env, '_seed'):
+        # #                 env._seed = seed
+        # #         # Reset all training environments after seeding
+        # #         runner.envs.reset()
+                            
+        
+        # print(f"Updated experiment seed to: {seed}")
+    
     def run_all_experiments(self, runner):
         """Run experiments for all seeds."""
 
@@ -1087,7 +1197,11 @@ class MultiSeedExperimentRunner:
         print(f"Total pairs to analyze: {self.total_experiments * total_pairs_per_seed}")
         
         for seed in tqdm(range(self.total_experiments), desc="Running experiments"):
-            result = self.run_single_seed_experiment(runner,seed)
+            # if seed != 1:
+                # continue
+            # প্রতিটি experiment এর জন্য seed আপডেট করি
+            self.update_seed_for_experiment(runner, seed)
+            result = self.run_single_seed_experiment(runner)
             self.experiment_results.append(result)
         
         total_successful_pairs = sum(result['total_pairs'] for result in self.experiment_results)
@@ -1095,713 +1209,6 @@ class MultiSeedExperimentRunner:
         print(f"Total successful pairs analyzed: {total_successful_pairs}")
         print(f"Failed experiments: {len(self.failed_seeds)}")
     
-    # def compute_accuracies(self):
-    #     """Compute accuracies and analyze results."""
-    #     if not self.experiment_results:
-    #         print("No successful experiments to analyze!")
-    #         return
-        
-    #     print("\n" + "="*50)
-    #     print("COMPUTING ACCURACIES")
-    #     print("="*50)
-        
-    #     # Patient zero detection accuracy
-    #     correct_patient_zero = 0
-    #     total_with_detection = 0
-        
-    #     # Expectation accuracy metrics - separate accuracies for each metric
-    #     q_drop_max_expectation_correct = 0
-    #     reward_drop_max_expectation_correct = 0
-    #     q_drop_weighted_expectation_correct = 0
-    #     reward_drop_weighted_expectation_correct = 0
-    #     taylor_max_expectation_correct = 0
-    #     taylor_weighted_expectation_correct = 0
-    #     exceed_rate_expectation_correct = 0
-    #     high_correct_patient_zero = 0
-    #     low_correct_patient_zero = 0
-    #     high_total_with_detection = 0
-    #     low_total_with_detection = 0
-    #     # Detailed metrics
-    #     high_metrics_list = []
-    #     low_metrics_list = []
-        
-    #     failed_expectations = []
-    #     total_pairs = 0
-        
-    #     # Process all pairs from all seeds
-    #     for result in self.experiment_results:
-    #         seed = result['seed']
-    #         pair_results = result['pair_results']
-            
-    #         for pair_result in pair_results:
-    #             total_pairs += 1
-                
-    #             # Patient zero analysis - we expect agent_i (attacked agent) to be detected as patient zero
-    #             high_patient_zero = pair_result['high_patient_zero']
-    #             low_patient_zero = pair_result['low_patient_zero']
-    #             attacked_agent = pair_result['agent_i']  # The agent we attacked (influencer)
-                
-    #             if high_patient_zero is not None:
-    #                 total_with_detection += 1
-    #                 high_total_with_detection += 1
-    #                 if high_patient_zero == attacked_agent:
-    #                     correct_patient_zero += 1
-    #                     high_correct_patient_zero += 1
-                
-    #             if low_patient_zero is not None:
-    #                 total_with_detection += 1
-    #                 low_total_with_detection += 1   
-    #                 if low_patient_zero == attacked_agent:
-    #                     correct_patient_zero += 1
-    #                     low_correct_patient_zero += 1
-
-    #             # Expectation analysis
-    #             high_metrics = pair_result['high_metrics']
-    #             low_metrics = pair_result['low_metrics']
-                
-    #             high_metrics_list.append(high_metrics)
-    #             low_metrics_list.append(low_metrics)
-                
-    #             # Check individual metric expectations (high influence should have higher impact)
-    #             q_drop_max_better = high_metrics['max_q_drop'] >= low_metrics['max_q_drop']
-    #             reward_drop_max_better = high_metrics['max_reward_drop'] >= low_metrics['max_reward_drop'] # adding reward drop comparison
-    #             q_drop_weighted_better = high_metrics['weighted_q_drop_sum'] >= low_metrics['weighted_q_drop_sum']
-    #             reward_drop_weighted_better = high_metrics['weighted_reward_drop_sum'] >= low_metrics['weighted_reward_drop_sum'] # adding reward drop comparison
-    #             taylor_max_better = high_metrics['max_abs_taylor_deviation'] >= low_metrics['max_abs_taylor_deviation']
-    #             taylor_weighted_better = high_metrics['weighted_taylor_deviation_sum'] >= low_metrics['weighted_taylor_deviation_sum']
-    #             exceed_rate_better = high_metrics['exceed_rate'] >= low_metrics['exceed_rate']
-
-    #             if q_drop_max_better:
-    #                 q_drop_max_expectation_correct += 1
-                
-    #             if reward_drop_max_better:
-    #                 reward_drop_max_expectation_correct += 1
-    #             if q_drop_weighted_better:
-    #                 q_drop_weighted_expectation_correct += 1
-
-    #             if reward_drop_weighted_better:
-    #                 reward_drop_weighted_expectation_correct += 1
-
-    #             if taylor_max_better:
-    #                 taylor_max_expectation_correct += 1
-                
-    #             if taylor_weighted_better:
-    #                 taylor_weighted_expectation_correct += 1
-                
-    #             if exceed_rate_better:
-    #                 exceed_rate_expectation_correct += 1
-                
-    #             # Log failed expectations
-    #             if not (q_drop_max_better or q_drop_weighted_better or taylor_max_better or taylor_weighted_better or exceed_rate_better):
-    #                 failed_expectations.append({
-    #                     'seed': seed,
-    #                     'agent_i_influencer_attacked': pair_result['agent_i'],
-    #                     'agent_j_influenced_observed': pair_result['agent_j'],
-    #                     'q_drop_max_failed': not q_drop_max_better,
-    #                     'q_drop_weighted_failed': not q_drop_weighted_better,
-    #                     'reward_drop_max_failed': not reward_drop_max_better, # adding reward drop failure
-    #                     'reward_drop_weighted_failed': not reward_drop_weighted_better, # adding reward
-    #                     'taylor_max_failed': not taylor_max_better,
-    #                     'taylor_weighted_failed': not taylor_weighted_better,
-    #                     'exceed_rate_failed': not exceed_rate_better,
-    #                     'high_q_drop_max': high_metrics['max_q_drop'],
-    #                     'low_q_drop_max': low_metrics['max_q_drop'],
-    #                     'high_q_drop_weighted': high_metrics['weighted_q_drop_sum'],
-    #                     'low_q_drop_weighted': low_metrics['weighted_q_drop_sum'],
-    #                     'high_taylor_max': high_metrics['max_abs_taylor_deviation'],
-    #                     'low_taylor_max': low_metrics['max_abs_taylor_deviation'],
-    #                     'high_taylor_weighted': high_metrics['weighted_taylor_deviation_sum'],
-    #                     'low_taylor_weighted': low_metrics['weighted_taylor_deviation_sum'],
-    #                     'high_exceed_rate': high_metrics['exceed_rate'],
-    #                     'low_exceed_rate': low_metrics['exceed_rate']
-    #                 })
-        
-    #     total_experiments = len(self.experiment_results)
-        
-    #     # Compute accuracies
-    #     patient_zero_accuracy = correct_patient_zero / total_with_detection if total_with_detection > 0 else 0
-    #     high_patient_zero_accuracy = high_correct_patient_zero / high_total_with_detection if high_total_with_detection > 0 else 0
-    #     low_patient_zero_accuracy = low_correct_patient_zero / low_total_with_detection if low_total_with_detection > 0 else 0
-    #     q_drop_max_accuracy = q_drop_max_expectation_correct / total_pairs
-    #     reward_drop_max_accuracy = reward_drop_max_expectation_correct / total_pairs # adding reward drop accuracy
-    #     q_drop_weighted_accuracy = q_drop_weighted_expectation_correct / total_pairs
-    #     reward_drop_weighted_accuracy = reward_drop_weighted_expectation_correct / total_pairs # adding reward drop accuracy
-    #     taylor_max_accuracy = taylor_max_expectation_correct / total_pairs
-    #     taylor_weighted_accuracy = taylor_weighted_expectation_correct / total_pairs
-    #     exceed_rate_accuracy = exceed_rate_expectation_correct / total_pairs
-        
-    #     # Aggregate metrics
-    #     avg_high_q_drop_max = np.mean([m['max_q_drop'] for m in high_metrics_list])
-    #     avg_low_q_drop_max = np.mean([m['max_q_drop'] for m in low_metrics_list])
-    #     avg_high_reward_drop_max = np.mean([m['max_reward_drop'] for m in high_metrics_list]) # adding reward drop
-    #     avg_low_reward_drop_max = np.mean([m['max_reward_drop'] for m in low_metrics_list]) # adding reward drop
-    #     avg_high_q_drop_weighted = np.mean([m['weighted_q_drop_sum'] for m in high_metrics_list])
-    #     avg_low_q_drop_weighted = np.mean([m['weighted_q_drop_sum'] for m in low_metrics_list])
-    #     avg_high_taylor_max = np.mean([m['max_abs_taylor_deviation'] for m in high_metrics_list])
-    #     avg_low_taylor_max = np.mean([m['max_abs_taylor_deviation'] for m in low_metrics_list])
-    #     avg_high_taylor_weighted = np.mean([m['weighted_taylor_deviation_sum'] for m in high_metrics_list])
-    #     avg_low_taylor_weighted = np.mean([m['weighted_taylor_deviation_sum'] for m in low_metrics_list])
-    #     avg_high_exceed_rate = np.mean([m['exceed_rate'] for m in high_metrics_list])
-    #     avg_low_exceed_rate = np.mean([m['exceed_rate'] for m in low_metrics_list])
-        
-    #     accuracy_results = {
-    #         'total_experiments': total_experiments,
-    #         'total_pairs': total_pairs,
-    #         'total_with_detection': total_with_detection,
-    #         'correct_patient_zero': correct_patient_zero,
-    #         'patient_zero_accuracy': patient_zero_accuracy,
-    #         'high_patient_zero_accuracy': high_patient_zero_accuracy,
-    #         'low_patient_zero_accuracy': low_patient_zero_accuracy,
-    #         'q_drop_max_expectation_correct': q_drop_max_expectation_correct,
-    #         'q_drop_max_accuracy': q_drop_max_accuracy,
-    #         'q_drop_weighted_expectation_correct': q_drop_weighted_expectation_correct,
-    #         'q_drop_weighted_accuracy': q_drop_weighted_accuracy,
-    #         'reward_drop_max_expectation_correct': reward_drop_max_expectation_correct, # adding reward drop
-    #         'reward_drop_max_accuracy': reward_drop_max_accuracy, # adding reward drop
-    #         'reward_drop_weighted_expectation_correct': reward_drop_weighted_expectation_correct, # adding reward drop
-    #         'reward_drop_weighted_accuracy': reward_drop_weighted_accuracy, # adding reward drop
-    #         'taylor_max_expectation_correct': taylor_max_expectation_correct,
-    #         'taylor_max_accuracy': taylor_max_accuracy,
-    #         'taylor_weighted_expectation_correct': taylor_weighted_expectation_correct,
-    #         'taylor_weighted_accuracy': taylor_weighted_accuracy,
-    #         'exceed_rate_expectation_correct': exceed_rate_expectation_correct,
-    #         'exceed_rate_accuracy': exceed_rate_accuracy,
-    #         'avg_high_q_drop_max': avg_high_q_drop_max,
-    #         'avg_low_q_drop_max': avg_low_q_drop_max,
-    #         'avg_high_q_drop_weighted': avg_high_q_drop_weighted,
-    #         'avg_low_q_drop_weighted': avg_low_q_drop_weighted,
-    #         'avg_high_taylor_max': avg_high_taylor_max,
-    #         'avg_low_taylor_max': avg_low_taylor_max,
-    #         'avg_high_taylor_weighted': avg_high_taylor_weighted,
-    #         'avg_low_taylor_weighted': avg_low_taylor_weighted,
-    #         'avg_high_exceed_rate': avg_high_exceed_rate,
-    #         'avg_low_exceed_rate': avg_low_exceed_rate,
-    #         'failed_expectations_count': len(failed_expectations)
-    #     }
-        
-    #     print(f"Total Experiments: {total_experiments}, Total Agent Pairs: {total_pairs}")
-    #     print(f"Patient Zero Detection Accuracy: {patient_zero_accuracy:.3f} ({correct_patient_zero}/{total_with_detection})")
-    #     print(f"High Influence Patient Zero Accuracy: {high_patient_zero_accuracy:.3f} ({high_correct_patient_zero}/{high_total_with_detection})")
-    #     print(f"Low Influence Patient Zero Accuracy: {low_patient_zero_accuracy:.3f} ({low_correct_patient_zero}/{low_total_with_detection})")
-    #     print(f"Q-Drop Max Expectation Accuracy: {q_drop_max_accuracy:.3f} ({q_drop_max_expectation_correct}/{total_pairs})")
-    #     print(f"Reward Drop Max Expectation Accuracy: {reward_drop_max_accuracy:.3f} ({reward_drop_max_expectation_correct}/{total_pairs})") # adding reward drop accuracy
-    #     print(f"Q-Drop Weighted Expectation Accuracy: {q_drop_weighted_accuracy:.3f} ({q_drop_weighted_expectation_correct}/{total_pairs})")
-    #     print(f"Reward Drop Weighted Expectation Accuracy: {reward_drop_weighted_accuracy:.3f} ({reward_drop_weighted_expectation_correct}/{total_pairs})") # adding reward drop accuracy
-    #     print(f"Taylor Max Expectation Accuracy: {taylor_max_accuracy:.3f} ({taylor_max_expectation_correct}/{total_pairs})")
-    #     print(f"Taylor Weighted Expectation Accuracy: {taylor_weighted_accuracy:.3f} ({taylor_weighted_expectation_correct}/{total_pairs})")
-    #     print(f"Exceed Rate Expectation Accuracy: {exceed_rate_accuracy:.3f} ({exceed_rate_expectation_correct}/{total_pairs})")
-    #     print(f"Average High Influence Q-Drop Max: {avg_high_q_drop_max:.6f}")
-    #     print(f"Average Low Influence Q-Drop Max: {avg_low_q_drop_max:.6f}")
-    #     print(f"Average High Influence Taylor Max: {avg_high_taylor_max:.6f}")
-    #     print(f"Average Low Influence Taylor Max: {avg_low_taylor_max:.6f}")
-    #     print(f"Average High Influence Exceed Rate: {avg_high_exceed_rate:.6f}")
-    #     print(f"Average Low Influence Exceed Rate: {avg_low_exceed_rate:.6f}")
-    #     print(f"Failed Expectations: {len(failed_expectations)}")
-        
-    #     return accuracy_results, failed_expectations
-    
-    # def compute_pair_specific_accuracies(self):
-    #     """Compute accuracies and analyze results for each agent pair separately."""
-    #     if not self.experiment_results:
-    #         print("No successful experiments to analyze!")
-    #         return {}
-        
-    #     print("\n" + "="*50)
-    #     print("COMPUTING PAIR-SPECIFIC ACCURACIES")
-    #     print("="*50)
-        
-    #     # Initialize pair-specific results storage
-    #     pair_specific_results = {}
-        
-    #     # Get all unique pairs
-    #     unique_pairs = set()
-    #     for result in self.experiment_results:
-    #         for pair_result in result['pair_results']:
-    #             pair_key = (pair_result['agent_i'], pair_result['agent_j'])
-    #             unique_pairs.add(pair_key)
-        
-    #     print(f"Found {len(unique_pairs)} unique agent pairs")
-        
-    #     # Process each unique pair
-    #     for agent_i, agent_j in sorted(unique_pairs):
-    #         pair_key = f"agent_{agent_i}_to_agent_{agent_j}"
-    #         print(f"\nAnalyzing pair: {pair_key}")
-            
-    #         # Collect all results for this specific pair
-    #         pair_data = []
-    #         for result in self.experiment_results:
-    #             for pair_result in result['pair_results']:
-    #                 if pair_result['agent_i'] == agent_i and pair_result['agent_j'] == agent_j:
-    #                     pair_data.append({
-    #                         'seed': result['seed'],
-    #                         'episode_length': result['episode_length'],
-    #                         **pair_result
-    #                     })
-            
-    #         if not pair_data:
-    #             continue
-            
-    #         # Initialize counters for this pair
-    #         correct_patient_zero = 0
-    #         total_with_detection = 0
-    #         high_correct_patient_zero = 0
-    #         high_total_with_detection = 0
-    #         low_correct_patient_zero = 0
-    #         low_total_with_detection = 0
-            
-    #         # Expectation accuracy metrics for this pair
-    #         q_drop_max_expectation_correct = 0
-    #         q_drop_weighted_expectation_correct = 0
-    #         reward_drop_max_expectation_correct = 0
-    #         reward_drop_weighted_expectation_correct = 0
-    #         taylor_max_expectation_correct = 0
-    #         taylor_weighted_expectation_correct = 0
-    #         exceed_rate_expectation_correct = 0
-            
-    #         # Detailed metrics for this pair
-    #         high_metrics_list = []
-    #         low_metrics_list = []
-    #         failed_expectations = []
-            
-    #         # Process each experiment for this pair
-    #         for data in pair_data:
-    #             # Patient zero analysis
-    #             high_patient_zero = data['high_patient_zero']
-    #             low_patient_zero = data['low_patient_zero']
-    #             attacked_agent = data['agent_i']  # The agent we attacked (influencer)
-                
-    #             if high_patient_zero is not None:
-    #                 total_with_detection += 1
-    #                 high_total_with_detection += 1
-    #                 if high_patient_zero == attacked_agent:
-    #                     correct_patient_zero += 1
-    #                     high_correct_patient_zero += 1
-                
-    #             if low_patient_zero is not None:
-    #                 total_with_detection += 1
-    #                 low_total_with_detection += 1
-    #                 if low_patient_zero == attacked_agent:
-    #                     correct_patient_zero += 1
-    #                     low_correct_patient_zero += 1
-                
-    #             # Expectation analysis
-    #             high_metrics = data['high_metrics']
-    #             low_metrics = data['low_metrics']
-                
-    #             high_metrics_list.append(high_metrics)
-    #             low_metrics_list.append(low_metrics)
-                
-    #             # Check individual metric expectations
-    #             q_drop_max_better = high_metrics['max_q_drop'] >= low_metrics['max_q_drop']
-    #             q_drop_weighted_better = high_metrics['weighted_q_drop_sum'] >= low_metrics['weighted_q_drop_sum']
-    #             reward_drop_max_better = high_metrics['max_reward_drop'] >= low_metrics['max_reward_drop']
-    #             reward_drop_weighted_better = high_metrics['weighted_reward_drop_sum'] >= low_metrics['weighted_reward_drop_sum']
-    #             taylor_max_better = high_metrics['max_abs_taylor_deviation'] >= low_metrics['max_abs_taylor_deviation']
-    #             taylor_weighted_better = high_metrics['weighted_taylor_deviation_sum'] >= low_metrics['weighted_taylor_deviation_sum']
-    #             exceed_rate_better = high_metrics['exceed_rate'] >= low_metrics['exceed_rate']
-
-    #             if q_drop_max_better:
-    #                 q_drop_max_expectation_correct += 1
-    #             if q_drop_weighted_better:
-    #                 q_drop_weighted_expectation_correct += 1
-    #             if reward_drop_max_better:
-    #                 reward_drop_max_expectation_correct += 1
-    #             if reward_drop_weighted_better:
-    #                 reward_drop_weighted_expectation_correct += 1
-    #             if taylor_max_better:
-    #                 taylor_max_expectation_correct += 1
-    #             if taylor_weighted_better:
-    #                 taylor_weighted_expectation_correct += 1
-    #             if exceed_rate_better:
-    #                 exceed_rate_expectation_correct += 1
-                
-    #             # Log failed expectations for this pair
-    #             if not (q_drop_max_better and q_drop_weighted_better and
-    #                     reward_drop_max_better and reward_drop_weighted_better and
-    #                     taylor_max_better and taylor_weighted_better and
-    #                     exceed_rate_better):
-    #                 failed_expectations.append({
-    #                     'seed': data['seed'],
-    #                     'agent_i_influencer_attacked': data['agent_i'],
-    #                     'agent_j_influenced_observed': data['agent_j'],
-    #                     'q_drop_max_failed': not q_drop_max_better,
-    #                     'q_drop_weighted_failed': not q_drop_weighted_better,
-    #                     'reward_drop_max_failed': not reward_drop_max_better,
-    #                     'reward_drop_weighted_failed': not reward_drop_weighted_better,
-    #                     'taylor_max_failed': not taylor_max_better,
-    #                     'taylor_weighted_failed': not taylor_weighted_better,
-    #                     'exceed_rate_failed': not exceed_rate_better,
-    #                     'high_q_drop_max': high_metrics['max_q_drop'],
-    #                     'low_q_drop_max': low_metrics['max_q_drop'],
-    #                     'high_q_drop_weighted': high_metrics['weighted_q_drop_sum'],
-    #                     'low_q_drop_weighted': low_metrics['weighted_q_drop_sum'],
-    #                     'high_reward_drop_max': high_metrics['max_reward_drop'],
-    #                     'low_reward_drop_max': low_metrics['max_reward_drop'],
-    #                     'high_reward_drop_weighted': high_metrics['weighted_reward_drop_sum'],
-    #                     'low_reward_drop_weighted': low_metrics['weighted_reward_drop_sum'],
-    #                     'high_taylor_max': high_metrics['max_abs_taylor_deviation'],
-    #                     'low_taylor_max': low_metrics['max_abs_taylor_deviation'],
-    #                     'high_taylor_weighted': high_metrics['weighted_taylor_deviation_sum'],
-    #                     'low_taylor_weighted': low_metrics['weighted_taylor_deviation_sum'],
-    #                     'high_exceed_rate': high_metrics['exceed_rate'],
-    #                     'low_exceed_rate': low_metrics['exceed_rate']
-    #                 })
-            
-    #         total_experiments_for_pair = len(pair_data)
-            
-    #         # Compute accuracies for this pair
-    #         patient_zero_accuracy = correct_patient_zero / total_with_detection if total_with_detection > 0 else 0
-    #         high_patient_zero_accuracy = high_correct_patient_zero / high_total_with_detection if high_total_with_detection > 0 else 0
-    #         low_patient_zero_accuracy = low_correct_patient_zero / low_total_with_detection if low_total_with_detection > 0 else 0
-    #         q_drop_max_accuracy = q_drop_max_expectation_correct / total_experiments_for_pair
-    #         q_drop_weighted_accuracy = q_drop_weighted_expectation_correct / total_experiments_for_pair
-    #         reward_drop_max_accuracy = reward_drop_max_expectation_correct / total_experiments_for_pair
-    #         reward_drop_weighted_accuracy = reward_drop_weighted_expectation_correct / total_experiments_for_pair
-    #         taylor_max_accuracy = taylor_max_expectation_correct / total_experiments_for_pair
-    #         taylor_weighted_accuracy = taylor_weighted_expectation_correct / total_experiments_for_pair
-    #         exceed_rate_accuracy = exceed_rate_expectation_correct / total_experiments_for_pair
-            
-    #         # Aggregate metrics for this pair
-    #         avg_high_q_drop_max = np.mean([m['max_q_drop'] for m in high_metrics_list])
-    #         avg_low_q_drop_max = np.mean([m['max_q_drop'] for m in low_metrics_list])
-    #         avg_high_q_drop_weighted = np.mean([m['weighted_q_drop_sum'] for m in high_metrics_list])
-    #         avg_low_q_drop_weighted = np.mean([m['weighted_q_drop_sum'] for m in low_metrics_list])
-    #         avg_high_reward_drop_max = np.mean([m['max_reward_drop'] for m in high_metrics_list])
-    #         avg_low_reward_drop_max = np.mean([m['max_reward_drop'] for m in low_metrics_list])
-    #         avg_high_reward_drop_weighted = np.mean([m['weighted_reward_drop_sum'] for m in high_metrics_list])
-    #         avg_low_reward_drop_weighted = np.mean([m['weighted_reward_drop_sum'] for m in low_metrics_list])
-    #         avg_high_taylor_max = np.mean([m['max_abs_taylor_deviation'] for m in high_metrics_list])
-    #         avg_low_taylor_max = np.mean([m['max_abs_taylor_deviation'] for m in low_metrics_list])
-    #         avg_high_taylor_weighted = np.mean([m['weighted_taylor_deviation_sum'] for m in high_metrics_list])
-    #         avg_low_taylor_weighted = np.mean([m['weighted_taylor_deviation_sum'] for m in low_metrics_list])
-    #         avg_high_exceed_rate = np.mean([m['exceed_rate'] for m in high_metrics_list])
-    #         avg_low_exceed_rate = np.mean([m['exceed_rate'] for m in low_metrics_list])
-            
-    #         # Store results for this pair
-    #         pair_specific_results[pair_key] = {
-    #             'agent_i': agent_i,
-    #             'agent_j': agent_j,
-    #             'total_experiments': total_experiments_for_pair,
-    #             'total_with_detection': total_with_detection,
-    #             'correct_patient_zero': correct_patient_zero,
-    #             'patient_zero_accuracy': patient_zero_accuracy,
-    #             'high_patient_zero_accuracy': high_patient_zero_accuracy,
-    #             'low_patient_zero_accuracy': low_patient_zero_accuracy,
-    #             'q_drop_max_expectation_correct': q_drop_max_expectation_correct,
-    #             'q_drop_max_accuracy': q_drop_max_accuracy,
-    #             'q_drop_weighted_expectation_correct': q_drop_weighted_expectation_correct,
-    #             'q_drop_weighted_accuracy': q_drop_weighted_accuracy,
-    #             'reward_drop_max_expectation_correct': reward_drop_max_expectation_correct,
-    #             'reward_drop_max_accuracy': reward_drop_max_accuracy,
-    #             'reward_drop_weighted_expectation_correct': reward_drop_weighted_expectation_correct,
-    #             'reward_drop_weighted_accuracy': reward_drop_weighted_accuracy,
-    #             'taylor_max_expectation_correct': taylor_max_expectation_correct,
-    #             'taylor_max_accuracy': taylor_max_accuracy,
-    #             'taylor_weighted_expectation_correct': taylor_weighted_expectation_correct,
-    #             'taylor_weighted_accuracy': taylor_weighted_accuracy,
-    #             'exceed_rate_expectation_correct': exceed_rate_expectation_correct,
-    #             'exceed_rate_accuracy': exceed_rate_accuracy,
-    #             'avg_high_q_drop_max': avg_high_q_drop_max,
-    #             'avg_low_q_drop_max': avg_low_q_drop_max,
-    #             'avg_high_q_drop_weighted': avg_high_q_drop_weighted,
-    #             'avg_low_q_drop_weighted': avg_low_q_drop_weighted,
-    #             'avg_high_reward_drop_max': avg_high_reward_drop_max,
-    #             'avg_low_reward_drop_max': avg_low_reward_drop_max,
-    #             'avg_high_reward_drop_weighted': avg_high_reward_drop_weighted,
-    #             'avg_low_reward_drop_weighted': avg_low_reward_drop_weighted,
-    #             'avg_high_taylor_max': avg_high_taylor_max,
-    #             'avg_low_taylor_max': avg_low_taylor_max,
-    #             'avg_high_taylor_weighted': avg_high_taylor_weighted,
-    #             'avg_low_taylor_weighted': avg_low_taylor_weighted,
-    #             'avg_high_exceed_rate': avg_high_exceed_rate,
-    #             'avg_low_exceed_rate': avg_low_exceed_rate,
-    #             'failed_expectations_count': len(failed_expectations),
-    #             'failed_expectations': failed_expectations,
-    #             'raw_pair_data': pair_data
-    #         }
-            
-    #         # Print summary for this pair
-    #         print(f"  Total Experiments: {total_experiments_for_pair}")
-    #         print(f"  Patient Zero Detection Accuracy: {patient_zero_accuracy:.3f} ({correct_patient_zero}/{total_with_detection})")
-    #         print(f"  Q-Drop Max Expectation Accuracy: {q_drop_max_accuracy:.3f} ({q_drop_max_expectation_correct}/{total_experiments_for_pair})")
-    #         print(f"  Q-Drop Weighted Expectation Accuracy: {q_drop_weighted_accuracy:.3f} ({q_drop_weighted_expectation_correct}/{total_experiments_for_pair})")
-    #         print(f"  Reward-Drop Max Expectation Accuracy: {reward_drop_max_accuracy:.3f} ({reward_drop_max_expectation_correct}/{total_experiments_for_pair})")
-    #         print(f"  Reward-Drop Weighted Expectation Accuracy: {reward_drop_weighted_accuracy:.3f} ({reward_drop_weighted_expectation_correct}/{total_experiments_for_pair})")
-    #         print(f"  Taylor Max Expectation Accuracy: {taylor_max_accuracy:.3f} ({taylor_max_expectation_correct}/{total_experiments_for_pair})")
-    #         print(f"  Taylor Weighted Expectation Accuracy: {taylor_weighted_accuracy:.3f} ({taylor_weighted_expectation_correct}/{total_experiments_for_pair})")
-    #         print(f"  Exceed Rate Expectation Accuracy: {exceed_rate_accuracy:.3f} ({exceed_rate_expectation_correct}/{total_experiments_for_pair})")
-    #         print(f"  Failed Expectations: {len(failed_expectations)}")
-        
-    #     return pair_specific_results
-    
-    # def print_pair_specific_summary(self, pair_specific_results):
-    #     """Print a comprehensive summary of pair-specific results."""
-    #     if not pair_specific_results:
-    #         return
-        
-    #     print("\n" + "="*70)
-    #     print("PAIR-SPECIFIC RESULTS SUMMARY")
-    #     print("="*70)
-        
-    #     # Sort pairs by overall performance (average of all accuracy metrics)
-    #     def calculate_overall_accuracy(results):
-    #         accuracy_metrics = [
-    #             results['patient_zero_accuracy'],
-    #             results['q_drop_max_accuracy'],
-    #             results['q_drop_weighted_accuracy'],
-    #             results['reward_drop_max_accuracy'],
-    #             results['reward_drop_weighted_accuracy'],
-    #             results['taylor_max_accuracy'],
-    #             results['taylor_weighted_accuracy'],
-    #             results['exceed_rate_accuracy']
-    #         ]
-    #         return np.mean([acc for acc in accuracy_metrics if not np.isnan(acc)])
-        
-    #     sorted_pairs = sorted(pair_specific_results.items(), 
-    #                          key=lambda x: calculate_overall_accuracy(x[1]), 
-    #                          reverse=True)
-        
-    #     print(f"{'Pair':<20} {'PZ Acc':<8} {'Q-Max':<8} {'Q-Wei':<8} {'R-Max':<8} {'R-Wei':<8} {'T-Max':<8} {'T-Wei':<8} {'E-Rate':<8} {'Failed':<8}")
-    #     print("-" * 90)
-        
-    #     for pair_name, results in sorted_pairs:
-    #         print(f"{pair_name:<20} "
-    #               f"{results['patient_zero_accuracy']:<8.3f} "
-    #               f"{results['q_drop_max_accuracy']:<8.3f} "
-    #               f"{results['q_drop_weighted_accuracy']:<8.3f} "
-    #               f"{results['reward_drop_max_accuracy']:<8.3f} "
-    #               f"{results['reward_drop_weighted_accuracy']:<8.3f} "
-    #               f"{results['taylor_max_accuracy']:<8.3f} "
-    #               f"{results['taylor_weighted_accuracy']:<8.3f} "
-    #               f"{results['exceed_rate_accuracy']:<8.3f} "
-    #               f"{results['failed_expectations_count']:<8}")
-        
-    #     print("\nLegend:")
-    #     print("PZ Acc  = Patient Zero Accuracy")
-    #     print("Q-Max   = Q-Drop Max Expectation Accuracy")
-    #     print("Q-Wei   = Q-Drop Weighted Expectation Accuracy")
-    #     print("R-Max   = Reward-Drop Max Expectation Accuracy") 
-    #     print("R-Wei   = Reward-Drop Weighted Expectation Accuracy")
-    #     print("T-Max   = Taylor Max Expectation Accuracy")
-    #     print("T-Wei   = Taylor Weighted Expectation Accuracy")
-    #     print("E-Rate  = Exceed Rate Expectation Accuracy")
-    #     print("Failed  = Number of Failed Expectations")
-        
-    #     # Print best and worst performing pairs
-    #     if len(sorted_pairs) > 0:
-    #         best_pair = sorted_pairs[0]
-    #         worst_pair = sorted_pairs[-1]
-            
-    #         print(f"\nBest performing pair: {best_pair[0]}")
-    #         print(f"  Overall accuracy: {calculate_overall_accuracy(best_pair[1]):.3f}")
-            
-    #         print(f"\nWorst performing pair: {worst_pair[0]}")
-    #         print(f"  Overall accuracy: {calculate_overall_accuracy(worst_pair[1]):.3f}")
-    
-    # def save_results(self, accuracy_results, failed_expectations, pair_specific_results=None):
-    #     """Save all results to CSV files."""
-    #     print("\nSaving results to CSV files...")
-        
-    #     # Save accuracy results
-    #     accuracy_file = os.path.join(self.logdir, 'accuracy_results.csv')
-    #     with open(accuracy_file, 'w', newline='') as csvfile:
-    #         writer = csv.writer(csvfile)
-    #         writer.writerow(['Metric', 'Value'])
-    #         for key, value in accuracy_results.items():
-    #             writer.writerow([key, value])
-        
-    #     # Save detailed experiment results
-    #     detailed_file = os.path.join(self.logdir, 'detailed_results.csv')
-    #     with open(detailed_file, 'w', newline='') as csvfile:
-    #         fieldnames = [
-    #             'seed', 'agent_i_influencer_attacked', 'agent_j_influenced_observed', 'max_influence_t', 'min_influence_t',
-    #             'high_patient_zero', 'high_patient_time', 'low_patient_zero', 'low_patient_time',
-    #             'high_max_q_drop', 'high_weighted_q_drop_sum', 'high_max_reward_drop', 'high_weighted_reward_drop_sum',
-    #             'high_max_abs_taylor_deviation', 'high_weighted_taylor_deviation_sum', 'high_exceed_rate', 'high_window_length',
-    #             'low_max_q_drop', 'low_weighted_q_drop_sum', 'low_max_reward_drop', 'low_weighted_reward_drop_sum',
-    #             'low_max_abs_taylor_deviation', 'low_weighted_taylor_deviation_sum', 'low_exceed_rate', 'low_window_length',
-    #             'episode_length'
-    #         ]
-    #         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-    #         writer.writeheader()
-            
-    #         # Process all pairs from all seeds
-    #         for result in self.experiment_results:
-    #             seed = result['seed']
-    #             episode_length = result['episode_length']
-                
-    #             for pair_result in result['pair_results']:
-    #                 row = {
-    #                     'seed': seed,
-    #                     'agent_i_influencer_attacked': pair_result['agent_i'],
-    #                     'agent_j_influenced_observed': pair_result['agent_j'],
-    #                     'max_influence_t': pair_result['max_influence_t'],
-    #                     'min_influence_t': pair_result['min_influence_t'],
-    #                     'high_patient_zero': pair_result['high_patient_zero'],
-    #                     'high_patient_time': pair_result['high_patient_time'],
-    #                     'low_patient_zero': pair_result['low_patient_zero'],
-    #                     'low_patient_time': pair_result['low_patient_time'],
-    #                     'episode_length': episode_length
-    #                 }
-                    
-    #                 # Add high influence metrics
-    #                 for key, value in pair_result['high_metrics'].items():
-    #                     row[f'high_{key}'] = value
-                    
-    #                 # Add low influence metrics
-    #                 for key, value in pair_result['low_metrics'].items():
-    #                     row[f'low_{key}'] = value
-                    
-    #                 writer.writerow(row)
-        
-    #     # Save failed expectations
-    #     if failed_expectations:
-    #         failed_file = os.path.join(self.logdir, 'failed_expectations.csv')
-    #         with open(failed_file, 'w', newline='') as csvfile:
-    #             fieldnames = [
-    #                 'seed', 'agent_i_influencer_attacked', 'agent_j_influenced_observed', 
-    #                 'q_drop_max_failed', 'q_drop_weighted_failed', 'reward_drop_max_failed', 'reward_drop_weighted_failed',
-    #                 'taylor_max_failed', 'taylor_weighted_failed', 'exceed_rate_failed',
-    #                 'high_q_drop_max', 'low_q_drop_max', 'high_q_drop_weighted', 'low_q_drop_weighted',
-    #                 'high_reward_drop_max', 'low_reward_drop_max', 'high_reward_drop_weighted', 'low_reward_drop_weighted',
-    #                 'high_taylor_max', 'low_taylor_max', 'high_taylor_weighted', 'low_taylor_weighted',
-    #                 'high_exceed_rate', 'low_exceed_rate'
-    #             ]
-    #             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-    #             writer.writeheader()
-    #             writer.writerows(failed_expectations)
-        
-    #     # Save failed seeds
-    #     if self.failed_seeds:
-    #         failed_seeds_file = os.path.join(self.logdir, 'failed_seeds.csv')
-    #         with open(failed_seeds_file, 'w', newline='') as csvfile:
-    #             writer = csv.DictWriter(csvfile, fieldnames=['seed', 'error'])
-    #             writer.writeheader()
-    #             writer.writerows(self.failed_seeds)
-        
-    #     # Save pair-specific results
-    #     if pair_specific_results:
-    #         # Create pair-specific directory
-    #         pair_dir = os.path.join(self.logdir, 'pair_specific_results')
-    #         os.makedirs(pair_dir, exist_ok=True)
-            
-    #         # Save overall pair-specific accuracy summary
-    #         pair_summary_file = os.path.join(self.logdir, 'pair_specific_accuracy_summary.csv')
-    #         with open(pair_summary_file, 'w', newline='') as csvfile:
-    #             fieldnames = [
-    #                 'pair_name', 'agent_i_influencer', 'agent_j_influenced', 'total_experiments',
-    #                 'patient_zero_accuracy', 'high_patient_zero_accuracy', 'low_patient_zero_accuracy',
-    #                 'q_drop_max_accuracy', 'q_drop_weighted_accuracy',
-    #                 'reward_drop_max_accuracy', 'reward_drop_weighted_accuracy',
-    #                 'taylor_max_accuracy', 'taylor_weighted_accuracy', 'exceed_rate_accuracy',
-    #                 'avg_high_q_drop_max', 'avg_low_q_drop_max',
-    #                 'avg_high_reward_drop_max', 'avg_low_reward_drop_max',
-    #                 'avg_high_taylor_max', 'avg_low_taylor_max',
-    #                 'avg_high_exceed_rate', 'avg_low_exceed_rate',
-    #                 'failed_expectations_count'
-    #             ]
-    #             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-    #             writer.writeheader()
-                
-    #             for pair_name, results in pair_specific_results.items():
-    #                 row = {
-    #                     'pair_name': pair_name,
-    #                     'agent_i_influencer': results['agent_i'],
-    #                     'agent_j_influenced': results['agent_j'],
-    #                     'total_experiments': results['total_experiments'],
-    #                     'patient_zero_accuracy': results['patient_zero_accuracy'],
-    #                     'high_patient_zero_accuracy': results['high_patient_zero_accuracy'],
-    #                     'low_patient_zero_accuracy': results['low_patient_zero_accuracy'],
-    #                     'q_drop_max_accuracy': results['q_drop_max_accuracy'],
-    #                     'q_drop_weighted_accuracy': results['q_drop_weighted_accuracy'],
-    #                     'reward_drop_max_accuracy': results['reward_drop_max_accuracy'],
-    #                     'reward_drop_weighted_accuracy': results['reward_drop_weighted_accuracy'],
-    #                     'taylor_max_accuracy': results['taylor_max_accuracy'],
-    #                     'taylor_weighted_accuracy': results['taylor_weighted_accuracy'],
-    #                     'exceed_rate_accuracy': results['exceed_rate_accuracy'],
-    #                     'avg_high_q_drop_max': results['avg_high_q_drop_max'],
-    #                     'avg_low_q_drop_max': results['avg_low_q_drop_max'],
-    #                     'avg_high_reward_drop_max': results['avg_high_reward_drop_max'],
-    #                     'avg_low_reward_drop_max': results['avg_low_reward_drop_max'],
-    #                     'avg_high_taylor_max': results['avg_high_taylor_max'],
-    #                     'avg_low_taylor_max': results['avg_low_taylor_max'],
-    #                     'avg_high_exceed_rate': results['avg_high_exceed_rate'],
-    #                     'avg_low_exceed_rate': results['avg_low_exceed_rate'],
-    #                     'failed_expectations_count': results['failed_expectations_count']
-    #                 }
-    #                 writer.writerow(row)
-            
-    #         # Save detailed results for each pair in separate CSV files
-    #         for pair_name, results in pair_specific_results.items():
-    #             # Detailed experiment results for this pair
-    #             pair_detailed_file = os.path.join(pair_dir, f'{pair_name}_detailed_results.csv')
-    #             with open(pair_detailed_file, 'w', newline='') as csvfile:
-    #                 fieldnames = [
-    #                     'seed', 'agent_i_influencer_attacked', 'agent_j_influenced_observed', 'max_influence_t', 'min_influence_t',
-    #                     'high_patient_zero', 'high_patient_time', 'low_patient_zero', 'low_patient_time',
-    #                     'high_max_q_drop', 'high_weighted_q_drop_sum', 'high_max_reward_drop', 'high_weighted_reward_drop_sum',
-    #                     'high_max_abs_taylor_deviation', 'high_weighted_taylor_deviation_sum', 'high_exceed_rate', 'high_window_length',
-    #                     'low_max_q_drop', 'low_weighted_q_drop_sum', 'low_max_reward_drop', 'low_weighted_reward_drop_sum',
-    #                     'low_max_abs_taylor_deviation', 'low_weighted_taylor_deviation_sum', 'low_exceed_rate', 'low_window_length',
-    #                     'episode_length'
-    #                 ]
-    #                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-    #                 writer.writeheader()
-                    
-    #                 for data in results['raw_pair_data']:
-    #                     row = {
-    #                         'seed': data['seed'],
-    #                         'agent_i_influencer_attacked': data['agent_i'],
-    #                         'agent_j_influenced_observed': data['agent_j'],
-    #                         'max_influence_t': data['max_influence_t'],
-    #                         'min_influence_t': data['min_influence_t'],
-    #                         'high_patient_zero': data['high_patient_zero'],
-    #                         'high_patient_time': data['high_patient_time'],
-    #                         'low_patient_zero': data['low_patient_zero'],
-    #                         'low_patient_time': data['low_patient_time'],
-    #                         'episode_length': data['episode_length']
-    #                     }
-                        
-    #                     # Add high influence metrics
-    #                     for key, value in data['high_metrics'].items():
-    #                         row[f'high_{key}'] = value
-                        
-    #                     # Add low influence metrics
-    #                     for key, value in data['low_metrics'].items():
-    #                         row[f'low_{key}'] = value
-                        
-    #                     writer.writerow(row)
-                
-    #             # Failed expectations for this pair
-    #             if results['failed_expectations']:
-    #                 pair_failed_file = os.path.join(pair_dir, f'{pair_name}_failed_expectations.csv')
-    #                 with open(pair_failed_file, 'w', newline='') as csvfile:
-    #                     fieldnames = [
-    #                         'seed', 'agent_i_influencer_attacked', 'agent_j_influenced_observed', 
-    #                         'q_drop_max_failed', 'q_drop_weighted_failed', 'reward_drop_max_failed', 'reward_drop_weighted_failed',
-    #                         'taylor_max_failed', 'taylor_weighted_failed', 'exceed_rate_failed',
-    #                         'high_q_drop_max', 'low_q_drop_max', 'high_q_drop_weighted', 'low_q_drop_weighted',
-    #                         'high_reward_drop_max', 'low_reward_drop_max', 'high_reward_drop_weighted', 'low_reward_drop_weighted',
-    #                         'high_taylor_max', 'low_taylor_max', 'high_taylor_weighted', 'low_taylor_weighted',
-    #                         'high_exceed_rate', 'low_exceed_rate'
-    #                     ]
-    #                     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-    #                     writer.writeheader()
-    #                     writer.writerows(results['failed_expectations'])
-        
-    #     print(f"Results saved to {self.logdir}")
-    #     print(f"- Accuracy results: {accuracy_file}")
-    #     print(f"- Detailed results: {detailed_file}")
-    #     if failed_expectations:
-    #         print(f"- Failed expectations: {failed_file}")
-    #     if self.failed_seeds:
-    #         print(f"- Failed seeds: {failed_seeds_file}")
-    #     if pair_specific_results:
-    #         print(f"- Pair-specific accuracy summary: {pair_summary_file}")
-    #         print(f"- Pair-specific detailed results saved in: {pair_dir}")
-    #         print(f"  * {len(pair_specific_results)} individual pair CSV files created")
-    
-    #from shefin's latest commit at 30 Sept 10 pm
     def compute_accuracies(self):
         """Compute accuracies and analyze results."""
         if not self.experiment_results:
@@ -1815,20 +1222,19 @@ class MultiSeedExperimentRunner:
         # Patient zero detection accuracy
         correct_patient_zero = 0
         total_with_detection = 0
-        high_correct_patient_zero = 0
-        high_total_with_detection = 0
-        low_correct_patient_zero = 0
-        low_total_with_detection = 0
         
         # Expectation accuracy metrics - separate accuracies for each metric
         q_drop_max_expectation_correct = 0
-        q_drop_weighted_expectation_correct = 0
         reward_drop_max_expectation_correct = 0
+        q_drop_weighted_expectation_correct = 0
         reward_drop_weighted_expectation_correct = 0
         taylor_max_expectation_correct = 0
         taylor_weighted_expectation_correct = 0
         exceed_rate_expectation_correct = 0
-        
+        high_correct_patient_zero = 0
+        low_correct_patient_zero = 0
+        high_total_with_detection = 0
+        low_total_with_detection = 0
         # Detailed metrics
         high_metrics_list = []
         low_metrics_list = []
@@ -1858,11 +1264,11 @@ class MultiSeedExperimentRunner:
                 
                 if low_patient_zero is not None:
                     total_with_detection += 1
-                    low_total_with_detection += 1
+                    low_total_with_detection += 1   
                     if low_patient_zero == attacked_agent:
                         correct_patient_zero += 1
                         low_correct_patient_zero += 1
-                
+
                 # Expectation analysis
                 high_metrics = pair_result['high_metrics']
                 low_metrics = pair_result['low_metrics']
@@ -1872,9 +1278,9 @@ class MultiSeedExperimentRunner:
                 
                 # Check individual metric expectations (high influence should have higher impact)
                 q_drop_max_better = high_metrics['max_q_drop'] >= low_metrics['max_q_drop']
+                reward_drop_max_better = high_metrics['max_reward_drop'] >= low_metrics['max_reward_drop'] # adding reward drop comparison
                 q_drop_weighted_better = high_metrics['weighted_q_drop_sum'] >= low_metrics['weighted_q_drop_sum']
-                reward_drop_max_better = high_metrics['max_reward_drop'] >= low_metrics['max_reward_drop']
-                reward_drop_weighted_better = high_metrics['weighted_reward_drop_sum'] >= low_metrics['weighted_reward_drop_sum']
+                reward_drop_weighted_better = high_metrics['weighted_reward_drop_sum'] >= low_metrics['weighted_reward_drop_sum'] # adding reward drop comparison
                 taylor_max_better = high_metrics['max_abs_taylor_deviation'] >= low_metrics['max_abs_taylor_deviation']
                 taylor_weighted_better = high_metrics['weighted_taylor_deviation_sum'] >= low_metrics['weighted_taylor_deviation_sum']
                 exceed_rate_better = high_metrics['exceed_rate'] >= low_metrics['exceed_rate']
@@ -1882,15 +1288,14 @@ class MultiSeedExperimentRunner:
                 if q_drop_max_better:
                     q_drop_max_expectation_correct += 1
                 
-                if q_drop_weighted_better:
-                    q_drop_weighted_expectation_correct += 1
-                
                 if reward_drop_max_better:
                     reward_drop_max_expectation_correct += 1
-                
+                if q_drop_weighted_better:
+                    q_drop_weighted_expectation_correct += 1
+
                 if reward_drop_weighted_better:
                     reward_drop_weighted_expectation_correct += 1
-                
+
                 if taylor_max_better:
                     taylor_max_expectation_correct += 1
                 
@@ -1901,18 +1306,15 @@ class MultiSeedExperimentRunner:
                     exceed_rate_expectation_correct += 1
                 
                 # Log failed expectations
-                if not (q_drop_max_better and q_drop_weighted_better and
-                        reward_drop_max_better and reward_drop_weighted_better and
-                        taylor_max_better and taylor_weighted_better and
-                        exceed_rate_better):
+                if not (q_drop_max_better or q_drop_weighted_better or taylor_max_better or taylor_weighted_better or exceed_rate_better):
                     failed_expectations.append({
                         'seed': seed,
                         'agent_i_influencer_attacked': pair_result['agent_i'],
                         'agent_j_influenced_observed': pair_result['agent_j'],
                         'q_drop_max_failed': not q_drop_max_better,
                         'q_drop_weighted_failed': not q_drop_weighted_better,
-                        'reward_drop_max_failed': not reward_drop_max_better,
-                        'reward_drop_weighted_failed': not reward_drop_weighted_better,
+                        'reward_drop_max_failed': not reward_drop_max_better, # adding reward drop
+                        'reward_drop_weighted_failed': not reward_drop_weighted_better, # adding reward drop
                         'taylor_max_failed': not taylor_max_better,
                         'taylor_weighted_failed': not taylor_weighted_better,
                         'exceed_rate_failed': not exceed_rate_better,
@@ -1920,10 +1322,6 @@ class MultiSeedExperimentRunner:
                         'low_q_drop_max': low_metrics['max_q_drop'],
                         'high_q_drop_weighted': high_metrics['weighted_q_drop_sum'],
                         'low_q_drop_weighted': low_metrics['weighted_q_drop_sum'],
-                        'high_reward_drop_max': high_metrics['max_reward_drop'],
-                        'low_reward_drop_max': low_metrics['max_reward_drop'],
-                        'high_reward_drop_weighted': high_metrics['weighted_reward_drop_sum'],
-                        'low_reward_drop_weighted': low_metrics['weighted_reward_drop_sum'],
                         'high_taylor_max': high_metrics['max_abs_taylor_deviation'],
                         'low_taylor_max': low_metrics['max_abs_taylor_deviation'],
                         'high_taylor_weighted': high_metrics['weighted_taylor_deviation_sum'],
@@ -1939,9 +1337,9 @@ class MultiSeedExperimentRunner:
         high_patient_zero_accuracy = high_correct_patient_zero / high_total_with_detection if high_total_with_detection > 0 else 0
         low_patient_zero_accuracy = low_correct_patient_zero / low_total_with_detection if low_total_with_detection > 0 else 0
         q_drop_max_accuracy = q_drop_max_expectation_correct / total_pairs
+        reward_drop_max_accuracy = reward_drop_max_expectation_correct / total_pairs # adding reward drop accuracy
         q_drop_weighted_accuracy = q_drop_weighted_expectation_correct / total_pairs
-        reward_drop_max_accuracy = reward_drop_max_expectation_correct / total_pairs
-        reward_drop_weighted_accuracy = reward_drop_weighted_expectation_correct / total_pairs
+        reward_drop_weighted_accuracy = reward_drop_weighted_expectation_correct / total_pairs # adding reward drop accuracy
         taylor_max_accuracy = taylor_max_expectation_correct / total_pairs
         taylor_weighted_accuracy = taylor_weighted_expectation_correct / total_pairs
         exceed_rate_accuracy = exceed_rate_expectation_correct / total_pairs
@@ -1949,12 +1347,10 @@ class MultiSeedExperimentRunner:
         # Aggregate metrics
         avg_high_q_drop_max = np.mean([m['max_q_drop'] for m in high_metrics_list])
         avg_low_q_drop_max = np.mean([m['max_q_drop'] for m in low_metrics_list])
+        avg_high_reward_drop_max = np.mean([m['max_reward_drop'] for m in high_metrics_list]) # adding reward drop
+        avg_low_reward_drop_max = np.mean([m['max_reward_drop'] for m in low_metrics_list]) # adding reward drop
         avg_high_q_drop_weighted = np.mean([m['weighted_q_drop_sum'] for m in high_metrics_list])
         avg_low_q_drop_weighted = np.mean([m['weighted_q_drop_sum'] for m in low_metrics_list])
-        avg_high_reward_drop_max = np.mean([m['max_reward_drop'] for m in high_metrics_list])
-        avg_low_reward_drop_max = np.mean([m['max_reward_drop'] for m in low_metrics_list])
-        avg_high_reward_drop_weighted = np.mean([m['weighted_reward_drop_sum'] for m in high_metrics_list])
-        avg_low_reward_drop_weighted = np.mean([m['weighted_reward_drop_sum'] for m in low_metrics_list])
         avg_high_taylor_max = np.mean([m['max_abs_taylor_deviation'] for m in high_metrics_list])
         avg_low_taylor_max = np.mean([m['max_abs_taylor_deviation'] for m in low_metrics_list])
         avg_high_taylor_weighted = np.mean([m['weighted_taylor_deviation_sum'] for m in high_metrics_list])
@@ -1974,10 +1370,10 @@ class MultiSeedExperimentRunner:
             'q_drop_max_accuracy': q_drop_max_accuracy,
             'q_drop_weighted_expectation_correct': q_drop_weighted_expectation_correct,
             'q_drop_weighted_accuracy': q_drop_weighted_accuracy,
-            'reward_drop_max_expectation_correct': reward_drop_max_expectation_correct,
-            'reward_drop_max_accuracy': reward_drop_max_accuracy,
-            'reward_drop_weighted_expectation_correct': reward_drop_weighted_expectation_correct,
-            'reward_drop_weighted_accuracy': reward_drop_weighted_accuracy,
+            'reward_drop_max_expectation_correct': reward_drop_max_expectation_correct, # adding reward drop
+            'reward_drop_max_accuracy': reward_drop_max_accuracy, # adding reward drop
+            'reward_drop_weighted_expectation_correct': reward_drop_weighted_expectation_correct, # adding reward drop
+            'reward_drop_weighted_accuracy': reward_drop_weighted_accuracy, # adding reward drop
             'taylor_max_expectation_correct': taylor_max_expectation_correct,
             'taylor_max_accuracy': taylor_max_accuracy,
             'taylor_weighted_expectation_correct': taylor_weighted_expectation_correct,
@@ -1988,10 +1384,6 @@ class MultiSeedExperimentRunner:
             'avg_low_q_drop_max': avg_low_q_drop_max,
             'avg_high_q_drop_weighted': avg_high_q_drop_weighted,
             'avg_low_q_drop_weighted': avg_low_q_drop_weighted,
-            'avg_high_reward_drop_max': avg_high_reward_drop_max,
-            'avg_low_reward_drop_max': avg_low_reward_drop_max,
-            'avg_high_reward_drop_weighted': avg_high_reward_drop_weighted,
-            'avg_low_reward_drop_weighted': avg_low_reward_drop_weighted,
             'avg_high_taylor_max': avg_high_taylor_max,
             'avg_low_taylor_max': avg_low_taylor_max,
             'avg_high_taylor_weighted': avg_high_taylor_weighted,
@@ -2003,19 +1395,17 @@ class MultiSeedExperimentRunner:
         
         print(f"Total Experiments: {total_experiments}, Total Agent Pairs: {total_pairs}")
         print(f"Patient Zero Detection Accuracy: {patient_zero_accuracy:.3f} ({correct_patient_zero}/{total_with_detection})")
-        print(f"High Influence: Patient Zero Accuracy: {high_patient_zero_accuracy:.3f} ({high_correct_patient_zero}/{high_total_with_detection})")
-        print(f"Low Influence: Patient Zero Accuracy: {low_patient_zero_accuracy:.3f} ({low_correct_patient_zero}/{low_total_with_detection})")
+        print(f"High Influence Patient Zero Accuracy: {high_patient_zero_accuracy:.3f} ({high_correct_patient_zero}/{high_total_with_detection})")
+        print(f"Low Influence Patient Zero Accuracy: {low_patient_zero_accuracy:.3f} ({low_correct_patient_zero}/{low_total_with_detection})")
         print(f"Q-Drop Max Expectation Accuracy: {q_drop_max_accuracy:.3f} ({q_drop_max_expectation_correct}/{total_pairs})")
         print(f"Q-Drop Weighted Expectation Accuracy: {q_drop_weighted_accuracy:.3f} ({q_drop_weighted_expectation_correct}/{total_pairs})")
-        print(f"Reward-Drop Max Expectation Accuracy: {reward_drop_max_accuracy:.3f} ({reward_drop_max_expectation_correct}/{total_pairs})")
-        print(f"Reward-Drop Weighted Expectation Accuracy: {reward_drop_weighted_accuracy:.3f} ({reward_drop_weighted_expectation_correct}/{total_pairs})")
+        print(f"Reward Drop Max Expectation Accuracy: {reward_drop_max_accuracy:.3f} ({reward_drop_max_expectation_correct}/{total_pairs})")
+        print(f"Reward Drop Weighted Expectation Accuracy: {reward_drop_weighted_accuracy:.3f} ({reward_drop_weighted_expectation_correct}/{total_pairs})") # adding reward drop accuracy
         print(f"Taylor Max Expectation Accuracy: {taylor_max_accuracy:.3f} ({taylor_max_expectation_correct}/{total_pairs})")
         print(f"Taylor Weighted Expectation Accuracy: {taylor_weighted_accuracy:.3f} ({taylor_weighted_expectation_correct}/{total_pairs})")
         print(f"Exceed Rate Expectation Accuracy: {exceed_rate_accuracy:.3f} ({exceed_rate_expectation_correct}/{total_pairs})")
         print(f"Average High Influence Q-Drop Max: {avg_high_q_drop_max:.6f}")
         print(f"Average Low Influence Q-Drop Max: {avg_low_q_drop_max:.6f}")
-        print(f"Average High Influence Reward-Drop Max: {avg_high_reward_drop_max:.6f}")
-        print(f"Average Low Influence Reward-Drop Max: {avg_low_reward_drop_max:.6f}")
         print(f"Average High Influence Taylor Max: {avg_high_taylor_max:.6f}")
         print(f"Average Low Influence Taylor Max: {avg_low_taylor_max:.6f}")
         print(f"Average High Influence Exceed Rate: {avg_high_exceed_rate:.6f}")
@@ -2049,7 +1439,7 @@ class MultiSeedExperimentRunner:
         # Process each unique pair
         for agent_i, agent_j in sorted(unique_pairs):
             pair_key = f"agent_{agent_i}_to_agent_{agent_j}"
-            # print(f"\nAnalyzing pair: {pair_key}")
+            print(f"\nAnalyzing pair: {pair_key}")
             
             # Collect all results for this specific pair
             pair_data = []
@@ -2593,7 +1983,7 @@ class MultiSeedExperimentRunner:
             print(f"- Pair-specific accuracy summary: {pair_summary_file}")
             print(f"- Pair-specific detailed results saved in: {pair_dir}")
             print(f"  * {len(pair_specific_results)} individual pair CSV files created")
-            
+    
     def cleanup(self):
         """Clean up resources."""
         if self.env:
@@ -2603,7 +1993,7 @@ class MultiSeedExperimentRunner:
     
     def run_full_experiment(self):
         """Run the complete multi-seed experiment pipeline."""
-        self.setup_experiment()
+        self.setup_experiment(initial_seed=0)  # শুরুতে seed=0 দিয়ে setup করি
         self.run_all_experiments(self.runner)
         accuracy_results, failed_expectations = self.compute_accuracies()
         pair_specific_results = self.compute_pair_specific_accuracies()
@@ -2619,7 +2009,7 @@ class MultiSeedExperimentRunner:
 def create_config_from_args():
     """Create configuration from command line arguments."""
     parser = argparse.ArgumentParser(description="Multi-seed statistics experiment")
-    parser.add_argument("-N",type=int ,help="Number of agents")
+    # parser.add_argument("-N",type=int ,help="Number of agents")
     parser.add_argument("--total_experiments", type=int, default=400,
                         help="Total number of seed experiments to run")
     parser.add_argument("--total_episodes", type=int, default=100,)
