@@ -18,17 +18,23 @@ import sys
 import traceback
 
 from algorithms.maddpg import MADDPG
+from utils.smac_wrapper import SmacWrapper
 
 # Import all the modular components
 from modules.constants import DEVICE, K_SIGMA, torch_device
-from modules.environment import create_environment
 from modules.detection import get_patient_zero_detection
 from modules.core_experiment import get_episode_data
 from modules.metrics import (
     compute_taylor_delta_policy,
     compute_pairwise_action_influences,
-    collect_agent_q_values
+    collect_agent_q_values,
+    compute_pairwise_frob_norms
 )
+
+# Define CUDA constants
+USE_CUDA = torch.cuda.is_available()
+DEVICE = 'gpu' if USE_CUDA else 'cpu'
+torch_device = torch.device("cuda" if USE_CUDA else "cpu")
 
 REF_TAYLOR_EPISODE_COUNT = 100
 WATCH_WINDOW = 15  # Number of timesteps to watch after attack timestep
@@ -71,7 +77,6 @@ class MultiSeedExperimentRunner:
         """
         self.config = config
         self.maddpg = None
-        self.env = None
         self.logdir = None
         self.total_experiments = config.total_experiments
         self.gamma = 0.99  # Discount factor for weighted metrics
@@ -79,7 +84,6 @@ class MultiSeedExperimentRunner:
         # Results storage
         self.experiment_results = []
         self.failed_seeds = []
-        self.cumulative_influences_data = []  # Store cumulative influence data for all seeds
         
     def setup_experiment(self):
         """Set up the experiment environment and logging."""
@@ -90,12 +94,9 @@ class MultiSeedExperimentRunner:
         cwd = os.getcwd()
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         env_type = 'discrete' if self.maddpg.discrete_action else 'continuous'
-        self.logdir = os.path.join(cwd, 'runs', f"{self.config.env_id}_{env_type}_multi_seed_detection_stats", 
+        self.logdir = os.path.join(cwd, 'runs', f"{self.config.map_name}_{env_type}_multi_seed_detection_stats", 
                                   f"{timestamp}_nagents{self.maddpg.nagents}_total_experiments{self.total_experiments}")
         os.makedirs(self.logdir, exist_ok=True)
-        
-        # Create environment
-        self.env = create_environment(self.config, self.maddpg)
         
         # Prepare MADDPG for training mode
         device_str = 'gpu' if DEVICE == 'gpu' else 'cpu'
@@ -128,8 +129,10 @@ class MultiSeedExperimentRunner:
         result_dataset = [{} for _ in range(self.maddpg.nagents)]
         
         for episode in tqdm(range(total_episodes), desc=f"Reference episodes (seed {seed})"):
-            # Reset environment with seed
-            obs = self.env.reset(seed=seed)
+            # Reset environment (seed is set before the loop)
+            env = SmacWrapper.make_env(self.config.map_name)
+            env.seed(seed)
+            obs, action_masks = env.reset()
             result_deques = [deque(maxlen=5) for _ in range(self.maddpg.nagents)]
             timestep = 0
             
@@ -137,6 +140,8 @@ class MultiSeedExperimentRunner:
                 # Add noise 10% of the time
                 torch_obs = [Variable(torch.tensor([obs[i]], dtype=torch.float32).to(torch_device), requires_grad=False) 
                            for i in range(self.maddpg.nagents)]
+                torch_masks = [Variable(torch.tensor(action_masks[i]).to(torch_device), requires_grad=False)
+                               if action_masks[i] is not None else None for i in range(self.maddpg.nagents)]
                 
                 if np.random.random() < 0.1:
                     noise_scale = 0.01
@@ -146,19 +151,19 @@ class MultiSeedExperimentRunner:
                                for i in range(self.maddpg.nagents)]
                 
                 # Get actions
-                torch_agent_actions = self.maddpg.step(torch_obs, explore=False)
+                torch_agent_actions = self.maddpg.step(torch_obs, explore=False, action_masks=torch_masks)
                 agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
                 
                 if self.maddpg.discrete_action:
                     actions = {agent_name: agent_actions[i].argmax() 
-                             for i, agent_name in enumerate(self.env.possible_agents)}
+                             for i, agent_name in enumerate(env.possible_agents)}
                 else:
                     actions = {agent_name: agent_actions[i].squeeze() 
-                             for i, agent_name in enumerate(self.env.possible_agents)}
+                             for i, agent_name in enumerate(env.possible_agents)}
                 
                 # Compute Taylor delta policy
                 results = compute_taylor_delta_policy(
-                    self.maddpg, obs, list(actions.values()), self.env.action_space, 0.01
+                    self.maddpg, obs, list(actions.values()), env.action_space, 0.01
                 )
                 
                 # Store results for each agent at this timestep
@@ -169,12 +174,13 @@ class MultiSeedExperimentRunner:
                     result_dataset[agent_id][timestep].append(np.mean(result_deques[agent_id]))
                 
                 # Environment step
-                next_obs, rewards, dones, infos = self.env.step(actions)
+                next_obs, rewards, dones, infos, action_masks = env.step(actions)
                 obs = next_obs
                 timestep += 1
                 
                 if dones.all():
                     break
+            env.close()
         
         # Compute reference values and standard deviations
         ref_vals = [[] for _ in range(self.maddpg.nagents)]
@@ -208,7 +214,9 @@ class MultiSeedExperimentRunner:
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
         
-        obs = self.env.reset(seed=seed)
+        env = SmacWrapper.make_env(self.config.map_name)
+        env.seed(seed)
+        obs, action_masks = env.reset()
         action_influences_history = []
         q_values_history = []
         rewards_history = []  # Store rewards for each timestep
@@ -218,43 +226,49 @@ class MultiSeedExperimentRunner:
         while True:
             torch_obs = [Variable(torch.tensor([obs[i]], dtype=torch.float32).to(torch_device), requires_grad=False) 
                         for i in range(self.maddpg.nagents)]
+            torch_masks = [Variable(torch.tensor(action_masks[i]).to(torch_device), requires_grad=False)
+                           if action_masks[i] is not None else None for i in range(self.maddpg.nagents)]
             
             # Get actions
-            torch_agent_actions = self.maddpg.step(torch_obs, explore=False)
+            torch_agent_actions = self.maddpg.step(torch_obs, explore=False, action_masks=torch_masks)
             agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
             
             if self.maddpg.discrete_action:
                 actions = {agent_name: agent_actions[i].argmax() 
-                         for i, agent_name in enumerate(self.env.possible_agents)}
+                         for i, agent_name in enumerate(env.possible_agents)}
             else:
                 actions = {agent_name: agent_actions[i].squeeze() 
-                         for i, agent_name in enumerate(self.env.possible_agents)}
+                         for i, agent_name in enumerate(env.possible_agents)}
             
             # Compute pairwise action influences
             pairwise_action_influences = compute_pairwise_action_influences(
-                self.maddpg, obs, list(actions.values()), self.env.action_space
+                self.maddpg, obs, list(actions.values()), env.action_space
             )
+            # pairwise_action_influences = compute_pairwise_frob_norms(
+            #     self.maddpg, obs, list(actions.values()), env.action_space
+            # )
             action_influences_history.append(pairwise_action_influences)
             
             # Collect Q-values for normal episode
             q_values = collect_agent_q_values(
-                self.maddpg, obs, list(actions.values()), self.env.action_space
+                self.maddpg, obs, list(actions.values()), env.action_space
             )
             q_values_history.append(q_values)
             
             # Environment step
-            next_obs, rewards, dones, infos = self.env.step(actions)
+            next_obs, rewards, dones, infos, action_masks = env.step(actions)
             
             # Store rewards for each agent at this timestep
             agent_rewards = np.array(rewards).squeeze()
+            episode_reward += np.sum(agent_rewards)
             rewards_history.append(agent_rewards)
             
             obs = next_obs
             timestep += 1
-            episode_reward += np.sum(agent_rewards)
             
             if dones.all():
                 break
+        env.close()
         
         print("Episode reward (normal):", episode_reward)
         return {
@@ -322,7 +336,9 @@ class MultiSeedExperimentRunner:
         # Determine which agent to observe impact on
         observe_agent_id = observe_agent if observe_agent is not None else attack_agent_i
         
-        obs = self.env.reset(seed=seed)
+        env = SmacWrapper.make_env(self.config.map_name)
+        env.seed(seed)
+        obs, action_masks = env.reset()
         episode_reward = 0
         
         # Initialize tracking
@@ -337,17 +353,19 @@ class MultiSeedExperimentRunner:
         while True:
             torch_obs = [Variable(torch.tensor([obs[i]], dtype=torch.float32).to(torch_device), requires_grad=False) 
                         for i in range(self.maddpg.nagents)]
+            torch_masks = [Variable(torch.tensor(action_masks[i]).to(torch_device), requires_grad=False)
+                           if action_masks[i] is not None else None for i in range(self.maddpg.nagents)]
             
             # Get actions
-            torch_agent_actions = self.maddpg.step(torch_obs, explore=False)
+            torch_agent_actions = self.maddpg.step(torch_obs, explore=False, action_masks=torch_masks)
             agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
             
             if self.maddpg.discrete_action:
                 actions = {agent_name: agent_actions[i].argmax() 
-                         for i, agent_name in enumerate(self.env.possible_agents)}
+                         for i, agent_name in enumerate(env.possible_agents)}
             else:
                 actions = {agent_name: agent_actions[i].squeeze() 
-                         for i, agent_name in enumerate(self.env.possible_agents)}
+                         for i, agent_name in enumerate(env.possible_agents)}
             
             # Apply attack if current timestep is in any attack window - attack the influencing agent (attack_agent_i)
             attack_active = False
@@ -359,23 +377,27 @@ class MultiSeedExperimentRunner:
             if attack_active:
                 if self.maddpg.discrete_action:
                     # Worst action attack for discrete action space
-                    action_logits = self.maddpg.get_action_logits(torch_obs)
-                    worst_action = torch.argmin(action_logits[attack_agent_i]).item()
-                    actions[self.env.possible_agents[attack_agent_i]] = worst_action
+                    action_logits = self.maddpg.get_action_logits(torch_obs, torch_masks)
+                    
+                    # Apply action mask - set invalid actions to very high values so they won't be selected as minimum
+                    masked_logits = action_logits[attack_agent_i].clone().squeeze()
+                    masked_logits[action_masks[attack_agent_i] == 0] = float('inf')
+                    worst_action = torch.argmin(masked_logits).item()
+                    actions[env.possible_agents[attack_agent_i]] = worst_action
                 else:
                     # Random action for continuous space
-                    actions[self.env.possible_agents[attack_agent_i]] = \
-                        self.env.action_spaces[self.env.possible_agents[attack_agent_i]].sample()
+                    actions[env.possible_agents[attack_agent_i]] = \
+                        env.action_space[attack_agent_i].sample()
             
             # Compute Taylor errors
             taylor_results = compute_taylor_delta_policy(
-                self.maddpg, obs, list(actions.values()), self.env.action_space, 0.01
+                self.maddpg, obs, list(actions.values()), env.action_space, 0.01
             )
             taylor_errors_history.append(taylor_results)
             
             # Collect Q-values
             q_values = collect_agent_q_values(
-                self.maddpg, obs, list(actions.values()), self.env.action_space
+                self.maddpg, obs, list(actions.values()), env.action_space
             )
             q_values_history.append(q_values)
             
@@ -398,7 +420,7 @@ class MultiSeedExperimentRunner:
                         })
             
             # Environment step
-            next_obs, rewards, dones, infos = self.env.step(actions)
+            next_obs, rewards, dones, infos, action_masks = env.step(actions)
 
             agent_rewards = np.array(rewards).squeeze()
             rewards_history.append(agent_rewards)
@@ -410,6 +432,7 @@ class MultiSeedExperimentRunner:
             
             if dones.all():
                 break
+        env.close()
         
         return {
             'fault_timeline': fault_timeline,
@@ -518,97 +541,6 @@ class MultiSeedExperimentRunner:
         
         return metrics
     
-    def log_cumulative_influences(self, action_influences_history, seed, episode_length):
-        """
-        Store cumulative influence sums for each agent pair at each timestep.
-        Data will be written to a single CSV file later.
-        
-        Args:
-            action_influences_history: List of action influence matrices for each timestep
-            seed: Random seed for this experiment
-            episode_length: Length of the episode
-        """
-        print(f"Storing cumulative influences for seed {seed}...")
-        
-        # For each agent pair (i, j), compute and store cumulative influences
-        for agent_i in range(self.maddpg.nagents):
-            for agent_j in range(self.maddpg.nagents):
-                if agent_i == agent_j:
-                    continue  # Skip self-influence
-                
-                # Compute cumulative influence sum at each timestep
-                cumulative_influence = 0.0
-                timestep_cumulative_values = []
-                
-                for t in range(min(episode_length, len(action_influences_history))):
-                    # Get influence of agent_i on agent_j at timestep t
-                    # action_influences_history[t][j][i] = influence of i on j
-                    influence_value = action_influences_history[t][agent_j][agent_i]
-                    cumulative_influence += influence_value  # Use absolute value for cumulative sum
-                    timestep_cumulative_values.append(cumulative_influence)
-                
-                # Store the data for this agent pair
-                pair_data = {
-                    'seed': seed,
-                    'influencer_agent_id': agent_i,
-                    'influenced_agent_id': agent_j,
-                    'episode_length': episode_length,
-                    'cumulative_values': timestep_cumulative_values
-                }
-                
-                self.cumulative_influences_data.append(pair_data)
-        
-        print(f"Stored cumulative influences for seed {seed} ({self.maddpg.nagents * (self.maddpg.nagents - 1)} agent pairs)")
-    
-    def save_cumulative_influences_csv(self):
-        """
-        Save all cumulative influence data to a single CSV file.
-        """
-        if not self.cumulative_influences_data:
-            print("No cumulative influence data to save.")
-            return
-        
-        print("Saving cumulative influences to single CSV file...")
-        
-        # Find the maximum episode length to determine number of timestep columns
-        max_episode_length = max(data['episode_length'] for data in self.cumulative_influences_data)
-        
-        # Create timestep column names
-        timestep_columns = [f'timestep_{t}' for t in range(max_episode_length)]
-        
-        # Create CSV filename
-        csv_filename = 'cumulative_influences_all_seeds.csv'
-        csv_filepath = os.path.join(self.logdir, csv_filename)
-        
-        # Write to CSV file
-        with open(csv_filepath, 'w', newline='') as csvfile:
-            fieldnames = ['seed', 'influencer_agent_id', 'influenced_agent_id'] + timestep_columns
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            
-            for pair_data in self.cumulative_influences_data:
-                row = {
-                    'seed': pair_data['seed'],
-                    'influencer_agent_id': pair_data['influencer_agent_id'],
-                    'influenced_agent_id': pair_data['influenced_agent_id']
-                }
-                
-                # Add cumulative values for each timestep
-                cumulative_values = pair_data['cumulative_values']
-                for t in range(max_episode_length):
-                    if t < len(cumulative_values):
-                        row[f'timestep_{t}'] = cumulative_values[t]
-                    else:
-                        row[f'timestep_{t}'] = ''  # Empty for timesteps beyond episode length
-                
-                writer.writerow(row)
-        
-        total_rows = len(self.cumulative_influences_data)
-        print(f"Saved cumulative influences CSV: {csv_filename}")
-        print(f"  Total rows: {total_rows}")
-        print(f"  Max episode length: {max_episode_length}")
-        print(f"  Timestep columns: timestep_0 to timestep_{max_episode_length - 1}")
-    
     def run_single_seed_experiment(self, seed):
         """
         Run complete experiment for a single seed.
@@ -633,9 +565,6 @@ class MultiSeedExperimentRunner:
         normal_rewards_history = normal_episode['rewards_history']
         episode_length = normal_episode['episode_length']
         
-        # Step 2.5: Log cumulative influences for each agent pair
-        self.log_cumulative_influences(action_influences_history, seed, episode_length)
-        
         # Step 3: Analyze all possible ordered pairs (i, j) where i influences j
         all_pair_results = []
         atk_steps_limit = math.ceil(ATTACK_TS_FRACTION * episode_length)
@@ -652,7 +581,7 @@ class MultiSeedExperimentRunner:
                     action_influences_history, agent_i, agent_j, atk_steps_limit, 1
                 )
                 
-                print(f"Max influence timestep: {max_influence_t}, Min influence timestep: {min_influence_t}")
+                print(f"Max influence timesteps: {max_influence_t}, Min influence timesteps: {min_influence_t}")
                 
                 # Step 5: Run attacked episodes - attack agent_i (influencer), observe impact on agent_j (influenced)
                 high_influence_attack = self.run_attacked_episode(
@@ -1513,9 +1442,6 @@ class MultiSeedExperimentRunner:
                         writer.writeheader()
                         writer.writerows(results['failed_expectations'])
         
-        # Save cumulative influences CSV
-        self.save_cumulative_influences_csv()
-        
         print(f"Results saved to {self.logdir}")
         print(f"- Accuracy results: {accuracy_file}")
         print(f"- Detailed results: {detailed_file}")
@@ -1527,12 +1453,10 @@ class MultiSeedExperimentRunner:
             print(f"- Pair-specific accuracy summary: {pair_summary_file}")
             print(f"- Pair-specific detailed results saved in: {pair_dir}")
             print(f"  * {len(pair_specific_results)} individual pair CSV files created")
-        print(f"- Cumulative influences: cumulative_influences_all_seeds.csv")
     
     def cleanup(self):
         """Clean up resources."""
-        if self.env:
-            self.env.close()
+        pass
     
     def run_full_experiment(self):
         """Run the complete multi-seed experiment pipeline."""
@@ -1551,7 +1475,7 @@ class MultiSeedExperimentRunner:
 def create_config_from_args():
     """Create configuration from command line arguments."""
     parser = argparse.ArgumentParser(description="Multi-seed statistics experiment")
-    parser.add_argument("env_id", help="Name of environment")
+    parser.add_argument("map_name", help="Name of SMAC map")
     parser.add_argument("model_path", help="Model directory")
     parser.add_argument("--total_experiments", type=int, default=100,
                         help="Total number of seed experiments to run")
