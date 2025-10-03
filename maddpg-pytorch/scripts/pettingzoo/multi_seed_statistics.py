@@ -696,10 +696,14 @@ class MultiSeedExperimentRunner:
                 
                 all_pair_results.append(pair_result)
                 
-                print(f"High influence attack - Patient zero: {high_patient_zero} at time {high_patient_time}")
+                # Handle multiple patient zeros for display
+                high_pz_str = ', '.join(map(str, high_patient_zero)) if isinstance(high_patient_zero, list) else str(high_patient_zero)
+                low_pz_str = ', '.join(map(str, low_patient_zero)) if isinstance(low_patient_zero, list) else str(low_patient_zero)
+                
+                print(f"High influence attack - Patient zero(s): {high_pz_str} at time {high_patient_time}")
                 print(f"  Influencer (agent_{agent_i}) fault detection times: {high_influencer_fault_times}")
                 print(f"  Influenced (agent_{agent_j}) fault detection times: {high_influenced_fault_times}")
-                print(f"Low influence attack - Patient zero: {low_patient_zero} at time {low_patient_time}")
+                print(f"Low influence attack - Patient zero(s): {low_pz_str} at time {low_patient_time}")
                 print(f"  Influencer (agent_{agent_i}) fault detection times: {low_influencer_fault_times}")
                 print(f"  Influenced (agent_{agent_j}) fault detection times: {low_influenced_fault_times}")
         
@@ -783,14 +787,15 @@ class MultiSeedExperimentRunner:
                 if high_patient_zero is not None:
                     total_with_detection += 1
                     high_total_with_detection += 1
-                    if high_patient_zero == attacked_agent:
+                    # Check if attacked agent or influenced agent is in the patient zero list (handles multiple patient zeros)
+                    if attacked_agent in high_patient_zero:
                         correct_patient_zero += 1
                         high_correct_patient_zero += 1
                 
                 if low_patient_zero is not None:
                     total_with_detection += 1
                     low_total_with_detection += 1
-                    if low_patient_zero == attacked_agent:
+                    if attacked_agent in low_patient_zero:
                         correct_patient_zero += 1
                         low_correct_patient_zero += 1
                 
@@ -1028,14 +1033,14 @@ class MultiSeedExperimentRunner:
                 if high_patient_zero is not None:
                     total_with_detection += 1
                     high_total_with_detection += 1
-                    if high_patient_zero == attacked_agent:
+                    if attacked_agent in high_patient_zero:
                         correct_patient_zero += 1
                         high_correct_patient_zero += 1
                 
                 if low_patient_zero is not None:
                     total_with_detection += 1
                     low_total_with_detection += 1
-                    if low_patient_zero == attacked_agent:
+                    if attacked_agent in low_patient_zero:
                         correct_patient_zero += 1
                         low_correct_patient_zero += 1
                 

@@ -6,22 +6,32 @@ import math
 
 def get_patient_zero_detection(fault_timeline):
     """
-    Return the patient zero agent id and detection timestep from the fault timeline.
+    Return the patient zero agent ids and detection timestep from the fault timeline.
+    Handles multiple agents detected at the same earliest time.
     
     Args:
         fault_timeline: List of fault detection events
         
     Returns:
-        Tuple of (agent_id, timestep) for the earliest fault detection
+        Tuple of (agent_ids_list, timestep) for the earliest fault detection.
+        agent_ids_list will contain all agents detected at the earliest time.
+        Returns (None, None) if no fault timeline exists.
     """
     if not fault_timeline:
         return None, None
 
-    earliest_event = min(
-        fault_timeline,
-        key=lambda event: event.get('t', float('inf'))
+    # Find the earliest timestep
+    earliest_time = min(
+        event.get('t', float('inf')) for event in fault_timeline
     )
-    return earliest_event.get('agent'), earliest_event.get('t')
+    
+    # Find all agents detected at the earliest time
+    patient_zero_agents = [
+        event.get('agent') for event in fault_timeline 
+        if event.get('t') == earliest_time
+    ]
+    
+    return patient_zero_agents, earliest_time
 
 
 def compute_decayed_action_influence(action_influences_matrix_history, patient_zero_time, lambda_decay):
