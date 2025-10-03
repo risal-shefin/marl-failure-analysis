@@ -55,6 +55,75 @@ def compute_pairwise_action_influences(maddpg, obs, actions, action_spaces):
     return results
 
 
+def compute_pairwise_action_directional_second_derivatives(maddpg, obs, actions, action_spaces):
+    """
+    Compute second-order directional derivative g^T H g for each agent's action influence.
+    
+    This computes the directional second derivative along the gradient direction,
+    where g = ∂Q_i/∂a_j and H = ∂²Q_i/(∂a_j)².
+    
+    Args:
+        maddpg: MADDPG agent
+        obs: List of observations
+        actions: List of actions
+        action_spaces: List of action spaces
+        
+    Returns:
+        N x N list where entry [i][j] represents g^T H g for the influence of 
+        agent j's action on agent i's Q-value
+    """
+    # Convert discrete actions to one-hot encoding
+    if maddpg.discrete_action:
+        one_hot_actions = []
+        for i, action in enumerate(actions):
+            one_hot = np.zeros(action_spaces[i].n)
+            one_hot[action] = 1.0
+            one_hot_actions.append(one_hot)
+        actions = one_hot_actions
+
+    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
+    torch_actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
+    vf_in = torch.cat((*torch_obs, *torch_actions), dim=1)
+
+    N = maddpg.nagents
+    results = [[0.0 for _ in range(N)] for _ in range(N)]
+
+    for i in range(N):
+        critic_val = maddpg.agents[i].critic(vf_in).mean()
+        
+        for j in range(N):
+            # Compute first-order gradient g = ∂Q_i/∂a_j
+            grad_qi_aj = torch.autograd.grad(
+                critic_val,
+                torch_actions[j],
+                create_graph=True,
+                retain_graph=True,
+                allow_unused=True
+            )[0]
+                
+            # Flatten the gradient for easier manipulation
+            g = grad_qi_aj.flatten()
+            
+            # Compute Hessian-vector product: H * g
+            # This is more efficient than computing the full Hessian matrix
+            hvp = torch.autograd.grad(
+                grad_qi_aj,
+                torch_actions[j],
+                grad_outputs=grad_qi_aj,
+                retain_graph=True,
+                allow_unused=True
+            )[0]
+                
+            # Flatten the Hessian-vector product
+            hvp_flat = hvp.flatten()
+            
+            # Compute g^T H g (directional second derivative)
+            directional_second_derivative = torch.dot(g, hvp_flat).item()
+            results[i][j] = directional_second_derivative
+
+    return results
+
+
 def compute_second_order_action_influences(maddpg, obs, actions, action_spaces):
     """
     Compute second-order action influences between agents.
@@ -96,9 +165,6 @@ def compute_second_order_action_influences(maddpg, obs, actions, action_spaces):
                 retain_graph=True,
                 allow_unused=True
             )[0]
-            
-            if grad_qi_aj is None:
-                continue
                 
             # Compute second-order gradient ∂²Q_i/(∂a_j)²
             hessian_matrix = []
@@ -110,15 +176,12 @@ def compute_second_order_action_influences(maddpg, obs, actions, action_spaces):
                     allow_unused=True
                 )[0]
                 
-                if second_grad is None:
-                    second_grad = torch.zeros_like(torch_actions[j])
                 hessian_matrix.append(second_grad.flatten())
             
-            if len(hessian_matrix) > 0:
-                H = torch.stack(hessian_matrix)
-                # Compute Frobenius norm of the Hessian matrix
-                second_order_influence = H.norm(p='fro').item()
-                results[i][j] = second_order_influence
+            H = torch.stack(hessian_matrix)
+            # Compute Frobenius norm of the Hessian matrix
+            second_order_influence = H.norm(p='fro').item()
+            results[i][j] = second_order_influence
 
     return results
 

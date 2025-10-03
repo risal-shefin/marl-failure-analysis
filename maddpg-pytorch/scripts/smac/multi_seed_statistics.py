@@ -28,7 +28,8 @@ from modules.metrics import (
     compute_taylor_delta_policy,
     compute_pairwise_action_influences,
     collect_agent_q_values,
-    compute_pairwise_frob_norms
+    compute_pairwise_frob_norms,
+    compute_pairwise_action_directional_second_derivatives
 )
 
 # Define CUDA constants
@@ -36,7 +37,7 @@ USE_CUDA = torch.cuda.is_available()
 DEVICE = 'gpu' if USE_CUDA else 'cpu'
 torch_device = torch.device("cuda" if USE_CUDA else "cpu")
 
-REF_TAYLOR_EPISODE_COUNT = 100
+REF_TAYLOR_EPISODE_COUNT = 2
 WATCH_WINDOW = 15  # Number of timesteps to watch after attack timestep
 ATTACK_TS_FRACTION = 0.25  # Fraction of episode to consider for attack timesteps
 
@@ -145,7 +146,7 @@ class MultiSeedExperimentRunner:
                                if action_masks[i] is not None else None for i in range(self.maddpg.nagents)]
                 
                 if np.random.random() < 0.1:
-                    noise_scale = 0.01
+                    noise_scale = 0.1
                     noise = [torch.normal(0, noise_scale, size=torch_obs[i].shape).to(torch_device) 
                            for i in range(self.maddpg.nagents)]
                     torch_obs = [Variable(torch_obs[i].data + noise[i], requires_grad=False) 
@@ -208,6 +209,9 @@ class MultiSeedExperimentRunner:
         Returns:
             Dictionary containing episode data including action influences
         """
+        # Reset directional derivatives history for this episode
+        self.directional_derivatives_history = []
+        
         # Set random seeds
         random.seed(seed)
         np.random.seed(seed)
@@ -250,6 +254,12 @@ class MultiSeedExperimentRunner:
             # )
             action_influences_history.append(pairwise_action_influences)
             
+            # Compute directional second derivatives for influence analysis
+            directional_second_derivatives = compute_pairwise_action_directional_second_derivatives(
+                self.maddpg, obs, list(actions.values()), env.action_space
+            )
+            self.directional_derivatives_history.append(directional_second_derivatives)
+            
             # Collect Q-values for normal episode
             q_values = collect_agent_q_values(
                 self.maddpg, obs, list(actions.values()), env.action_space
@@ -274,41 +284,59 @@ class MultiSeedExperimentRunner:
         print("Episode reward (normal):", episode_reward)
         return {
             'action_influences_history': action_influences_history,
+            'directional_derivatives_history': self.directional_derivatives_history,
             'q_values_history': q_values_history,
             'rewards_history': rewards_history,
             'episode_length': timestep
         }
     
-    def find_influence_timesteps(self, action_influences_history, agent_i, agent_j, atk_steps_limit, k_steps):
+    def find_influence_timesteps(self, action_influences_history, directional_derivatives_history, agent_i, agent_j, atk_steps_limit, k_steps):
         """
         Find max and min influence timesteps of agent i on agent j in first 25% of episode.
+        Uses directional second derivatives to filter timesteps:
+        - High influence: positive directional second derivative + maximum action influence
+        - Low influence: negative directional second derivative + minimum action influence
         
         Args:
             action_influences_history: List of action influence matrices
+            directional_derivatives_history: List of directional second derivative matrices
             agent_i: Index of influencing agent
             agent_j: Index of influenced agent (where action_influences_matrix[t][j][i] = influence of i on j)
             atk_steps_limit: Last step that can be attacked
+            k_steps: Number of timesteps to return (currently expecting 1)
             
         Returns:
             Tuple of (max_influence_timestep, min_influence_timestep)
         """
-        influences = []
-        for t in range(min(atk_steps_limit, len(action_influences_history))):
-            # Correct indexing: action_influences_matrix[t][j][i] = influence of i on j
+        positive_derivative_timesteps = []  # For high influence selection
+        negative_derivative_timesteps = []  # For low influence selection
+        
+        for t in range(min(atk_steps_limit, len(action_influences_history), len(directional_derivatives_history))):
+            # Get action influence of agent_i on agent_j at timestep t
             influence = abs(action_influences_history[t][agent_j][agent_i])
-            influences.append((influence, t))
+            
+            # Get directional second derivative of agent_i on agent_j at timestep t
+            directional_derivative = directional_derivatives_history[t][agent_j][agent_i]
+            
+            if directional_derivative > 0:
+                positive_derivative_timesteps.append((influence, t))
+            elif directional_derivative < 0:
+                negative_derivative_timesteps.append((influence, t))
         
-        # Sort by influence magnitude
-        influences.sort(key=lambda x: x[0])
-        
-        min_influences_t = []
+        # For high influence: among positive derivative timesteps, choose maximum action influence
         max_influences_t = []
-        # Get k_steps minimum and maximum influences
-        min_influences_t = [t for _, t in influences[:k_steps]]  # k lowest influences
-        max_influences_t = [t for _, t in influences[-k_steps:]]  # k highest influences
-
-        min_influences_t.sort()
+        if positive_derivative_timesteps:
+            positive_derivative_timesteps.sort(key=lambda x: x[0], reverse=True)  # Sort by influence, descending
+            max_influences_t = [t for _, t in positive_derivative_timesteps[:k_steps]]
+        
+        # For low influence: among negative derivative timesteps, choose minimum action influence
+        min_influences_t = []
+        if negative_derivative_timesteps:
+            negative_derivative_timesteps.sort(key=lambda x: x[0])  # Sort by influence, ascending
+            min_influences_t = [t for _, t in negative_derivative_timesteps[:k_steps]]
+        
         max_influences_t.sort()
+        min_influences_t.sort()
 
         return max_influences_t, min_influences_t
 
@@ -584,6 +612,46 @@ class MultiSeedExperimentRunner:
         
         print(f"Stored cumulative influences for seed {seed} ({self.maddpg.nagents * (self.maddpg.nagents - 1)} agent pairs)")
     
+    def log_directional_derivatives(self, directional_derivatives_history, seed, episode_length):
+        """
+        Store directional second derivatives for each agent pair at each timestep.
+        Data will be written to a single CSV file later.
+        
+        Args:
+            directional_derivatives_history: List of directional second derivative matrices for each timestep
+            seed: Random seed for this experiment
+            episode_length: Length of the episode
+        """
+        print(f"Storing directional derivatives for seed {seed}...")
+        
+        # For each agent pair (i, j), store directional derivatives at each timestep
+        for agent_i in range(self.maddpg.nagents):
+            for agent_j in range(self.maddpg.nagents):
+                if agent_i == agent_j:
+                    continue  # Skip self-influence
+                
+                # Get directional derivatives for each timestep
+                timestep_derivative_values = []
+                
+                for t in range(min(episode_length, len(directional_derivatives_history))):
+                    # Get directional second derivative of agent_i on agent_j at timestep t
+                    # directional_derivatives_history[t][j][i] = g^T H g for influence of i on j
+                    derivative_value = directional_derivatives_history[t][agent_j][agent_i]
+                    timestep_derivative_values.append(derivative_value)
+                
+                # Store the data for this agent pair
+                pair_data = {
+                    'seed': seed,
+                    'influencer_agent_id': agent_i,
+                    'influenced_agent_id': agent_j,
+                    'episode_length': episode_length,
+                    'derivative_values': timestep_derivative_values
+                }
+                
+                self.directional_derivatives_data.append(pair_data)
+        
+        print(f"Stored directional derivatives for seed {seed} ({self.maddpg.nagents * (self.maddpg.nagents - 1)} agent pairs)")
+    
     def save_cumulative_influences_csv(self):
         """
         Save all cumulative influence data to a single CSV file.
@@ -633,6 +701,51 @@ class MultiSeedExperimentRunner:
         print(f"  Max episode length: {max_episode_length}")
         print(f"  Timestep columns: timestep_0 to timestep_{max_episode_length - 1}")
     
+    def save_directional_derivatives_csv(self):
+        """
+        Save all directional derivatives data to a single CSV file.
+        """
+        print("Saving directional derivatives to single CSV file...")
+        
+        # Find the maximum episode length to determine number of timestep columns
+        max_episode_length = max(data['episode_length'] for data in self.directional_derivatives_data)
+        
+        # Create timestep column names
+        timestep_columns = [f'timestep_{t}' for t in range(max_episode_length)]
+        
+        # Create CSV filename
+        csv_filename = 'directional_derivatives_all_seeds.csv'
+        csv_filepath = os.path.join(self.logdir, csv_filename)
+        
+        # Write to CSV file
+        with open(csv_filepath, 'w', newline='') as csvfile:
+            fieldnames = ['seed', 'influencer_agent_id', 'influenced_agent_id'] + timestep_columns
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            for pair_data in self.directional_derivatives_data:
+                row = {
+                    'seed': pair_data['seed'],
+                    'influencer_agent_id': pair_data['influencer_agent_id'],
+                    'influenced_agent_id': pair_data['influenced_agent_id']
+                }
+                
+                # Add derivative values for each timestep
+                derivative_values = pair_data['derivative_values']
+                for t in range(max_episode_length):
+                    if t < len(derivative_values):
+                        row[f'timestep_{t}'] = derivative_values[t]
+                    else:
+                        row[f'timestep_{t}'] = ''  # Empty for timesteps beyond episode length
+                
+                writer.writerow(row)
+        
+        total_rows = len(self.directional_derivatives_data)
+        print(f"Saved directional derivatives CSV: {csv_filename}")
+        print(f"  Total rows: {total_rows}")
+        print(f"  Max episode length: {max_episode_length}")
+        print(f"  Timestep columns: timestep_0 to timestep_{max_episode_length - 1}")
+    
     def run_single_seed_experiment(self, seed):
         """
         Run complete experiment for a single seed.
@@ -653,12 +766,16 @@ class MultiSeedExperimentRunner:
         # Step 2: Run normal episode
         normal_episode = self.run_normal_episode(seed)
         action_influences_history = normal_episode['action_influences_history']
+        directional_derivatives_history = normal_episode['directional_derivatives_history']
         normal_q_values_history = normal_episode['q_values_history']
         normal_rewards_history = normal_episode['rewards_history']
         episode_length = normal_episode['episode_length']
         
         # Step 2.5: Log cumulative influences for each agent pair
         self.log_cumulative_influences(action_influences_history, seed, episode_length)
+        
+        # Step 2.6: Log directional derivatives for each agent pair
+        self.log_directional_derivatives(directional_derivatives_history, seed, episode_length)
         
         # Step 3: Analyze all possible ordered pairs (i, j) where i influences j
         all_pair_results = []
@@ -673,8 +790,15 @@ class MultiSeedExperimentRunner:
                 
                 # Step 4: Find max and min influence timesteps of agent_i on agent_j in first 25%
                 max_influence_t, min_influence_t = self.find_influence_timesteps(
-                    action_influences_history, agent_i, agent_j, atk_steps_limit, 1
+                    action_influences_history, directional_derivatives_history, agent_i, agent_j, atk_steps_limit, 1
                 )
+                
+                # Skip this iteration if no suitable timesteps are found
+                if not max_influence_t or not min_influence_t:
+                    print(f"Skipping pair agent_{agent_i} -> agent_{agent_j}: No suitable timesteps found")
+                    print(f"  Max influence timesteps (positive derivatives): {max_influence_t}")
+                    print(f"  Min influence timesteps (negative derivatives): {min_influence_t}")
+                    continue
                 
                 print(f"Max influence timesteps: {max_influence_t}, Min influence timesteps: {min_influence_t}")
                 
@@ -1545,6 +1669,9 @@ class MultiSeedExperimentRunner:
         # Save cumulative influences CSV
         self.save_cumulative_influences_csv()
         
+        # Save directional derivatives CSV
+        self.save_directional_derivatives_csv()
+        
         print(f"Results saved to {self.logdir}")
         print(f"- Accuracy results: {accuracy_file}")
         print(f"- Detailed results: {detailed_file}")
@@ -1557,6 +1684,7 @@ class MultiSeedExperimentRunner:
             print(f"- Pair-specific detailed results saved in: {pair_dir}")
             print(f"  * {len(pair_specific_results)} individual pair CSV files created")
         print(f"- Cumulative influences: cumulative_influences_all_seeds.csv")
+        print(f"- Directional derivatives: directional_derivatives_all_seeds.csv")
     
     def cleanup(self):
         """Clean up resources."""
