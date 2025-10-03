@@ -622,6 +622,9 @@ class MultiSeedExperimentRunner:
             seed: Random seed for this experiment
             episode_length: Length of the episode
         """
+        if not hasattr(self, 'directional_derivatives_data'):
+            self.directional_derivatives_data = []
+            
         print(f"Storing directional derivatives for seed {seed}...")
         
         # For each agent pair (i, j), store directional derivatives at each timestep
@@ -651,6 +654,57 @@ class MultiSeedExperimentRunner:
                 self.directional_derivatives_data.append(pair_data)
         
         print(f"Stored directional derivatives for seed {seed} ({self.maddpg.nagents * (self.maddpg.nagents - 1)} agent pairs)")
+    
+    def log_taylor_deviations(self, high_attack_results, low_attack_results, ref_vals, ref_std_devs, seed, agent_i, agent_j):
+        """
+        Store Taylor deviations from mean for both high and low influence attacks for each agent.
+        Data will be written to a single CSV file later.
+        
+        Args:
+            high_attack_results: Results from high influence attack episode
+            low_attack_results: Results from low influence attack episode
+            ref_vals: Reference Taylor error values
+            ref_std_devs: Reference standard deviations
+            seed: Random seed for this experiment
+            agent_i: Influencing agent (attacked agent)
+            agent_j: Influenced agent (observed agent)
+        """
+        # Initialize storage for Taylor deviations if not exists
+        if not hasattr(self, 'taylor_deviations_data'):
+            self.taylor_deviations_data = []
+        
+        # Process both high and low influence attacks
+        for attack_type, attack_results in [('high', high_attack_results), ('low', low_attack_results)]:
+            taylor_errors_history = attack_results['taylor_errors_history']
+            episode_length = attack_results['episode_length']
+            
+            # For each agent, compute Taylor deviations from mean at each timestep
+            for agent_id in range(self.maddpg.nagents):
+                timestep_deviations = []
+                
+                for t in range(min(episode_length, len(taylor_errors_history))):
+                    if t < len(ref_vals[agent_id]) and t < len(ref_std_devs[agent_id]):
+                        taylor_error = taylor_errors_history[t][agent_id]
+                        ref_mean = ref_vals[agent_id][t]
+                        taylor_deviation = abs(taylor_error - ref_mean)
+                        timestep_deviations.append(taylor_deviation)
+                    else:
+                        timestep_deviations.append(0.0)  # Default value if reference not available
+                
+                # Store the data for this agent
+                agent_data = {
+                    'seed': seed,
+                    'attack_type': attack_type,
+                    'influencer_agent_id': agent_i,
+                    'influenced_agent_id': agent_j,
+                    'observed_agent_id': agent_id,
+                    'episode_length': episode_length,
+                    'taylor_deviations': timestep_deviations
+                }
+                
+                self.taylor_deviations_data.append(agent_data)
+        
+        print(f"Stored Taylor deviations for seed {seed}, pair ({agent_i} -> {agent_j}) for {self.maddpg.nagents} agents (both attack types)")
     
     def save_cumulative_influences_csv(self):
         """
@@ -746,6 +800,57 @@ class MultiSeedExperimentRunner:
         print(f"  Max episode length: {max_episode_length}")
         print(f"  Timestep columns: timestep_0 to timestep_{max_episode_length - 1}")
     
+    def save_taylor_deviations_csv(self):
+        """
+        Save all Taylor deviations data to a single CSV file.
+        """
+        if not hasattr(self, 'taylor_deviations_data') or not self.taylor_deviations_data:
+            print("No Taylor deviations data to save.")
+            return
+        
+        print("Saving Taylor deviations to single CSV file...")
+        
+        # Find the maximum episode length to determine number of timestep columns
+        max_episode_length = max(data['episode_length'] for data in self.taylor_deviations_data)
+        
+        # Create timestep column names
+        timestep_columns = [f'timestep_{t}' for t in range(max_episode_length)]
+        
+        # Create CSV filename
+        csv_filename = 'taylor_deviations_all_seeds.csv'
+        csv_filepath = os.path.join(self.logdir, csv_filename)
+        
+        # Write to CSV file
+        with open(csv_filepath, 'w', newline='') as csvfile:
+            fieldnames = ['seed', 'attack_type', 'influencer_agent_id', 'influenced_agent_id', 'observed_agent_id'] + timestep_columns
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            for agent_data in self.taylor_deviations_data:
+                row = {
+                    'seed': agent_data['seed'],
+                    'attack_type': agent_data['attack_type'],
+                    'influencer_agent_id': agent_data['influencer_agent_id'],
+                    'influenced_agent_id': agent_data['influenced_agent_id'],
+                    'observed_agent_id': agent_data['observed_agent_id']
+                }
+                
+                # Add Taylor deviation values for each timestep
+                taylor_deviations = agent_data['taylor_deviations']
+                for t in range(max_episode_length):
+                    if t < len(taylor_deviations):
+                        row[f'timestep_{t}'] = taylor_deviations[t]
+                    else:
+                        row[f'timestep_{t}'] = ''  # Empty for timesteps beyond episode length
+                
+                writer.writerow(row)
+        
+        total_rows = len(self.taylor_deviations_data)
+        print(f"Saved Taylor deviations CSV: {csv_filename}")
+        print(f"  Total rows: {total_rows}")
+        print(f"  Max episode length: {max_episode_length}")
+        print(f"  Timestep columns: timestep_0 to timestep_{max_episode_length - 1}")
+    
     def run_single_seed_experiment(self, seed):
         """
         Run complete experiment for a single seed.
@@ -824,6 +929,9 @@ class MultiSeedExperimentRunner:
                 # Compute attack metrics
                 high_metrics = self.compute_attack_metrics(high_influence_attack, normal_q_values_history, normal_rewards_history, ref_vals, ref_std_devs, agent_j)
                 low_metrics = self.compute_attack_metrics(low_influence_attack, normal_q_values_history, normal_rewards_history, ref_vals, ref_std_devs, agent_j)
+                
+                # Log Taylor deviations for both attack types
+                self.log_taylor_deviations(high_influence_attack, low_influence_attack, ref_vals, ref_std_devs, seed, agent_i, agent_j)
                 
                 pair_result = {
                     'agent_i': agent_i,
@@ -1671,6 +1779,9 @@ class MultiSeedExperimentRunner:
         
         # Save directional derivatives CSV
         self.save_directional_derivatives_csv()
+        
+        # Save Taylor deviations CSV
+        self.save_taylor_deviations_csv()
         
         print(f"Results saved to {self.logdir}")
         print(f"- Accuracy results: {accuracy_file}")
