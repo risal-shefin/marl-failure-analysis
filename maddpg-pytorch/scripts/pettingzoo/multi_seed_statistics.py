@@ -32,6 +32,7 @@ from modules.metrics import (
     compute_second_order_action_influences,
     compute_pairwise_action_directional_second_derivatives
 )
+from modules.traceback import PatientZeroAnalyzer
 
 REF_TAYLOR_EPISODE_COUNT = 100
 WATCH_WINDOW = 15  # Number of timesteps to watch after attack timestep
@@ -84,6 +85,9 @@ class MultiSeedExperimentRunner:
         self.failed_seeds = []
         self.cumulative_influences_data = []  # Store cumulative influence data for all seeds
         
+        # Patient zero analysis (will be initialized after setup)
+        self.patient_zero_analyzer = None
+        
     def setup_experiment(self):
         """Set up the experiment environment and logging."""
         # Load MADDPG model
@@ -103,6 +107,9 @@ class MultiSeedExperimentRunner:
         # Prepare MADDPG for training mode
         device_str = 'gpu' if DEVICE == 'gpu' else 'cpu'
         self.maddpg.prep_training(device=device_str)
+        
+        # Initialize patient zero analyzer
+        self.patient_zero_analyzer = PatientZeroAnalyzer(self.maddpg.nagents)
         
         print(f"Multi-seed experiment setup complete. Log directory: {self.logdir}")
         print(f"Will run {self.total_experiments} experiments")
@@ -919,6 +926,37 @@ class MultiSeedExperimentRunner:
                 # Log Taylor deviations for both attack types
                 self.log_taylor_deviations(high_influence_attack, low_influence_attack, ref_vals, ref_std_devs, seed, agent_i, agent_j)
                 
+                # Step 6: Analyze patient zero detection accuracy with traceback
+                print(f"\n--- Patient Zero Analysis for pair agent_{agent_i} -> agent_{agent_j} ---")
+                
+                # Analyze high influence attack
+                print(f"Analyzing HIGH influence attack:")
+                high_pz_detection_analysis = self.patient_zero_analyzer.analyze_detection_accuracy(
+                    high_influence_attack['fault_timeline'],
+                    agent_i,  # The attacked agent is the influencer
+                    high_influence_attack['attack_timesteps'],
+                    directional_derivatives_history,
+                    high_influence_attack['taylor_errors_history'],
+                    ref_vals,
+                    action_influences_history,
+                    seed,
+                    (agent_i, agent_j)
+                )
+                
+                # Analyze low influence attack
+                print(f"Analyzing LOW influence attack:")
+                low_pz_detection_analysis = self.patient_zero_analyzer.analyze_detection_accuracy(
+                    low_influence_attack['fault_timeline'],
+                    agent_i,  # The attacked agent is the influencer
+                    low_influence_attack['attack_timesteps'],
+                    directional_derivatives_history,
+                    low_influence_attack['taylor_errors_history'],
+                    ref_vals,
+                    action_influences_history,
+                    seed,
+                    (agent_i, agent_j)
+                )
+                
                 pair_result = {
                     'agent_i': agent_i,
                     'agent_j': agent_j,
@@ -933,7 +971,9 @@ class MultiSeedExperimentRunner:
                     'low_influencer_fault_detection_times': low_influencer_fault_times,
                     'low_influenced_fault_detection_times': low_influenced_fault_times,
                     'high_metrics': high_metrics,
-                    'low_metrics': low_metrics
+                    'low_metrics': low_metrics,
+                    'high_patient_zero_analysis': high_pz_detection_analysis,
+                    'low_patient_zero_analysis': low_pz_detection_analysis
                 }
                 
                 all_pair_results.append(pair_result)
@@ -1796,9 +1836,28 @@ class MultiSeedExperimentRunner:
         pair_specific_results = self.compute_pair_specific_accuracies()
         self.print_pair_specific_summary(pair_specific_results)
         self.save_results(accuracy_results, failed_expectations, pair_specific_results)
+        
+        # Patient zero analysis summary and results saving
+        self.patient_zero_analyzer.print_summary()
+        patient_zero_stats = self.patient_zero_analyzer.get_statistics()
+        
+        # Save patient zero analysis results
+        pz_analysis_file = os.path.join(self.logdir, "patient_zero_analysis_detailed.csv")
+        pz_summary_file = os.path.join(self.logdir, "patient_zero_analysis_summary.json")
+        
+        self.patient_zero_analyzer.save_detailed_results(pz_analysis_file)
+        
+        # Save summary statistics as JSON
+        import json
+        with open(pz_summary_file, 'w') as f:
+            json.dump(patient_zero_stats, f, indent=2)
+        
         print(f"\nMulti-seed experiment completed successfully!")
         print(f"Results saved to: {self.logdir}")
         print(f"Pair-specific analysis completed for {len(pair_specific_results)} agent pairs")
+        print(f"Patient zero analysis saved to:")
+        print(f"  - Detailed results: {pz_analysis_file}")
+        print(f"  - Summary statistics: {pz_summary_file}")
         self.cleanup()
 
 
