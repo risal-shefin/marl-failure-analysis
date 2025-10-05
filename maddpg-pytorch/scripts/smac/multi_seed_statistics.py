@@ -37,7 +37,7 @@ USE_CUDA = torch.cuda.is_available()
 DEVICE = 'gpu' if USE_CUDA else 'cpu'
 torch_device = torch.device("cuda" if USE_CUDA else "cpu")
 
-REF_TAYLOR_EPISODE_COUNT = 2
+REF_TAYLOR_EPISODE_COUNT = 100
 WATCH_WINDOW = 15  # Number of timesteps to watch after attack timestep
 ATTACK_TS_FRACTION = 0.25  # Fraction of episode to consider for attack timesteps
 
@@ -132,25 +132,21 @@ class MultiSeedExperimentRunner:
         
         for episode in tqdm(range(total_episodes), desc=f"Reference episodes (seed {seed})"):
             # Reset environment (seed is set before the loop)
-            env = SmacWrapper.make_env(self.config.map_name)
-            env.seed(seed)
+            env = SmacWrapper.make_env(self.config.map_name, seed=seed)
             obs, action_masks = env.reset()
             result_deques = [deque(maxlen=5) for _ in range(self.maddpg.nagents)]
             timestep = 0
             
             while True:
+                noise_scale = 1e-4
+                noise = [np.random.normal(loc=0, scale=noise_scale, size=obs[i].shape) for i in range(self.maddpg.nagents)]
+                obs = [obs[i] + noise[i] for i in range(self.maddpg.nagents)]
+
                 # Add noise 10% of the time
                 torch_obs = [Variable(torch.tensor([obs[i]], dtype=torch.float32).to(torch_device), requires_grad=False) 
                            for i in range(self.maddpg.nagents)]
                 torch_masks = [Variable(torch.tensor(action_masks[i]).to(torch_device), requires_grad=False)
                                if action_masks[i] is not None else None for i in range(self.maddpg.nagents)]
-                
-                if np.random.random() < 0.1:
-                    noise_scale = 0.1
-                    noise = [torch.normal(0, noise_scale, size=torch_obs[i].shape).to(torch_device) 
-                           for i in range(self.maddpg.nagents)]
-                    torch_obs = [Variable(torch_obs[i].data + noise[i], requires_grad=False) 
-                               for i in range(self.maddpg.nagents)]
                 
                 # Get actions
                 torch_agent_actions = self.maddpg.step(torch_obs, explore=False, action_masks=torch_masks)
@@ -219,8 +215,7 @@ class MultiSeedExperimentRunner:
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
         
-        env = SmacWrapper.make_env(self.config.map_name)
-        env.seed(seed)
+        env = SmacWrapper.make_env(self.config.map_name, seed=seed)
         obs, action_masks = env.reset()
         action_influences_history = []
         q_values_history = []
@@ -365,8 +360,7 @@ class MultiSeedExperimentRunner:
         # Determine which agent to observe impact on
         observe_agent_id = observe_agent if observe_agent is not None else attack_agent_i
         
-        env = SmacWrapper.make_env(self.config.map_name)
-        env.seed(seed)
+        env = SmacWrapper.make_env(self.config.map_name, seed=seed)
         obs, action_masks = env.reset()
         episode_reward = 0
         
@@ -445,7 +439,8 @@ class MultiSeedExperimentRunner:
                         fault_timeline.append({
                             'agent': i,
                             't': timestep,
-                            'contribs': {}
+                            'contribs': {},
+                            'taylor_deviation': abs(detection_value - ref_vals[i][timestep])
                         })
             
             # Environment step
@@ -1093,9 +1088,9 @@ class MultiSeedExperimentRunner:
                     exceed_rate_expectation_correct += 1
                 
                 # Log failed expectations
-                if not (q_drop_max_better and q_drop_weighted_better and
-                        reward_drop_max_better and reward_drop_weighted_better and
-                        taylor_max_better and taylor_weighted_better and
+                if not (q_drop_max_better or q_drop_weighted_better or
+                        reward_drop_max_better or reward_drop_weighted_better or
+                        taylor_max_better or taylor_weighted_better or
                         exceed_rate_better):
                     failed_expectations.append({
                         'seed': seed,

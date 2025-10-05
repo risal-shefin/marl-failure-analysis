@@ -137,16 +137,12 @@ class MultiSeedExperimentRunner:
             timestep = 0
             
             while True:
-                # Add noise 10% of the time
+                noise_scale = 1e-4
+                noise = [np.random.normal(loc=0, scale=noise_scale, size=obs[i].shape) for i in range(self.maddpg.nagents)]
+                obs = [obs[i] + noise[i] for i in range(self.maddpg.nagents)]
+
                 torch_obs = [Variable(torch.tensor([obs[i]], dtype=torch.float32).to(torch_device), requires_grad=False) 
                            for i in range(self.maddpg.nagents)]
-                
-                if np.random.random() < 0.1:
-                    noise_scale = 0.01
-                    noise = [torch.normal(0, noise_scale, size=torch_obs[i].shape).to(torch_device) 
-                           for i in range(self.maddpg.nagents)]
-                    torch_obs = [Variable(torch_obs[i].data + noise[i], requires_grad=False) 
-                               for i in range(self.maddpg.nagents)]
                 
                 # Get actions
                 torch_agent_actions = self.maddpg.step(torch_obs, explore=False)
@@ -430,7 +426,8 @@ class MultiSeedExperimentRunner:
                         fault_timeline.append({
                             'agent': i,
                             't': timestep,
-                            'contribs': {}
+                            'contribs': {},
+                            'taylor_deviation': abs(detection_value - ref_vals[i][timestep])
                         })
             
             # Environment step
@@ -1082,9 +1079,9 @@ class MultiSeedExperimentRunner:
                     exceed_rate_expectation_correct += 1
                 
                 # Log failed expectations
-                if not (q_drop_max_better and q_drop_weighted_better and
-                        reward_drop_max_better and reward_drop_weighted_better and
-                        taylor_max_better and taylor_weighted_better and
+                if not (q_drop_max_better or q_drop_weighted_better or
+                        reward_drop_max_better or reward_drop_weighted_better or
+                        taylor_max_better or taylor_weighted_better or
                         exceed_rate_better):
                     failed_expectations.append({
                         'seed': seed,

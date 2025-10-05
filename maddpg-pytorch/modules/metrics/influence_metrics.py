@@ -89,7 +89,9 @@ def compute_pairwise_action_directional_second_derivatives(maddpg, obs, actions,
     results = [[0.0 for _ in range(N)] for _ in range(N)]
 
     for i in range(N):
-        critic_val = maddpg.agents[i].critic(vf_in).mean()
+        # Negate critic value because from attacker's pov, it will try to maximize a function's value.
+        # Then, the positive directional second derivatives indicate a potential attacking zone.
+        critic_val = -maddpg.agents[i].critic(vf_in).mean()
         
         for j in range(N):
             # Compute first-order gradient g = ∂Q_i/∂a_j
