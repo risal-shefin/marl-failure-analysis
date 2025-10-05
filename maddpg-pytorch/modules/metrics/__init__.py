@@ -12,7 +12,8 @@ from .influence_metrics import (
     compute_second_order_action_influences,
     compute_pairwise_observation_influences,
     compute_second_order_observation_influences,
-    collect_agent_q_values
+    collect_agent_q_values,
+    compute_pairwise_action_directional_second_derivatives
 )
 
 __all__ = [
@@ -24,5 +25,6 @@ __all__ = [
     'compute_second_order_action_influences',
     'compute_pairwise_observation_influences',
     'compute_second_order_observation_influences',
-    'collect_agent_q_values'
+    'collect_agent_q_values',
+    'compute_pairwise_action_directional_second_derivatives'
 ]
