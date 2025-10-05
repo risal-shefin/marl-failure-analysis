@@ -101,7 +101,7 @@ class PatientZeroAnalyzer:
             return result
         
         # Case 2: Check if detection is correct initially
-        min_attack_timestep = min(attack_timesteps) if attack_timesteps else float('inf')
+        start_attack_timestep = min(attack_timesteps) if attack_timesteps else float('inf')
         is_initially_correct = attacked_agent in detected_agents
         
         if is_initially_correct:
@@ -117,13 +117,13 @@ class PatientZeroAnalyzer:
         self.detection_stats['incorrect_detections'] += 1
         
         # Check if detection occurred before attack (threshold issue)
-        if detection_time < min_attack_timestep:
+        if detection_time < start_attack_timestep:
             self.detection_stats['threshold_failures'] += 1
             result['is_threshold_failure'] = True
             result['analysis'] = 'threshold_failure_early_detection'
             result['final_patient_zero'] = detected_agents[0] if len(detected_agents) == 1 else detected_agents
             result['final_is_correct'] = False
-            print(f"  Threshold failure: Detection at {detection_time} before attack at {min_attack_timestep}")
+            print(f"  Threshold failure: Detection at {detection_time} before attack at {start_attack_timestep}")
         else:
             # Need traceback
             self.detection_stats['traceback_needed'] += 1
@@ -230,7 +230,7 @@ class PatientZeroAnalyzer:
                 'seed': result.get('seed'),
                 'agent_pair': str(result.get('agent_pair')),
                 'attacked_agent': result.get('attacked_agent'),
-                'min_attack_timestep': result.get('min_attack_timestep'),
+                'start_attack_timestep': result.get('start_attack_timestep'),
                 'detected_agents': str(result.get('detected_agents')),
                 'detection_time': result.get('detection_time'),
                 'is_correct_initial': result.get('is_correct'),
