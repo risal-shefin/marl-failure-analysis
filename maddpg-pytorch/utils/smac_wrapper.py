@@ -18,8 +18,8 @@ class SmacWrapper:
         return SmacWrapper(env)
 
     @staticmethod
-    def make_env(map_name: str):
-        env = StarCraft2PZEnv.parallel_env(map_name=map_name)
+    def make_env(map_name: str, seed=None):
+        env = StarCraft2PZEnv.parallel_env(map_name=map_name, seed=seed)
         return SmacWrapper.wrap_env(env)
 
     def reset(self):
