@@ -28,7 +28,7 @@ from modules.detection import get_patient_zero_detection
 # from modules.core_experiment import get_episode_data
 # from modules.metrics import (
 #     compute_taylor_delta_policy,
-#     compute_pairwise_action_influences,f
+#     compute_pairwise_action_influences,
 #     collect_agent_q_values
 # )
 from harl.utils.envs_tools import (
@@ -38,9 +38,8 @@ from harl.utils.envs_tools import (
 
 import warnings
 warnings.filterwarnings("ignore")
+ATTACK_FRACTION=1.00
 
-THRESHOLD = 0.00001  # Threshold for anomaly detection in Taylor error
-ATTACK_RATIO = 1.0  # Fraction of episode length to consider for high/low influence attacks
 def slice_avail(avail, agent_id):
     """Extract available actions for a specific agent"""
     if avail is None:
@@ -381,6 +380,7 @@ class MultiSeedExperimentRunner:
         print(f"  Total rows: {total_rows}")
         print(f"  Max episode length: {max_episode_length}")
         print(f"  Timestep columns: timestep_0 to timestep_{max_episode_length - 1}")
+    
     def create_environment(self, seed):
         # First cleanup any existing environment
         # self.cleanup_environment(self.runner)
@@ -398,7 +398,7 @@ class MultiSeedExperimentRunner:
         )
         
         
-    def setup_experiment(self, initial_seed=0):
+    def setup_experiment(self):
         def restore(runner,reward,filepath):
             """Restore model parameters."""
             for agent_id in range(runner.num_agents):
@@ -456,7 +456,7 @@ class MultiSeedExperimentRunner:
         parser.add_argument(
             "--env",
             type=str,
-            default="smac",
+            default="pettingzoo_mpe",
             choices=[
                 "smac",
                 "mamujoco",
@@ -484,7 +484,7 @@ class MultiSeedExperimentRunner:
         parser.add_argument(
             "--reward",
             type=float,
-            default=-79.879,
+            default=None,
             help="Reward value to restore the model."
         )
         parser.add_argument(
@@ -537,7 +537,8 @@ class MultiSeedExperimentRunner:
         else:  # load config from corresponding yaml file
             algo_args, env_args = get_defaults_yaml_args(args["algo"], args["env"])
         #! Set initial seed for the runner setup
-        algo_args["seed"]["seed"]=initial_seed
+        env_args['N'] = self.config.N
+        print(f"Number of agents set to: {env_args['N']}")
         update_args(unparsed_dict, algo_args, env_args)  # update args from command line
 
         if args["env"] == "dexhands":
@@ -589,8 +590,8 @@ class MultiSeedExperimentRunner:
         #     env.close()
         # for env in self.runner.eval_envs.envs:
         #     env.close() 
-        self.runner.eval_envs.close()
-        self.runner.envs.close()
+        # self.runner.eval_envs.close()
+        # self.runner.envs.close()
 
     def compute_taylor_policy(self,runner, eval_obs, eval_available_actions, eval_rnn_states):
         # states_tensor = torch.stack([torch.tensor(state_dict[k], dtype=torch.float32, requires_grad=True) for k in state_dict.keys()])
@@ -648,13 +649,13 @@ class MultiSeedExperimentRunner:
 
         return delta_errors
 
-    def compute_reference_taylor_error(self, runner, seed, total_episodes=1000, attack_status=False, attack_agent_id=0, randomness=0.25):
+    def compute_reference_taylor_error(self, runner, seed, total_episodes=1000, attack_status=False, attack_agent_id=0, randomness=1.00):
 
         results = [{} for _ in range(runner.num_agents)]
         
         for episode in tqdm(range(total_episodes), desc="Taylor Compute episodes", total=total_episodes):
             self.create_environment(seed)
-            eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset() 
+            eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset(seed=seed) 
             # print(f"eval_obs:{eval_obs}")
             result_deque = [deque(maxlen=5) for _ in range(runner.num_agents)]
             timestamp = 0
@@ -937,7 +938,8 @@ class MultiSeedExperimentRunner:
             # print(torch.autograd.grad(q_value,concatenated_actions,retain_graph=True,create_graph=True))
             # print(f"Q value for agent {i}: {q_value.item()}")
             for j in range(N):
-                grad_i = torch.autograd.grad(q_value, torch_actions[j], create_graph=True, retain_graph=True)[0]
+                # grad_i = torch.autograd.grad(q_value, torch_actions[j], create_graph=True, retain_graph=True)[0]
+                grad_i = torch.autograd.grad(q_value, agent_obs_tensors[j], create_graph=True, retain_graph=True)[0]
                 results[i][j] = grad_i.norm(p=2).item()
 
         return results
@@ -985,25 +987,17 @@ class MultiSeedExperimentRunner:
             # print(f">>>> Is q_value requiring grad? {q_value.requires_grad}")
             # print(torch.autograd.grad(q_value,concatenated_actions,retain_graph=True,create_graph=True))
             for j in range(N):
-                grad_j = torch.autograd.grad(q_value, torch_actions[j], create_graph=True, retain_graph=True)[0]
+                grad_j = torch.autograd.grad(q_value, agent_obs_tensors[j], create_graph=True, retain_graph=True)[0]
                 g = grad_j.flatten()
-                # hvp = torch.autograd.grad(
-                #     grad_j,
-                #     torch_actions[j],
-                #     grad_outputs=grad_j,
-                #     retain_graph=True,
-                #     allow_unused=True
-                # )[0]
                 hvp = torch.autograd.grad(
-                    grad_j.sum(),
-                    torch_actions[j],
+                    grad_j,
+                    agent_obs_tensors[j],
+                    grad_outputs=grad_j,
                     retain_graph=True,
                     allow_unused=True
                 )[0]
                 hvp_flat = hvp.flatten()
                 # results[i][j] = grad_i.norm(p=2).item()
-                # print(f"Grad J norm for agents ({i},{j}): {g.norm(p=2).item()}")/
-                # print(f"HVP: {hvp_flat}")
                 # Compute g^T H g (directional second derivative)
                 directional_second_derivative = torch.dot(g, hvp_flat).item()
                 results[i][j] = directional_second_derivative
@@ -1018,8 +1012,8 @@ class MultiSeedExperimentRunner:
         """Evaluate the model."""
         
         eval_episode = 0
-        self.create_environment(seed)
-        eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset()
+        # self.create_environment(seed)
+        eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset(seed=seed)
         self.directional_derivatives_history = []
         eval_rnn_states = np.zeros(
             (
@@ -1154,11 +1148,10 @@ class MultiSeedExperimentRunner:
                     if historical_std < 1e-6:
                         historical_std = 1e-6
                     
-                    # print(f"Difference : {abs(taylor_approx_error - historical_mean)}")
                     if abs(taylor_approx_error - historical_mean) > self.K_SIGMA * historical_std:
-                        print(" @ Agent:", i, " @ Timestep:", cnt)
+                        # print(" @ Agent:", i, " @ Timestep:", cnt)
                         # print(" >>>>>>> ", taylor_approx_error, historical_mean, historical_std)
-                        print(f" [!!!] Anomaly detected for agent {i} at timestep: {cnt}. Taylor Appx. Error: {taylor_approx_error}")
+                        # print(f" [!!!] Anomaly detected for agent {i} at timestep: {cnt}. Taylor Appx. Error: {taylor_approx_error}")
                         # Record all fault timesteps for this agent
                         fault_all_detected[i].append(cnt)
                         fault_timeline.append({
@@ -1328,7 +1321,7 @@ class MultiSeedExperimentRunner:
         """
         positive_derivative_timesteps = []  # For high influence selection
         negative_derivative_timesteps = []  # For low influence selection
-        # print(f"Directional Derivaties History : {directional_derivatives_history}")
+        
         for t in range(min(atk_steps_limit, len(action_influences_history), len(directional_derivatives_history))):
             # Get action influence of agent_i on agent_j at timestep t
             influence = abs(action_influences_history[t][agent_j][agent_i])
@@ -1341,9 +1334,6 @@ class MultiSeedExperimentRunner:
             elif directional_derivative < 0:
                 negative_derivative_timesteps.append((influence, t))
         
-            print(" >>> ", directional_derivative)
-        print(f"--- Positive derivative timesteps (influence, t): {positive_derivative_timesteps}")
-        print(f"--- Negative derivative timesteps (influence, t): {negative_derivative_timesteps}")
         # For high influence: among positive derivative timesteps, choose maximum action influence
         max_influences_t = []
         if positive_derivative_timesteps:
@@ -1459,13 +1449,13 @@ class MultiSeedExperimentRunner:
         Returns:
             Dictionary containing experiment results for all agent pairs
         """
-        current_seed =seed #runner.algo_args["seed"]["seed"]
+        current_seed = seed #runner.algo_args["seed"]["seed"]
         print(f"\n{'='*50}")
         print(f"Running experiment for seed {current_seed}")
         print(f"{'='*50}")
         
         # Step 1: Compute reference Taylor error
-        ref_vals, ref_std_devs = self.compute_reference_taylor_error(runner, seed=current_seed, total_episodes=self.total_episodes, attack_status=False, attack_agent_id=0, randomness=1.00)
+        ref_vals, ref_std_devs = self.compute_reference_taylor_error(runner, seed=current_seed, total_episodes=self.total_episodes, attack_status=False, attack_agent_id=0, randomness=1.0)
         
         # print(f"### Ref vals :{ref_vals} and Ref std devs : {ref_std_devs}")
         # exit("Exiting after ref vals for debug")
@@ -1484,14 +1474,14 @@ class MultiSeedExperimentRunner:
         
         # Step 3: Analyze all possible ordered pairs (i, j) where i influences j
         all_pair_results = []
-        first_quarter_steps = math.ceil(ATTACK_RATIO * episode_length)
+        first_quarter_steps = math.ceil(ATTACK_FRACTION * episode_length)
 
         for agent_i in range(self.runner.num_agents):  # influencing agent
             for agent_j in range(self.runner.num_agents):  # influenced agent
                 if agent_i == agent_j:
                     continue  # Skip self
-                if agent_i != 0 or agent_j != 1:
-                    continue  # TEMP: Only analyze pair (1, 2) for faster testing
+                # if agent_i != 1 or agent_j != 2:
+                #     continue  # TEMP: Only analyze pair (1, 2) for faster testing
                 
                 # print(f"\nAnalyzing pair: agent_{agent_i} influences agent_{agent_j}")
                 
@@ -1499,11 +1489,10 @@ class MultiSeedExperimentRunner:
                 max_influence_t, min_influence_t = self.find_influence_timesteps(
                     action_influences_history, directional_derivatives_history, agent_i, agent_j, first_quarter_steps, k_steps=1
                 )
-                
-                # print(f"Max influence timestep: {max_influence_t}, Min influence timestep: {min_influence_t}")
                 if not max_influence_t or not min_influence_t:
                     print(f"  >> Skipping pair (agent_{agent_i}, agent_{agent_j}) due to lack of valid influence timesteps")
                     continue
+                # print(f"Max influence timestep: {max_influence_t}, Min influence timestep: {min_influence_t}")
                 
                 # Step 5: Run attacked episodes - attack agent_i (influencer), observe impact on agent_j (influenced)
                 high_influence_attack = self.eval(runner=self.runner, attack_status=True, attack_agent_id=agent_i, seed=current_seed, ref_vals=ref_vals, ref_std_devs=ref_std_devs, collect_q_flag=True, min_window=max_influence_t[0], max_window=max_influence_t[0]+5, observe_agent=agent_j)
@@ -1550,11 +1539,11 @@ class MultiSeedExperimentRunner:
                 low_pz_str = ', '.join(map(str, low_patient_zero)) if isinstance(low_patient_zero, list) else str(low_patient_zero)
                 
                 print(f"High influence attack - Patient zero(s): {high_pz_str} at time {high_patient_time}")
-                # print(f"  Influencer (agent_{agent_i}) fault detection times: {high_influencer_fault_times}")
-                # print(f"  Influenced (agent_{agent_j}) fault detection times: {high_influenced_fault_times}")
+                print(f"  Influencer (agent_{agent_i}) fault detection times: {high_influencer_fault_times}")
+                print(f"  Influenced (agent_{agent_j}) fault detection times: {high_influenced_fault_times}")
                 print(f"Low influence attack - Patient zero(s): {low_pz_str} at time {low_patient_time}")
-                # print(f"  Influencer (agent_{agent_i}) fault detection times: {low_influencer_fault_times}")
-                # print(f"  Influenced (agent_{agent_j}) fault detection times: {low_influenced_fault_times}")
+                print(f"  Influencer (agent_{agent_i}) fault detection times: {low_influencer_fault_times}")
+                print(f"  Influenced (agent_{agent_j}) fault detection times: {low_influenced_fault_times}")
         
         result = {
             'seed': current_seed,
@@ -1640,8 +1629,8 @@ class MultiSeedExperimentRunner:
             # if seed != 1:
                 # continue
             # প্রতিটি experiment এর জন্য seed আপডেট করি
-            self.update_seed_for_experiment(runner, seed)
-            result = self.run_single_seed_experiment(runner)
+            # self.update_seed_for_experiment(runner, seed)
+            result = self.run_single_seed_experiment(runner, seed)
             self.experiment_results.append(result)
         
         total_successful_pairs = sum(result['total_pairs'] for result in self.experiment_results)
@@ -1775,20 +1764,18 @@ class MultiSeedExperimentRunner:
                     })
         
         total_experiments = len(self.experiment_results)
-        if total_pairs == 0:
-            print("No agent pairs were successfully analyzed across all experiments.")
-            # return
+        
         # Compute accuracies
-        patient_zero_accuracy = (correct_patient_zero / total_with_detection) if total_with_detection > 0 else 0
-        high_patient_zero_accuracy = (high_correct_patient_zero / high_total_with_detection) if high_total_with_detection > 0 else 0
-        low_patient_zero_accuracy = (low_correct_patient_zero / low_total_with_detection) if low_total_with_detection > 0 else 0
-        q_drop_max_accuracy = q_drop_max_expectation_correct / total_pairs if total_pairs > 0 else 0
-        q_drop_weighted_accuracy = q_drop_weighted_expectation_correct / total_pairs if total_pairs > 0 else 0
-        reward_drop_max_accuracy = reward_drop_max_expectation_correct / total_pairs if total_pairs > 0 else 0
-        reward_drop_weighted_accuracy = reward_drop_weighted_expectation_correct / total_pairs if total_pairs > 0 else 0
-        taylor_max_accuracy = taylor_max_expectation_correct / total_pairs  if total_pairs > 0 else 0
-        taylor_weighted_accuracy = taylor_weighted_expectation_correct / total_pairs if total_pairs > 0 else 0
-        exceed_rate_accuracy = exceed_rate_expectation_correct / total_pairs if total_pairs > 0 else 0
+        patient_zero_accuracy = correct_patient_zero / total_with_detection if total_with_detection > 0 else 0
+        high_patient_zero_accuracy = high_correct_patient_zero / high_total_with_detection if high_total_with_detection > 0 else 0
+        low_patient_zero_accuracy = low_correct_patient_zero / low_total_with_detection if low_total_with_detection > 0 else 0
+        q_drop_max_accuracy = q_drop_max_expectation_correct / total_pairs
+        q_drop_weighted_accuracy = q_drop_weighted_expectation_correct / total_pairs
+        reward_drop_max_accuracy = reward_drop_max_expectation_correct / total_pairs
+        reward_drop_weighted_accuracy = reward_drop_weighted_expectation_correct / total_pairs
+        taylor_max_accuracy = taylor_max_expectation_correct / total_pairs
+        taylor_weighted_accuracy = taylor_weighted_expectation_correct / total_pairs
+        exceed_rate_accuracy = exceed_rate_expectation_correct / total_pairs
         
         # Aggregate metrics
         avg_high_q_drop_max = np.mean([m['max_q_drop'] for m in high_metrics_list])
@@ -1984,9 +1971,9 @@ class MultiSeedExperimentRunner:
                     exceed_rate_expectation_correct += 1
                 
                 # Log failed expectations for this pair
-                if not (q_drop_max_better or q_drop_weighted_better or
-                        reward_drop_max_better or reward_drop_weighted_better or
-                        taylor_max_better or taylor_weighted_better or
+                if not (q_drop_max_better and q_drop_weighted_better and
+                        reward_drop_max_better and reward_drop_weighted_better and
+                        taylor_max_better and taylor_weighted_better and
                         exceed_rate_better):
                     failed_expectations.append({
                         'seed': data['seed'],
@@ -2456,7 +2443,7 @@ class MultiSeedExperimentRunner:
     
     def run_full_experiment(self):
         """Run the complete multi-seed experiment pipeline."""
-        self.setup_experiment(initial_seed=0)  # শুরুতে seed=0 দিয়ে setup করি
+        self.setup_experiment()  # শুরুতে seed=0 দিয়ে setup করি
         self.run_all_experiments(self.runner)
         accuracy_results, failed_expectations = self.compute_accuracies()
         pair_specific_results = self.compute_pair_specific_accuracies()
@@ -2472,8 +2459,8 @@ class MultiSeedExperimentRunner:
 def create_config_from_args():
     """Create configuration from command line arguments."""
     parser = argparse.ArgumentParser(description="Multi-seed statistics experiment")
-    # parser.add_argument("-N",type=int ,help="Number of agents")
-    parser.add_argument("--total_experiments", type=int, default=400,
+    parser.add_argument("--N",type=int ,help="Number of agents")
+    parser.add_argument("--total_experiments", type=int, default=5,
                         help="Total number of seed experiments to run")
     parser.add_argument("--total_episodes", type=int, default=100,)
     parser.add_argument("--filepath", type=str, default=None,

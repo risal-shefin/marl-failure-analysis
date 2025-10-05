@@ -648,7 +648,7 @@ class MultiSeedExperimentRunner:
 
         return delta_errors
 
-    def compute_reference_taylor_error(self, runner, seed, total_episodes=1000, attack_status=False, attack_agent_id=0, randomness=0.25):
+    def compute_reference_taylor_error(self, runner, seed, total_episodes=1000, attack_status=False, attack_agent_id=0, randomness=1.00):
 
         results = [{} for _ in range(runner.num_agents)]
         
@@ -1497,8 +1497,11 @@ class MultiSeedExperimentRunner:
                 
                 # Step 4: Find max and min influence timesteps of agent_i on agent_j in first 25%
                 max_influence_t, min_influence_t = self.find_influence_timesteps(
-                    action_influences_history, directional_derivatives_history, agent_i, agent_j, first_quarter_steps, k_steps=1
+                    action_influences_history, agent_i, agent_j, first_quarter_steps
                 )
+                # max_influence_t, min_influence_t = self.find_influence_timesteps(
+                #     action_influences_history, directional_derivatives_history, agent_i, agent_j, first_quarter_steps, k_steps=1
+                # )
                 
                 # print(f"Max influence timestep: {max_influence_t}, Min influence timestep: {min_influence_t}")
                 if not max_influence_t or not min_influence_t:
@@ -1506,8 +1509,8 @@ class MultiSeedExperimentRunner:
                     continue
                 
                 # Step 5: Run attacked episodes - attack agent_i (influencer), observe impact on agent_j (influenced)
-                high_influence_attack = self.eval(runner=self.runner, attack_status=True, attack_agent_id=agent_i, seed=current_seed, ref_vals=ref_vals, ref_std_devs=ref_std_devs, collect_q_flag=True, min_window=max_influence_t[0], max_window=max_influence_t[0]+5, observe_agent=agent_j)
-                low_influence_attack = self.eval(runner=self.runner, attack_status=True, attack_agent_id=agent_i, seed=current_seed, ref_vals=ref_vals, ref_std_devs=ref_std_devs, collect_q_flag=True, min_window=min_influence_t[0], max_window=min_influence_t[0]+5, observe_agent=agent_j)
+                high_influence_attack = self.eval(runner=self.runner, attack_status=True, attack_agent_id=agent_i, seed=current_seed, ref_vals=ref_vals, ref_std_devs=ref_std_devs, collect_q_flag=True, min_window=max_influence_t, max_window=max_influence_t+5, observe_agent=agent_j)
+                low_influence_attack = self.eval(runner=self.runner, attack_status=True, attack_agent_id=agent_i, seed=current_seed, ref_vals=ref_vals, ref_std_devs=ref_std_devs, collect_q_flag=True, min_window=min_influence_t, max_window=min_influence_t+5, observe_agent=agent_j)
                 # Get fault detection times for influencing and influenced agents
                 high_influencer_fault_times = get_agent_fault_detection_times(high_influence_attack['fault_timeline'], agent_i)
                 high_influenced_fault_times = get_agent_fault_detection_times(high_influence_attack['fault_timeline'], agent_j)
@@ -1641,7 +1644,7 @@ class MultiSeedExperimentRunner:
                 # continue
             # প্রতিটি experiment এর জন্য seed আপডেট করি
             self.update_seed_for_experiment(runner, seed)
-            result = self.run_single_seed_experiment(runner)
+            result = self.run_single_seed_experiment(runner,seed)
             self.experiment_results.append(result)
         
         total_successful_pairs = sum(result['total_pairs'] for result in self.experiment_results)
