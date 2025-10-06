@@ -10,6 +10,8 @@ import csv
 import random
 import numpy as np
 import torch
+import pickle
+import json
 from datetime import datetime
 from collections import deque
 from tqdm import tqdm
@@ -31,13 +33,14 @@ from modules.metrics import (
     compute_pairwise_frob_norms,
     compute_pairwise_action_directional_second_derivatives
 )
+from modules.traceback import PatientZeroAnalyzer
 
 # Define CUDA constants
 USE_CUDA = torch.cuda.is_available()
 DEVICE = 'gpu' if USE_CUDA else 'cpu'
 torch_device = torch.device("cuda" if USE_CUDA else "cpu")
 
-REF_TAYLOR_EPISODE_COUNT = 100
+REF_TAYLOR_EPISODE_COUNT = 2
 WATCH_WINDOW = 15  # Number of timesteps to watch after attack timestep
 ATTACK_TS_FRACTION = 0.25  # Fraction of episode to consider for attack timesteps
 
@@ -87,6 +90,12 @@ class MultiSeedExperimentRunner:
         self.failed_seeds = []
         self.cumulative_influences_data = []  # Store cumulative influence data for all seeds
         
+        # Reference Taylor error cache (loaded once and reused)
+        self.reference_taylor_cache = None
+        
+        # Patient zero analysis (will be initialized after setup)
+        self.patient_zero_analyzer = None
+        
     def setup_experiment(self):
         """Set up the experiment environment and logging."""
         # Load MADDPG model
@@ -103,6 +112,13 @@ class MultiSeedExperimentRunner:
         # Prepare MADDPG for training mode
         device_str = 'gpu' if DEVICE == 'gpu' else 'cpu'
         self.maddpg.prep_training(device=device_str)
+        
+        # Initialize patient zero analyzer
+        self.patient_zero_analyzer = PatientZeroAnalyzer(self.maddpg.nagents)
+        
+        # Load reference Taylor values once if directory is provided
+        if hasattr(self.config, 'taylor_ref_dir') and self.config.taylor_ref_dir is not None:
+            self._load_reference_taylor_cache()
         
         print(f"Multi-seed experiment setup complete. Log directory: {self.logdir}")
         print(f"Will run {self.total_experiments} experiments")
@@ -194,6 +210,143 @@ class MultiSeedExperimentRunner:
                 ref_std_devs[agent_id].append(std_val)
         
         return ref_vals, ref_std_devs
+    
+    def _load_reference_taylor_cache(self):
+        """
+        Load reference Taylor error values from disk once and cache them.
+        This method is called during setup to avoid loading the file multiple times.
+        """
+        pickle_filename = "ref_taylor_all_seeds.pkl"
+        pickle_filepath = os.path.join(self.config.taylor_ref_dir, pickle_filename)
+        
+        if not os.path.exists(pickle_filepath):
+            raise FileNotFoundError(f"Reference Taylor values not found: {pickle_filepath}")
+        
+        print(f"Loading reference Taylor values cache from {pickle_filepath}...")
+        
+        with open(pickle_filepath, 'rb') as f:
+            self.reference_taylor_cache = pickle.load(f)
+        
+        # Validate compatibility
+        if self.reference_taylor_cache['nagents'] != self.maddpg.nagents:
+            raise ValueError(f"Number of agents mismatch: saved={self.reference_taylor_cache['nagents']}, current={self.maddpg.nagents}")
+        
+        if self.reference_taylor_cache['env_id'] != self.config.map_name:
+            print(f"Warning: Environment ID mismatch: saved={self.reference_taylor_cache['env_id']}, current={self.config.map_name}")
+        
+        print(f"Successfully loaded reference Taylor values cache:")
+        print(f"  Episode count used: {self.reference_taylor_cache['ref_taylor_episode_count']}")
+        print(f"  Number of agents: {self.reference_taylor_cache['nagents']}")
+        print(f"  Total seeds in file: {self.reference_taylor_cache['total_seeds']}")
+        print(f"  Available seeds: {sorted(self.reference_taylor_cache['seeds'])}")
+    
+    def save_all_reference_taylor_values(self, all_seeds_data, save_dir):
+        """
+        Save reference Taylor error values for all seeds to disk in a single file.
+        
+        Args:
+            all_seeds_data: Dictionary mapping seed -> (ref_vals, ref_std_devs)
+            save_dir: Directory to save the reference values
+        """
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Prepare data structure for all seeds
+        data = {
+            'seeds_data': all_seeds_data,
+            'seeds': list(all_seeds_data.keys()),
+            'total_seeds': len(all_seeds_data),
+            'nagents': self.maddpg.nagents,
+            'env_id': self.config.map_name,
+            'model_path': self.config.model_path,
+            'ref_taylor_episode_count': REF_TAYLOR_EPISODE_COUNT,
+            'save_timestamp': datetime.now().isoformat()
+        }
+        
+        # Save as pickle file for fast loading
+        pickle_filename = "ref_taylor_all_seeds.pkl"
+        pickle_filepath = os.path.join(save_dir, pickle_filename)
+        
+        with open(pickle_filepath, 'wb') as f:
+            pickle.dump(data, f)
+        
+        # Also save metadata as JSON for human readability
+        json_data = {
+            'seeds': list(all_seeds_data.keys()),
+            'total_seeds': len(all_seeds_data),
+            'nagents': self.maddpg.nagents,
+            'env_id': self.config.map_name,
+            'model_path': self.config.model_path,
+            'ref_taylor_episode_count': REF_TAYLOR_EPISODE_COUNT,
+            'save_timestamp': datetime.now().isoformat()
+        }
+        
+        json_filename = "ref_taylor_all_seeds_metadata.json"
+        json_filepath = os.path.join(save_dir, json_filename)
+        
+        with open(json_filepath, 'w') as f:
+            json.dump(json_data, f, indent=2)
+        
+        print(f"Saved reference Taylor values for {len(all_seeds_data)} seeds to:")
+        print(f"  Pickle: {pickle_filepath}")
+        print(f"  Metadata: {json_filepath}")
+    
+    def load_reference_taylor_values(self, seed, load_dir):
+        """
+        Load reference Taylor error values from cached data.
+        
+        Args:
+            seed: Random seed to load values for
+            load_dir: Directory containing the saved reference values (unused when cache is available)
+            
+        Returns:
+            Tuple of (ref_vals, ref_std_devs) for each agent and timestep
+        """
+        ref_vals, ref_std_devs = self.reference_taylor_cache['seeds_data'][seed]
+        
+        print(f"Using cached reference Taylor values for seed {seed}")
+        return ref_vals, ref_std_devs
+    
+    def precompute_and_save_taylor_values(self, seeds, save_dir):
+        """
+        Precompute reference Taylor values for multiple seeds and save them.
+        
+        Args:
+            seeds: List of seeds to precompute values for
+            save_dir: Directory to save the precomputed values
+        """
+        print(f"Precomputing reference Taylor values for {len(seeds)} seeds...")
+        print(f"Save directory: {save_dir}")
+        
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Collect all seeds data in a dictionary
+        all_seeds_data = {}
+        
+        for i, seed in enumerate(tqdm(seeds, desc="Precomputing Taylor values")):
+            print(f"\nPrecomputing seed {seed} ({i+1}/{len(seeds)})...")
+            ref_vals, ref_std_devs = self.compute_reference_taylor_error(seed)
+            all_seeds_data[seed] = (ref_vals, ref_std_devs)
+        
+        # Save all seeds data to a single file
+        self.save_all_reference_taylor_values(all_seeds_data, save_dir)
+        
+        # Save metadata about the precomputation
+        metadata = {
+            'seeds': seeds,
+            'total_seeds': len(seeds),
+            'nagents': self.maddpg.nagents,
+            'env_id': self.config.map_name,
+            'model_path': self.config.model_path,
+            'ref_taylor_episode_count': REF_TAYLOR_EPISODE_COUNT,
+            'precomputation_timestamp': datetime.now().isoformat()
+        }
+        
+        metadata_filepath = os.path.join(save_dir, "precomputation_metadata.json")
+        with open(metadata_filepath, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        print(f"\nPrecomputation completed!")
+        print(f"Metadata saved to: {metadata_filepath}")
     
     def run_normal_episode(self, seed):
         """
@@ -860,8 +1013,12 @@ class MultiSeedExperimentRunner:
         print(f"Running experiment for seed {seed}")
         print(f"{'='*50}")
         
-        # Step 1: Compute reference Taylor error
-        ref_vals, ref_std_devs = self.compute_reference_taylor_error(seed)
+        # Step 1: Get reference Taylor error (either load from disk or compute)
+        if hasattr(self.config, 'taylor_ref_dir') and self.config.taylor_ref_dir is not None:
+            ref_vals, ref_std_devs = self.load_reference_taylor_values(seed, self.config.taylor_ref_dir)
+            print(f"Successfully loaded precomputed reference Taylor values for seed {seed}")
+        else:
+            ref_vals, ref_std_devs = self.compute_reference_taylor_error(seed)
         
         # Step 2: Run normal episode
         normal_episode = self.run_normal_episode(seed)
@@ -928,6 +1085,37 @@ class MultiSeedExperimentRunner:
                 # Log Taylor deviations for both attack types
                 self.log_taylor_deviations(high_influence_attack, low_influence_attack, ref_vals, ref_std_devs, seed, agent_i, agent_j)
                 
+                # Step 6: Analyze patient zero detection accuracy with traceback
+                print(f"\n--- Patient Zero Analysis for pair agent_{agent_i} -> agent_{agent_j} ---")
+                
+                # Analyze high influence attack
+                print(f"Analyzing HIGH influence attack:")
+                high_pz_detection_analysis = self.patient_zero_analyzer.analyze_detection_accuracy(
+                    high_influence_attack['fault_timeline'],
+                    agent_i,  # The attacked agent is the influencer
+                    high_influence_attack['attack_timesteps'],
+                    directional_derivatives_history,
+                    high_influence_attack['taylor_errors_history'],
+                    ref_vals,
+                    action_influences_history,
+                    seed,
+                    (agent_i, agent_j)
+                )
+                
+                # Analyze low influence attack
+                print(f"Analyzing LOW influence attack:")
+                low_pz_detection_analysis = self.patient_zero_analyzer.analyze_detection_accuracy(
+                    low_influence_attack['fault_timeline'],
+                    agent_i,  # The attacked agent is the influencer
+                    low_influence_attack['attack_timesteps'],
+                    directional_derivatives_history,
+                    low_influence_attack['taylor_errors_history'],
+                    ref_vals,
+                    action_influences_history,
+                    seed,
+                    (agent_i, agent_j)
+                )
+                
                 pair_result = {
                     'agent_i': agent_i,
                     'agent_j': agent_j,
@@ -942,7 +1130,9 @@ class MultiSeedExperimentRunner:
                     'low_influencer_fault_detection_times': low_influencer_fault_times,
                     'low_influenced_fault_detection_times': low_influenced_fault_times,
                     'high_metrics': high_metrics,
-                    'low_metrics': low_metrics
+                    'low_metrics': low_metrics,
+                    'high_patient_zero_analysis': high_pz_detection_analysis,
+                    'low_patient_zero_analysis': low_pz_detection_analysis
                 }
                 
                 all_pair_results.append(pair_result)
@@ -1796,17 +1986,65 @@ class MultiSeedExperimentRunner:
         """Clean up resources."""
         pass
     
+    def run_precomputation_mode(self):
+        """Run precomputation mode to generate reference Taylor values."""
+        print("Running in precomputation mode...")
+        self.setup_experiment()
+        
+        # Generate seeds for precomputation
+        seeds = list(range(self.total_experiments))
+        
+        # Create precomputation directory
+        cwd = os.getcwd()
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        env_type = 'discrete' if self.maddpg.discrete_action else 'continuous'
+        precompute_dir = os.path.join(cwd, 'data', 'precomputed_taylor_values', 
+                                     f"{self.config.map_name}_{env_type}_{timestamp}")
+        
+        # Precompute and save reference Taylor values
+        self.precompute_and_save_taylor_values(seeds, precompute_dir)
+        
+        print(f"\nPrecomputation completed successfully!")
+        print(f"Precomputed Taylor values saved to: {precompute_dir}")
+        print(f"Use --taylor_ref_dir {precompute_dir} to load these values in future experiments")
+        
+        self.cleanup()
+    
     def run_full_experiment(self):
         """Run the complete multi-seed experiment pipeline."""
+        # Check if running in precomputation mode
+        if hasattr(self.config, 'precompute_taylor') and self.config.precompute_taylor:
+            self.run_precomputation_mode()
+            return
+        
         self.setup_experiment()
         self.run_all_experiments()
         accuracy_results, failed_expectations = self.compute_accuracies()
         pair_specific_results = self.compute_pair_specific_accuracies()
         self.print_pair_specific_summary(pair_specific_results)
         self.save_results(accuracy_results, failed_expectations, pair_specific_results)
+        
+        # Patient zero analysis summary and results saving
+        self.patient_zero_analyzer.print_summary()
+        patient_zero_stats = self.patient_zero_analyzer.get_statistics()
+        
+        # Save patient zero analysis results
+        pz_analysis_file = os.path.join(self.logdir, "patient_zero_analysis_detailed.csv")
+        pz_summary_file = os.path.join(self.logdir, "patient_zero_analysis_summary.json")
+        
+        self.patient_zero_analyzer.save_detailed_results(pz_analysis_file)
+        
+        # Save summary statistics as JSON
+        import json
+        with open(pz_summary_file, 'w') as f:
+            json.dump(patient_zero_stats, f, indent=2)
+        
         print(f"\nMulti-seed experiment completed successfully!")
         print(f"Results saved to: {self.logdir}")
         print(f"Pair-specific analysis completed for {len(pair_specific_results)} agent pairs")
+        print(f"Patient zero analysis saved to:")
+        print(f"  - Detailed results: {pz_analysis_file}")
+        print(f"  - Summary statistics: {pz_summary_file}")
         self.cleanup()
 
 
@@ -1817,6 +2055,10 @@ def create_config_from_args():
     parser.add_argument("model_path", help="Model directory")
     parser.add_argument("--total_experiments", type=int, default=100,
                         help="Total number of seed experiments to run")
+    parser.add_argument("--precompute_taylor", action="store_true",
+                        help="Precompute reference Taylor error values and save them")
+    parser.add_argument("--taylor_ref_dir", type=str, default=None,
+                        help="Directory containing precomputed reference Taylor error values")
     
     return parser.parse_args()
 
