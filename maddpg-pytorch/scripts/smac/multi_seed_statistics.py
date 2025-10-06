@@ -40,7 +40,7 @@ USE_CUDA = torch.cuda.is_available()
 DEVICE = 'gpu' if USE_CUDA else 'cpu'
 torch_device = torch.device("cuda" if USE_CUDA else "cpu")
 
-REF_TAYLOR_EPISODE_COUNT = 2
+REF_TAYLOR_EPISODE_COUNT = 100
 WATCH_WINDOW = 15  # Number of timesteps to watch after attack timestep
 ATTACK_TS_FRACTION = 0.25  # Fraction of episode to consider for attack timesteps
 
@@ -2025,9 +2025,9 @@ class MultiSeedExperimentRunner:
         self.save_results(accuracy_results, failed_expectations, pair_specific_results)
         
         # Patient zero analysis summary and results saving
-        self.patient_zero_analyzer.print_summary()
-        patient_zero_stats = self.patient_zero_analyzer.get_statistics()
-        
+        self.patient_zero_analyzer.print_summary_dual()
+        patient_zero_stats = self.patient_zero_analyzer.get_statistics_dual()
+
         # Save patient zero analysis results
         pz_analysis_file = os.path.join(self.logdir, "patient_zero_analysis_detailed.csv")
         pz_summary_file = os.path.join(self.logdir, "patient_zero_analysis_summary.json")

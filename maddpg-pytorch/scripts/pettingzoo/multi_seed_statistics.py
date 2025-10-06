@@ -2018,8 +2018,8 @@ class MultiSeedExperimentRunner:
         self.save_results(accuracy_results, failed_expectations, pair_specific_results)
         
         # Patient zero analysis summary and results saving
-        self.patient_zero_analyzer.print_summary()
-        patient_zero_stats = self.patient_zero_analyzer.get_statistics()
+        self.patient_zero_analyzer.print_summary_dual()
+        patient_zero_stats = self.patient_zero_analyzer.get_statistics_dual()
         
         # Save patient zero analysis results
         pz_analysis_file = os.path.join(self.logdir, "patient_zero_analysis_detailed.csv")
