@@ -71,7 +71,7 @@ def compute_positive_dij_rate(other_agent: int,
     positive_count = 0
     total_count = 0
     
-    for t in range(start_time, end_time):
+    for t in range(start_time, end_time+1):
         # directional_derivative_matrix[j][i] = directional derivative of influence of of i on j
         influence = directional_derivative_history[t][current_agent][other_agent]
         total_count += 1
