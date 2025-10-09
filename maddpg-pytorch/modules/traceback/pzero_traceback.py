@@ -44,13 +44,13 @@ def select_agent_max_taylor_deviation(initial_patient_zero: List[int],
     return selected_agent
 
 
-def compute_positive_dij_rate(other_agent: int, 
+def compute_critical_rate(other_agent: int, 
                             current_agent: int, 
                             directional_derivative_history: List[np.ndarray],
                             detection_time: int,
                             window_size: int = 5) -> float:
     """
-    Compute the positive influence rate from other_agent to current_agent
+    Compute the critical rate from other_agent to current_agent
     in a window before detection time.
     
     Args:
@@ -61,7 +61,7 @@ def compute_positive_dij_rate(other_agent: int,
         window_size: Size of the window to look back from detection time
         
     Returns:
-        Rate of positive influence from other_agent to current_agent
+        Rate of critical zone (positive D_ij) from other_agent to current_agent
     """
     
     # Define the window
@@ -73,9 +73,9 @@ def compute_positive_dij_rate(other_agent: int,
     
     for t in range(start_time, end_time+1):
         # directional_derivative_matrix[j][i] = directional derivative of influence of of i on j
-        influence = directional_derivative_history[t][current_agent][other_agent]
+        D_ij = directional_derivative_history[t][current_agent][other_agent]
         total_count += 1
-        if influence > 0:
+        if D_ij > 0:
             positive_count += 1
     
     if total_count == 0:
@@ -86,35 +86,30 @@ def compute_positive_dij_rate(other_agent: int,
 
 def update_most_influential(current_most_influential: Optional[Dict],
                           candidate_agent: int,
-                          dij_rate: float,
-                          tie_breaking_score: float = 0.0) -> Dict:
+                          critical_rate: float,
+                          score: float = 0.0) -> Dict:
     """
-    Update the most influential agent based on Dij rate and tie-breaking score.
-    
+    Update the most influential agent based on score.
+
     Args:
         current_most_influential: Current most influential agent info
         candidate_agent: Candidate agent ID
         dij_rate: Positive influence rate
-        tie_breaking_score: Score for tie-breaking (higher is better)
+        tie_breaking_score: Score for scoring (higher is better)
         
     Returns:
         Updated most influential agent info
     """
     candidate_info = {
         'agent': candidate_agent,
-        'dij_rate': dij_rate,
-        'tie_breaking_score': tie_breaking_score
+        'critical_rate': critical_rate,
+        'score': score
     }
     if current_most_influential is None:
         return candidate_info
-    
-    # Primary metric: Dij rate (higher is better)
-    if dij_rate > current_most_influential['dij_rate']:
+
+    if candidate_info['score'] > current_most_influential['score']:
         return candidate_info
-    elif dij_rate == current_most_influential['dij_rate']:
-        # Tie-breaking: Higher score is better
-        if tie_breaking_score > current_most_influential['tie_breaking_score']:
-            return candidate_info
     
     return current_most_influential
 
@@ -127,7 +122,8 @@ def trace_back_influence_chain(current_agent: int,
                              action_influences_history: Optional[List[np.ndarray]],
                              taylor_errors_history: Optional[List[Dict]] = None,
                              ref_vals: Optional[List[List[float]]] = None,
-                             use_taylor_tiebreaking: bool = False) -> List[int]:
+                             use_taylor_scoring: bool = False,
+                             window_size: int = 5) -> List[int]:
     """
     Recursively trace back the influence chain to find the true patient zero.
     
@@ -138,9 +134,9 @@ def trace_back_influence_chain(current_agent: int,
         directional_derivative_history: History of directional derivative matrices
         detection_time: Time when fault was detected
         action_influences_history: History of action influence matrices
-        taylor_errors_history: History of Taylor errors (required for Taylor tie-breaking)
-        ref_vals: Reference Taylor error values (required for Taylor tie-breaking)
-        use_taylor_tiebreaking: If True, use Taylor deviation for tie-breaking instead of influence
+        taylor_errors_history: History of Taylor errors (required for Taylor scoring)
+        ref_vals: Reference Taylor error values (required for Taylor scoring)
+        use_taylor_scoring: If True, use Taylor deviation for scoring instead of influence
         
     Returns:
         Complete influence chain from true patient zero to detected agent
@@ -152,29 +148,39 @@ def trace_back_influence_chain(current_agent: int,
         if other_agent == current_agent:
             continue  # Skip self-comparison
         
-        # Compute influence from other_agent to current_agent
-        dij_rate = compute_positive_dij_rate(
+        # Compute critical influence rate from other_agent to current_agent
+        critical_rate = compute_critical_rate(
             other_agent, current_agent, directional_derivative_history, detection_time
         )
         
-        # Determine tie-breaking score
-        if use_taylor_tiebreaking:
-            # Use Taylor deviation for tie-breaking
-            current_error = taylor_errors_history[detection_time][other_agent]
-            tie_breaking_score = abs(current_error - ref_vals[other_agent][detection_time])
+        start_time = max(0, detection_time - window_size + 1)
+        end_time = detection_time
+        score = 0.0
+    
+        # Determine scoring score
+        if use_taylor_scoring:
+            # Use Taylor deviation for scoring
+            for t in range(start_time, end_time+1):
+                if directional_derivative_history[t][current_agent][other_agent] <= 0:
+                    continue
+                current_error = taylor_errors_history[detection_time][other_agent]
+                score += abs(current_error - ref_vals[other_agent][detection_time])
         else:
-            # Use influence score for tie-breaking (default)
-            # action_influences_history[t][i][j] = influence of j on i
-            tie_breaking_score = action_influences_history[detection_time][current_agent][other_agent]
+            # Use influence score for scoring (default)
+            tie_breaking_score = 0.0
+            for t in range(start_time, end_time+1):
+                if directional_derivative_history[t][current_agent][other_agent] <= 0:
+                    continue
+                score += action_influences_history[detection_time][current_agent][other_agent]
         
         # Update most influential agent
         most_influential = update_most_influential(
-            most_influential, other_agent, dij_rate, tie_breaking_score
+            most_influential, other_agent, critical_rate, score
         )
     
     # Stop if no influential agent found or cycle detected
-    if (most_influential is None or 
-        most_influential['dij_rate'] <= 0 or 
+    if (most_influential is None or
+        most_influential['critical_rate'] <= 0 or
         most_influential['agent'] in chain):
         return chain
     
@@ -183,7 +189,7 @@ def trace_back_influence_chain(current_agent: int,
     return trace_back_influence_chain(
         most_influential['agent'], chain, all_agents, 
         directional_derivative_history, detection_time, action_influences_history,
-        taylor_errors_history, ref_vals, use_taylor_tiebreaking
+        taylor_errors_history, ref_vals, use_taylor_scoring
     )
 
 
@@ -193,7 +199,7 @@ def perform_patient_zero_traceback(fault_timeline: List[Dict],
                                  ref_vals: List[List[float]],
                                  all_agents: List[int],
                                  action_influences_history: Optional[List[np.ndarray]] = None,
-                                 use_taylor_tiebreaking: bool = False) -> Tuple[int, List[int], int]:
+                                 use_taylor_scoring: bool = False) -> Tuple[int, List[int], int]:
     """
     Main function to perform patient zero traceback.
     
@@ -204,7 +210,7 @@ def perform_patient_zero_traceback(fault_timeline: List[Dict],
         ref_vals: Reference Taylor error values
         all_agents: List of all agent IDs
         action_influences_history: History of action influence matrices
-        use_taylor_tiebreaking: If True, use Taylor deviation for tie-breaking instead of influence
+        use_taylor_scoring: If True, use Taylor deviation for scoring instead of influence
         
     Returns:
         Tuple of (true_patient_zero, influence_chain, detection_time)
@@ -231,7 +237,7 @@ def perform_patient_zero_traceback(fault_timeline: List[Dict],
     influence_chain = trace_back_influence_chain(
         initial_patient_zero, [initial_patient_zero], all_agents,
         directional_derivative_history, detection_time, action_influences_history,
-        taylor_errors_history, ref_vals, use_taylor_tiebreaking
+        taylor_errors_history, ref_vals, use_taylor_scoring
     )
     
     # Step 4: Finalize the true patient zero

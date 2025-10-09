@@ -146,7 +146,7 @@ class ExperimentRunner:
         
         # Save decayed influence data
         lambda_decay = getattr(self.config, 'influence_decay_lambda', DEFAULT_INFLUENCE_DECAY_LAMBDA)
-        patient_zero_agent, patient_zero_time = get_patient_zero_detection(fault_timeline)
+        patient_zero_agents, patient_zero_time = get_patient_zero_detection(fault_timeline)
         
         if patient_zero_time is not None and action_influences_matrix_history:
             patient_zero_index = int(patient_zero_time)
@@ -159,7 +159,12 @@ class ExperimentRunner:
                 f'maddpg_decayed_action_influence_{attacked_agent_id}',
                 start_timestep=patient_zero_index
             )
-            print(f"Patient zero detected: agent {patient_zero_agent} at timestep {patient_zero_index}. Decayed influence saved.")
+            # Handle multiple patient zeros for display
+            if isinstance(patient_zero_agents, list):
+                patient_zero_str = ', '.join(map(str, patient_zero_agents))
+                print(f"Patient zeros detected: agents {patient_zero_str} at timestep {patient_zero_index}. Decayed influence saved.")
+            else:
+                print(f"Patient zero detected: agent {patient_zero_agents} at timestep {patient_zero_index}. Decayed influence saved.")
         else:
             print("No patient zero detection found; skipping decayed action influence export.")
         
@@ -290,10 +295,6 @@ def create_config_from_args():
                         help="Directory containing reference values")
     parser.add_argument("--attack_agent_id", type=int, default=0, 
                         help="ID of agent to attack")
-    parser.add_argument("--atk_start_step", type=int, default=-math.inf, 
-                        help="Attack start step")
-    parser.add_argument("--atk_end_step", type=int, default=math.inf, 
-                        help="Attack end step")
     parser.add_argument("--detection_method", type=str, default='mean_std', 
                         choices=['mean_std', 'median_mad', 'diff'],
                         help="Detection method to use")

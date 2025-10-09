@@ -5,16 +5,12 @@ import imageio
 import numpy as np
 from pathlib import Path
 from torch.autograd import Variable
-from utils.make_env import make_env
+from utils.smac_wrapper import SmacWrapper
 from algorithms.maddpg import MADDPG
 import os
 from datetime import datetime
 from utils.pettingzoo_wrapper import PettingZooWrapper
 from utils.misc import gumbel_softmax
-import pettingzoo.mpe as mpe
-import pettingzoo.sisl as sisl
-import pettingzoo.atari as atari
-import matplotlib.pyplot as plt
 from PIL import Image
 from collections import deque
 import supersuit
@@ -26,17 +22,9 @@ USE_CUDA = torch.cuda.is_available()
 DEVICE = 'gpu' if USE_CUDA else 'cpu'
 torch_device = torch.device("cuda" if USE_CUDA else "cpu")
 
-def preprocess_env_atari(env):
-    # as per openai baseline's MaxAndSKip wrapper, maxes over the last 2 frames
-    # to deal with frame flickering
-    env = supersuit.max_observation_v0(env, 2)
-    # skip frames for faster processing and less control
-    # to be compatible with gym, use frame_skip(env, (2,5))
-    env = supersuit.frame_skip_v0(env, 4)
-    # downscale observation for faster processing
-    env = supersuit.resize_v1(env, 84, 84)
-    # allow agent to see everything on the screen despite Atari's flickering screen problem
-    env = supersuit.frame_stack_v1(env, 4)
+def create_environment(config):
+    """Create a fresh SMAC environment instance"""
+    env = SmacWrapper.make_env(config.map_name, seed=config.seed)
     return env
 
 
@@ -87,10 +75,8 @@ def compute_taylor_delta_policy(maddpg, obs, actions, action_spaces, epsilon):
     return delta_errors
 
 
-def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=-1, seed=None):
-    # obs = env.reset()
-    obs = env.reset(seed=seed) if seed else env.reset()
-    # obs = env.reset(seed=12345) # better for speaker_listener_v3
+def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=-1):
+    obs, action_masks = env.reset()
     episode_reward = 0
     frames = []
     # initialize deque buffers for last batch_size observations
@@ -99,8 +85,18 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
     cnt = 0
 
     while True:
+        if np.random.random() < 0.1 or True:
+            # Add noise k% of the time
+            noise_scale = 1e-4
+            # noise = [torch.empty_like(torch_obs[i]).uniform_(-noise_scale, noise_scale) for i in range(maddpg.nagents)]
+            noise = [np.random.normal(loc=0, scale=noise_scale, size=obs[i].shape) for i in range(maddpg.nagents)]
+            obs = [obs[i] + noise[i] for i in range(maddpg.nagents)]
+
         torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
-        torch_agent_actions = maddpg.step(torch_obs, explore=False)
+        torch_masks = [Variable(torch.Tensor(action_masks[i]).to(torch_device), requires_grad=False)
+                       if action_masks[i] is not None else None for i in range(maddpg.nagents)]
+
+        torch_agent_actions = maddpg.step(torch_obs, explore=False, action_masks=torch_masks)
         agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
         if maddpg.discrete_action:
             actions = {agent_name: agent_actions[i].argmax() for i, agent_name in enumerate(env.possible_agents)}
@@ -114,7 +110,7 @@ def get_episode_data(env, maddpg, config, logdir, do_attack=False, atk_agent_id=
             result_deques[i].append(results[i])
         metric_vals.append([np.mean(result_deques[i]) for i in range(maddpg.nagents)])
 
-        next_obs, rewards, dones, infos = env.step(actions)
+        next_obs, rewards, dones, infos, action_masks = env.step(actions)
         episode_reward += np.sum([rewards[:,i] if env.agent_types[i] != 'adversary' else np.zeros_like(rewards[:,i]) for i in range(maddpg.nagents)])
 
         obs = next_obs
@@ -163,33 +159,20 @@ def run(config):
     # create a log directory under runs/<env_id>/<timestamp> using os and getcwd
     cwd = os.getcwd()
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    logdir = os.path.join(cwd, 'runs', f"{config.env_id}_{'discrete' if maddpg.discrete_action else 'continuous'}", f"{timestamp}_metrics_taylor_error")
+    logdir = os.path.join(cwd, 'runs', f"{config.map_name}_{'discrete' if maddpg.discrete_action else 'continuous'}", f"{timestamp}_metrics_taylor_error_{config.seed}")
     os.makedirs(logdir, exist_ok=True)
-    total_episodes = 10000
+    total_episodes = 100 #10000
 
-    try:
-        env_func = getattr(mpe, config.env_id)
-        if config.env_id == 'simple_spread_v3':
-            env = env_func.parallel_env(continuous_actions= not maddpg.discrete_action, render_mode='rgb_array', N=5)
-        else:
-            env = env_func.parallel_env(continuous_actions= not maddpg.discrete_action, render_mode='rgb_array')
-    except:
-        try:
-            env_func = getattr(sisl, config.env_id)
-            env = env_func.parallel_env(n_pursuers=5, render_mode='rgb_array') if config.env_id == 'waterworld_v4' else env_func.parallel_env(render_mode='rgb_array')
-        except:
-            env_func = getattr(atari, config.env_id)
-            env = env_func.parallel_env(render_mode='rgb_array')
-            env = preprocess_env_atari(env)
-
-    env = PettingZooWrapper.wrap_env(env)
-    env.reset()
+    if config.seed is not None:
+        np.random.seed(config.seed)
+        torch.manual_seed(config.seed)
 
     # maddpg.prep_rollouts(device=DEVICE)
     maddpg.prep_training(device=DEVICE)
 
     result_dataset = [{} for _ in range(maddpg.nagents)]
     for i in tqdm(range(total_episodes), desc="Processing episodes"):
+        env = create_environment(config)
         results = get_episode_data(env, maddpg, config, logdir)
         for timestep in range(len(results)):
             for agent_id in range(maddpg.nagents):
@@ -238,9 +221,10 @@ def run(config):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("env_id", help="Name of environment")
+    parser.add_argument("map_name", help="Name of environment")
     parser.add_argument("model_path",
                         help="model directory")
+    parser.add_argument("--seed", type=int, default=0)
 
     config = parser.parse_args()
 

@@ -9,7 +9,7 @@ from .pzero_traceback import (
     perform_patient_zero_traceback,
     trace_back_influence_chain,
     select_agent_max_taylor_deviation,
-    compute_positive_dij_rate,
+    compute_critical_rate,
     update_most_influential
 )
 
@@ -19,7 +19,7 @@ __all__ = [
     'perform_patient_zero_traceback',
     'trace_back_influence_chain', 
     'select_agent_max_taylor_deviation',
-    'compute_positive_dij_rate',
+    'compute_critical_rate',
     'update_most_influential',
     'PatientZeroAnalyzer'
 ]

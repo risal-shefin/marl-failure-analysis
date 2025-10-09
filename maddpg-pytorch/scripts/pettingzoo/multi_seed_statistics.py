@@ -1992,7 +1992,7 @@ class MultiSeedExperimentRunner:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         env_type = 'discrete' if self.maddpg.discrete_action else 'continuous'
         precompute_dir = os.path.join(cwd, 'data', 'precomputed_taylor_values', 
-                                     f"{self.config.env_id}_{env_type}_{timestamp}")
+                                     f"{self.config.env_id}_{env_type}_nagents{self.maddpg.nagents}_{timestamp}")
         
         # Precompute and save reference Taylor values
         self.precompute_and_save_taylor_values(seeds, precompute_dir)

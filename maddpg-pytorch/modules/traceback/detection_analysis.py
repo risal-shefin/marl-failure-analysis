@@ -169,13 +169,13 @@ class PatientZeroAnalyzer:
             # Perform traceback with influence tie-breaking
             true_patient_zero_influence, influence_chain_influence, _ = perform_patient_zero_traceback(
                 fault_timeline, directional_derivative_history, taylor_errors_history,
-                ref_vals, self.all_agents, action_influences_history, use_taylor_tiebreaking=False
+                ref_vals, self.all_agents, action_influences_history, use_taylor_scoring=False
             )
             
             # Perform traceback with Taylor tie-breaking
             true_patient_zero_taylor, influence_chain_taylor, _ = perform_patient_zero_traceback(
                 fault_timeline, directional_derivative_history, taylor_errors_history,
-                ref_vals, self.all_agents, action_influences_history, use_taylor_tiebreaking=True
+                ref_vals, self.all_agents, action_influences_history, use_taylor_scoring=True
             )
             
             # Process results for influence method
