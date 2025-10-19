@@ -1,5 +1,5 @@
 from ..multigrid import *
-MAX_STEPS = 1000
+MAX_STEPS = 100
 
 class CollectGameEnv(MultiGridEnv):
     """
@@ -84,6 +84,15 @@ class CollectGameEnv(MultiGridEnv):
     def _handle_drop(self, i, rewards, fwd_pos, fwd_cell):
         pass
 
+    def _handle_special_moves(self, i, rewards, fwd_pos, fwd_cell):
+        """
+        Mild penalty to discourage worthless move forward actions
+        """
+        for j,a in enumerate(self.agents):
+            # agent with index 0 gets shared penalty for all agents
+            if a.index==i or a.index==0:
+                rewards[j]-=0.01
+
     def step(self, actions):
         obs, rewards, done, info = MultiGridEnv.step(self, actions)
         return obs, rewards, done, info
@@ -93,7 +102,7 @@ class CollectGameEnv(MultiGridEnv):
 #     def __init__(self):
 #         super().__init__(size=10,
 #         num_balls=[5],
-#         agents_index = [1,2,3],
+#         agents_index = [0,1,2],
 #         balls_index=[0],
 #         balls_reward=[1],
 #         zero_sum=True)
@@ -101,8 +110,8 @@ class CollectGameEnv(MultiGridEnv):
 class CollectGame4HEnv10x10N2(CollectGameEnv):
     def __init__(self):
         super().__init__(size=10,
-        num_balls=[2, 2, 1],
-        agents_index = [1, 1, 2, 2, 3, 3],
-        balls_index=[1, 2, 3],
-        balls_reward=[1, 1, 1],
+        num_balls=[2],
+        agents_index = [0, 0, 0],   # 3 agents with index 0
+        balls_index=[0, 0],     # 2 balls with index 0
+        balls_reward=[1, 1],
         zero_sum=False)
