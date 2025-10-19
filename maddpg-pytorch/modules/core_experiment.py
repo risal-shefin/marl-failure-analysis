@@ -111,7 +111,7 @@ def get_episode_data(env, maddpg, config, logdir, ref_vals, ref_std_devs, detect
                 do_start_attack = True
                 
             # Worst action attack for discrete action space
-            if do_attack and cnt == 6:
+            if do_start_attack and attack_step_remaining > 0:
                 actions[env.possible_agents[atk_agent_id]] = torch.argmin(action_logits[atk_agent_id]).item()
                 attacked_steps.append(cnt)
                 attack_step_remaining -= 1

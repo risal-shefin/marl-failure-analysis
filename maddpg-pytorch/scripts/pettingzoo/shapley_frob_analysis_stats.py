@@ -1827,7 +1827,7 @@ def create_aggregated_influence_pie_charts(mean_frob_norms, logdir, n_agents):
     fig.legend(handles=legend_patches, loc='lower center', ncol=min(n_agents, 5), 
                bbox_to_anchor=(0.5, -0.05), fontsize=10)
     
-    plt.suptitle('Mean Agent Influence Analysis (Pairwise Frobenius Norms)', 
+    plt.suptitle('Agent Influence Analysis (Pairwise Frobenius Norms)', 
                  fontsize=16, fontweight='bold', y=0.98)
     plt.tight_layout(rect=[0, 0.1, 1, 0.95])  # Leave space for legend at bottom
     

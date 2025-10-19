@@ -128,7 +128,7 @@ def run(config):
         print(f"Ep#{ep_i+1},rew:{np.mean(ep_rews):.3f}", flush=True)
 
         if ep_i % config.save_interval < config.n_rollout_threads:
-            eval_reward = eval(eval_env, config.discrete_action, maddpg, n_episodes=10)
+            eval_reward = eval(eval_env, config.discrete_action, maddpg, n_episodes=5)
             if eval_reward >= best_eval_reward:
                 maddpg.save(run_dir / f'model_{eval_reward}.pt')
                 best_eval_reward = eval_reward
@@ -153,7 +153,7 @@ if __name__ == '__main__':
     parser.add_argument("--n_training_threads", default=6, type=int)
     parser.add_argument("--buffer_length", default=int(1e6), type=int)
     parser.add_argument("--n_episodes", default=10000000, type=int)
-    parser.add_argument("--episode_length", default=25, type=int)
+    parser.add_argument("--episode_length", default=100, type=int)
     parser.add_argument("--steps_per_update", default=100, type=int)
     parser.add_argument("--batch_size",
                         default=1024, type=int,

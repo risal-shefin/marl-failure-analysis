@@ -459,7 +459,7 @@ def get_episode_data(env, maddpg, config, logdir, ref_vals, ref_std_devs, detect
     observation_influences_matrix_history = []  # list over timesteps of N x N observation influence matrices
     second_order_observation_influences_history = []  # list over timesteps of N x N second-order observation influence matrices (∂²Q_i/(∂obs_j)²)
     do_start_attack = False
-    attack_step_remaining = 5
+    attack_step_remaining = 10
 
     # Fault detection tracking
     fault_first_detected = {}  # agent_id -> timestep first detected
@@ -502,7 +502,7 @@ def get_episode_data(env, maddpg, config, logdir, ref_vals, ref_std_devs, detect
             atk_agent_action_probs = torch.softmax(action_logits[atk_agent_id].squeeze(), dim=0)
             atk_agent_log_probs = torch.log(atk_agent_action_probs)
             atk_agent_entropy = -torch.sum(atk_agent_action_probs * atk_agent_log_probs)
-            if do_attack and cnt >= 20:
+            if do_attack and cnt >= 15:
                 do_start_attack = True
             # worst action attack for discrete action space
             # if do_attack and np.random.rand() < 0.75:
