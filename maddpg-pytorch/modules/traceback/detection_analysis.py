@@ -256,7 +256,6 @@ class PatientZeroAnalyzer:
         # Overall accuracy after traceback
         total_correct_final = stats['correct_detections'] + stats['traceback_successful']
         stats['final_accuracy_rate'] = (total_correct_final / total) * 100
-        
         return stats
     
     def get_statistics_dual(self) -> Dict[str, Dict[str, Any]]:

@@ -18,6 +18,7 @@ class GymMultiGridWrapper:
         else:
             self.observation_space = [env.observation_space for _ in range(self.nagents)]
         self.agent_types = ["agent" for _ in range(self.nagents)]
+        self.possible_agents = [i for i in range(self.nagents)]
 
     @staticmethod
     def wrap_env(env, do_flat_obs=False):
@@ -52,12 +53,14 @@ class GymMultiGridWrapper:
         return obs
 
     def step(self, actions):
+        if isinstance(actions, dict):
+            actions = list(actions.values())
         obs, rewards, done, info = self.env.step(actions)
         if self.do_flat_obs:
             obs = [obs[i].flatten() for i in range(self.nagents)]
         dones = [done for _ in range(self.nagents)]
         infos = [info for _ in range(self.nagents)]
-        rewards = np.array([rewards])
+        rewards = np.array(rewards)
         dones = np.array([dones])
         infos = np.array([infos])
         return obs, rewards, dones, infos
