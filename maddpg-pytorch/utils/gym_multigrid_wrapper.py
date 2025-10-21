@@ -60,7 +60,7 @@ class GymMultiGridWrapper:
             obs = [obs[i].flatten() for i in range(self.nagents)]
         dones = [done for _ in range(self.nagents)]
         infos = [info for _ in range(self.nagents)]
-        rewards = np.array(rewards)
+        rewards = np.array([rewards])
         dones = np.array([dones])
         infos = np.array([infos])
         return obs, rewards, dones, infos

@@ -153,8 +153,9 @@ class CollectGameEnv(MultiGridEnv):
         return shared_rewards
 
     def step(self, actions):
-        obs, _, done, info = MultiGridEnv.step(self, actions)
-        rewards = self._compute_shared_distance_rewards()
+        obs, rewards, done, info = MultiGridEnv.step(self, actions)
+        distance_rewards = self._compute_shared_distance_rewards()
+        rewards += distance_rewards   # element-wise (index-wise) sum
         return obs, rewards, done, info
 
 
@@ -173,5 +174,5 @@ class CollectGame4HEnv10x10N2(CollectGameEnv):
         num_balls=[2],
         agents_index = [0, 0, 0],   # 3 agents with index 0
         balls_index=[0, 0],     # 2 balls with index 0
-        balls_reward=[1, 1],
+        balls_reward=[5, 5],    # rewards to pick balls
         zero_sum=False)
