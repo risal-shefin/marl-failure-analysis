@@ -42,6 +42,10 @@ class CollectGameEnv(MultiGridEnv):
             agent_view_size=view_size
         )
 
+        # Track the positions of balls grouped by their color index so we
+        # don't need to rescan the grid every step.
+        self._ball_positions_by_color = {}
+
 
 
     def _gen_grid(self, width, height):
@@ -53,9 +57,13 @@ class CollectGameEnv(MultiGridEnv):
         self.grid.vert_wall(self.world, 0, 0)
         self.grid.vert_wall(self.world, width-1, 0)
 
+        # Reset tracked ball positions whenever a new grid is generated.
+        self._ball_positions_by_color = {}
+
         for number, index, reward in zip(self.num_balls, self.balls_index, self.balls_reward):
             for i in range(number):
-                self.place_obj(Ball(self.world, index, reward))
+                pos = self.place_obj(Ball(self.world, index, reward))
+                self._ball_positions_by_color.setdefault(index, set()).add(tuple(pos))
 
         # Randomize the player start position and orientation
         for a in self.agents:
@@ -79,6 +87,7 @@ class CollectGameEnv(MultiGridEnv):
                 if fwd_cell.index in [0, self.agents[i].index]:
                     fwd_cell.cur_pos = np.array([-1, -1])
                     self.grid.set(*fwd_pos, None)
+                    self._remove_ball_position(fwd_cell.index, tuple(fwd_pos))
                     self._reward(i, rewards, fwd_cell.reward)
 
     def _handle_drop(self, i, rewards, fwd_pos, fwd_cell):
@@ -93,8 +102,59 @@ class CollectGameEnv(MultiGridEnv):
             if a.index==i or a.index==0:
                 rewards[j]-=0.01
 
+    def _remove_ball_position(self, color_index, position):
+        """Remove a ball from the cached positions when it is picked up."""
+        positions = self._ball_positions_by_color.get(color_index)
+        if not positions:
+            return
+
+        if position in positions:
+            positions.remove(position)
+            if not positions:
+                del self._ball_positions_by_color[color_index]
+
+    def _compute_shared_distance_rewards(self):
+        """Compute shared rewards based on Manhattan distance to matching balls."""
+
+        # Group agents by their color index
+        color_to_agent_indices = {}
+        for agent_idx, agent in enumerate(self.agents):
+            color_to_agent_indices.setdefault(agent.index, []).append(agent_idx)
+
+        shared_rewards = np.zeros(len(self.agents), dtype=float)
+
+        for color, agent_indices in color_to_agent_indices.items():
+            ball_positions = self._ball_positions_by_color.get(color)
+            if not ball_positions:
+                continue
+
+            total_distance = 0.0
+
+            for ball_pos in ball_positions:
+                nearest_distance = None
+
+                for agent_idx in agent_indices:
+                    agent_pos = self.agents[agent_idx].pos
+                    if agent_pos is None:
+                        continue
+
+                    distance = abs(agent_pos[0] - ball_pos[0]) + abs(agent_pos[1] - ball_pos[1])
+                    if nearest_distance is None or distance < nearest_distance:
+                        nearest_distance = distance
+
+                if nearest_distance is not None:
+                    total_distance += nearest_distance
+
+            reward_value = -float(total_distance)
+
+            for agent_idx in agent_indices:
+                shared_rewards[agent_idx] = reward_value
+
+        return shared_rewards
+
     def step(self, actions):
-        obs, rewards, done, info = MultiGridEnv.step(self, actions)
+        obs, _, done, info = MultiGridEnv.step(self, actions)
+        rewards = self._compute_shared_distance_rewards()
         return obs, rewards, done, info
 
 
