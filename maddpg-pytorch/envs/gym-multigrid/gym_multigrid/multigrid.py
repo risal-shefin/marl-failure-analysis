@@ -351,6 +351,9 @@ class Ball(WorldObj):
         self.index = index
         self.reward = reward
 
+    def can_overlap(self):
+        return True
+
     def can_pickup(self):
         return True
 
@@ -833,41 +836,44 @@ class Grid:
         return mask
 
 class Actions:
-    available=['still', 'left', 'right', 'forward', 'pickup', 'drop', 'toggle', 'done']
+    available=['still', 'left', 'up', 'right', 'down', 'pickup', 'drop', 'toggle', 'done']
 
     still = 0
-    # Turn left, turn right, move forward
+    # Move left, up, right, down
     left = 1
-    right = 2
-    forward = 3
+    up = 2
+    right = 3
+    down = 4
 
     # Pick up an object
-    pickup = 4
+    pickup = 5
     # Drop an object
-    drop = 5
+    drop = 6
     # Toggle/activate an object
-    toggle = 6
+    toggle = 7
 
     # Done completing task
-    done = 7
+    done = 8
 
 class SmallActions:
-    available=['still', 'left', 'right', 'forward']
+    available=['still', 'left', 'up', 'right', 'down']
 
-    # Turn left, turn right, move forward
+    # Move left, up, right, down
     still = 0
     left = 1
-    right = 2
-    forward = 3
+    up = 2
+    right = 3
+    down = 4
 
 class MineActions:
-    available=['still', 'left', 'right', 'forward', 'build']
+    available=['still', 'left', 'up', 'right', 'down', 'build']
 
     still = 0
     left = 1
-    right = 2
-    forward = 3
-    build = 4
+    up = 2
+    right = 3
+    down = 4
+    build = 5
 
 class MultiGridEnv(gym.Env):
     """
@@ -1256,30 +1262,43 @@ class MultiGridEnv(gym.Env):
             if self.agents[i].terminated or self.agents[i].paused or not self.agents[i].started or actions[i] == self.actions.still:
                 continue
 
-            # Get the position in front of the agent
-            fwd_pos = self.agents[i].front_pos
+            # Map action to target direction
+            # right=0, down=1, left=2, up=3 (based on DIR_TO_VEC)
+            target_dir = None
+            if actions[i] == self.actions.right:
+                target_dir = 0  # Right
+            elif actions[i] == self.actions.down:
+                target_dir = 1  # Down
+            elif actions[i] == self.actions.left:
+                target_dir = 2  # Left
+            elif actions[i] == self.actions.up:
+                target_dir = 3  # Up
 
-            # Get the contents of the cell in front of the agent
-            fwd_cell = self.grid.get(*fwd_pos)
-
-            # Rotate left
-            if actions[i] == self.actions.left:
-                self.agents[i].dir -= 1
-                if self.agents[i].dir < 0:
-                    self.agents[i].dir += 4
-
-            # Rotate right
-            elif actions[i] == self.actions.right:
-                self.agents[i].dir = (self.agents[i].dir + 1) % 4
-
-            # Move forward
-            elif actions[i] == self.actions.forward:
+            # Handle directional movement actions
+            if target_dir is not None:
+                # Rotate agent to face the target direction
+                self.agents[i].dir = target_dir
+                
+                # Get the position in the target direction
+                fwd_pos = self.agents[i].front_pos
+                
+                # Get the contents of the cell in the target direction
+                fwd_cell = self.grid.get(*fwd_pos)
+                
+                # Move in the target direction
                 if fwd_cell is not None:
                     if fwd_cell.type == 'goal':
                         done = True
                         self._reward(i, rewards, 1)
                     elif fwd_cell.type == 'switch':
                         self._handle_switch(i, rewards, fwd_pos, fwd_cell)
+                    elif fwd_cell.type == 'ball' and fwd_cell.can_pickup():
+                        # Automatically pick up the ball when moving into its cell
+                        self.agents[i].carrying = fwd_cell
+                        self.grid.set(*fwd_pos, self.agents[i])
+                        self.grid.set(*self.agents[i].pos, None)
+                        self.agents[i].pos = fwd_pos
+                        self._handle_pickup(i, rewards, fwd_pos, fwd_cell)
                 elif fwd_cell is None or fwd_cell.can_overlap():
                     self.grid.set(*fwd_pos, self.agents[i])
                     self.grid.set(*self.agents[i].pos, None)
@@ -1291,14 +1310,20 @@ class MultiGridEnv(gym.Env):
 
             # Pick up an object
             elif actions[i] == self.actions.pickup:
+                fwd_pos = self.agents[i].front_pos
+                fwd_cell = self.grid.get(*fwd_pos)
                 self._handle_pickup(i, rewards, fwd_pos, fwd_cell)
 
             # Drop an object
             elif actions[i] == self.actions.drop:
+                fwd_pos = self.agents[i].front_pos
+                fwd_cell = self.grid.get(*fwd_pos)
                 self._handle_drop(i, rewards, fwd_pos, fwd_cell)
 
             # Toggle/activate an object
             elif actions[i] == self.actions.toggle:
+                fwd_pos = self.agents[i].front_pos
+                fwd_cell = self.grid.get(*fwd_pos)
                 if fwd_cell:
                     fwd_cell.toggle(self, fwd_pos)
 

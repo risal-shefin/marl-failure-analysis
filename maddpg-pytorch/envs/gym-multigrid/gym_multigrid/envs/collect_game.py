@@ -1,6 +1,29 @@
 from ..multigrid import *
 MAX_STEPS = 100
 
+# class CollectGameActions:
+#     available=['still', 'left', 'right', 'forward', 'pickup']
+
+#     still = 0
+#     # Turn left, turn right, move forward
+#     left = 1
+#     right = 2
+#     forward = 3
+
+#     # Pick up an object
+#     pickup = 4
+
+class CollectGameActions:
+    available=['still', 'left', 'up', 'right', 'down']
+
+    still = 0
+    # Move left, up, right, down
+    left = 1
+    up = 2
+    right = 3
+    down = 4
+
+
 class CollectGameEnv(MultiGridEnv):
     """
     Environment in which the agents have to collect the balls
@@ -17,7 +40,6 @@ class CollectGameEnv(MultiGridEnv):
         balls_reward=[],
         zero_sum = False,
         view_size=7
-
     ):
         self.num_balls = num_balls
         self.balls_index = balls_index
@@ -39,12 +61,14 @@ class CollectGameEnv(MultiGridEnv):
             # Set this to True for maximum speed
             see_through_walls=False,
             agents=agents,
-            agent_view_size=view_size
+            agent_view_size=view_size,
+            actions_set=CollectGameActions
         )
 
         # Track the positions of balls grouped by their color index so we
         # don't need to rescan the grid every step.
         self._ball_positions_by_color = {}
+        self._prev_distances = {}
 
 
 
@@ -86,7 +110,8 @@ class CollectGameEnv(MultiGridEnv):
             if fwd_cell.can_pickup():
                 if fwd_cell.index in [0, self.agents[i].index]:
                     fwd_cell.cur_pos = np.array([-1, -1])
-                    self.grid.set(*fwd_pos, None)
+                    # Don't set grid to None here - the agent is already placed at fwd_pos in the step function
+                    # self.grid.set(*fwd_pos, None)
                     self._remove_ball_position(fwd_cell.index, tuple(fwd_pos))
                     self._reward(i, rewards, fwd_cell.reward)
 
@@ -94,13 +119,15 @@ class CollectGameEnv(MultiGridEnv):
         pass
 
     def _handle_special_moves(self, i, rewards, fwd_pos, fwd_cell):
+        return
         """
-        Mild penalty to discourage worthless move forward actions
+        Small reward for valid movement to encourage exploration
         """
-        for j,a in enumerate(self.agents):
-            # agent with index 0 gets shared penalty for all agents
-            if a.index==i or a.index==0:
-                rewards[j]-=0.01
+        if fwd_cell is None or fwd_cell.can_overlap():
+            # Only reward if the move was valid (agent actually moved)
+            for j, a in enumerate(self.agents):
+                if a.index == i or a.index == 0:
+                    rewards[j] -= 0.01  # Small positive reward for moving
 
     def _remove_ball_position(self, color_index, position):
         """Remove a ball from the cached positions when it is picked up."""
@@ -114,19 +141,20 @@ class CollectGameEnv(MultiGridEnv):
                 del self._ball_positions_by_color[color_index]
 
     def _compute_shared_distance_rewards(self):
-        """Compute shared rewards based on Manhattan distance to matching balls."""
-
-        # Group agents by their color index
+        """Compute shaped rewards based on change in Manhattan distance to nearest ball."""
+        
         color_to_agent_indices = {}
         for agent_idx, agent in enumerate(self.agents):
             color_to_agent_indices.setdefault(agent.index, []).append(agent_idx)
 
         shared_rewards = np.zeros(len(self.agents), dtype=float)
+        is_ball_present = False
 
         for color, agent_indices in color_to_agent_indices.items():
             ball_positions = self._ball_positions_by_color.get(color)
             if not ball_positions:
                 continue
+            is_ball_present = True
 
             total_distance = 0.0
 
@@ -148,14 +176,22 @@ class CollectGameEnv(MultiGridEnv):
             reward_value = -float(total_distance)
 
             for agent_idx in agent_indices:
-                shared_rewards[agent_idx] = reward_value
+                shared_rewards[agent_idx] += reward_value
+                # Potential-based shaping: reward for getting closer
+                # prev_distance = self._prev_distances.get(agent_idx, total_distance)
+                # distance_change = prev_distance - total_distance
+                # shared_rewards[agent_idx] += distance_change
+                # self._prev_distances[agent_idx] = total_distance
+                # shared_rewards[agent_idx] += -1 if abs(reward_value)>0 else 0
 
-        return shared_rewards
+        return shared_rewards, is_ball_present
 
     def step(self, actions):
         obs, rewards, done, info = MultiGridEnv.step(self, actions)
-        distance_rewards = self._compute_shared_distance_rewards()
+        distance_rewards, is_ball_present = self._compute_shared_distance_rewards()
         rewards += distance_rewards   # element-wise (index-wise) sum
+        if not is_ball_present:
+            done = True # end episode if all balls are collected
         return obs, rewards, done, info
 
 
