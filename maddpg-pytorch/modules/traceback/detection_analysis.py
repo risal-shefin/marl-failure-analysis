@@ -7,6 +7,7 @@ to identify failed cases and perform traceback when necessary.
 
 import numpy as np
 import pandas as pd
+import math
 from typing import List, Dict, Tuple, Optional, Any
 from .pzero_traceback import perform_patient_zero_traceback
 from modules.detection import get_patient_zero_detection
@@ -239,6 +240,12 @@ class PatientZeroAnalyzer:
         total = stats['total_cases']
         
         if total == 0:
+            stats['correct_detection_rate'] = math.nan
+            stats['incorrect_detection_rate'] = math.nan
+            stats['threshold_failure_rate'] = math.nan
+            stats['no_detection_rate'] = math.nan
+            stats['traceback_success_rate'] = math.nan
+            stats['final_accuracy_rate'] = math.nan
             return stats
         
         # Calculate percentages

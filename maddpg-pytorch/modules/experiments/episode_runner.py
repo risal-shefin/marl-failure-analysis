@@ -107,9 +107,9 @@ class EpisodeRunner:
                 frames.append(frame)
             
             # Store rewards for each agent
-            rewards_list = [rewards[agent_name] for agent_name in self.env.possible_agents]
-            rewards_history.append(rewards_list)
-            episode_reward += sum(rewards_list)
+            agent_rewards = np.array(rewards).squeeze()
+            rewards_history.append(agent_rewards)
+            episode_reward += np.sum(agent_rewards)
             
             obs = next_obs
             timestep += 1
@@ -253,9 +253,9 @@ class EpisodeRunner:
                 frames.append(frame)
             
             # Store rewards for each agent
-            rewards_list = [rewards[agent_name] for agent_name in self.env.possible_agents]
-            rewards_history.append(rewards_list)
-            episode_reward += sum(rewards_list)
+            agent_rewards = np.array(rewards).squeeze()
+            rewards_history.append(agent_rewards)
+            episode_reward += np.sum(agent_rewards)
             
             obs = next_obs
             timestep += 1
