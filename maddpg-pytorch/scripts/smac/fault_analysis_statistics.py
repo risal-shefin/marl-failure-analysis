@@ -3,7 +3,7 @@ Multi-seed statistics experiment for analyzing action influence-based attacks.
 This script performs experiments across multiple seeds to evaluate the effectiveness
 of attacking at high vs low influence timesteps.
 
-Adapted for gym_multigrid_wrapper environments (soccer, collect, etc.)
+Adapted for SMAC environments.
 
 REFACTORED VERSION - Uses modular components from modules/ directory.
 """
@@ -11,11 +11,13 @@ import argparse
 import os
 import math
 import json
+import random
+import numpy as np
+import torch
 from datetime import datetime
 from tqdm import tqdm
 
 from algorithms.maddpg import MADDPG
-from utils.gym_multigrid_wrapper import GymMultiGridWrapper
 
 # Import all the modular components
 from modules.constants import DEVICE
@@ -23,7 +25,7 @@ from modules.detection import get_patient_zero_detection
 from modules.traceback import PatientZeroAnalyzer
 
 # Import new modular components from organized subfolders
-from modules.experiments import ReferenceTaylorManager, EpisodeRunner, ExperimentDataLogger
+from modules.experiments import SmacReferenceTaylorManager, SmacEpisodeRunner, ExperimentDataLogger
 from modules.analysis import InfluenceAnalyzer
 from modules.results import AccuracyComputer, ResultsSaver
 from modules.visualization.utils import save_frames_as_gif
@@ -73,23 +75,23 @@ class MultiSeedExperimentRunner:
         env_type = 'discrete' if self.maddpg.discrete_action else 'continuous'
         
         if self.config.single_seed:
-            self.logdir = os.path.join(cwd, 'runs', f"{self.config.env_id}_{env_type}_single_seed_detection_stats", 
+            self.logdir = os.path.join(cwd, 'runs', f"{self.config.map_name}_{env_type}_single_seed_detection_stats", 
                                       f"{timestamp}_nagents{self.maddpg.nagents}_seed{self.config.seed}")
         else:
-            self.logdir = os.path.join(cwd, 'runs', f"{self.config.env_id}_{env_type}_multi_seed_detection_stats", 
+            self.logdir = os.path.join(cwd, 'runs', f"{self.config.map_name}_{env_type}_multi_seed_detection_stats", 
                                       f"{timestamp}_nagents{self.maddpg.nagents}_total_experiments{self.total_experiments}")
         os.makedirs(self.logdir, exist_ok=True)
         
-        # Create environment using GymMultiGridWrapper
-        self.env = GymMultiGridWrapper.make_and_wrap_env(self.config.env_id, do_flat_obs=True)
+        # Create environment (will be created per episode in SMAC)
+        self.env = None
         
         # Prepare MADDPG for training mode
         device_str = 'gpu' if DEVICE == 'gpu' else 'cpu'
         self.maddpg.prep_training(device=device_str)
         
-        # Initialize modular components
-        self.taylor_manager = ReferenceTaylorManager(self.maddpg, self.env, self.config)
-        self.episode_runner = EpisodeRunner(self.maddpg, self.env)
+        # Initialize modular components - use SMAC-specific components
+        self.taylor_manager = SmacReferenceTaylorManager(self.maddpg, self.config.map_name, self.config)
+        self.episode_runner = SmacEpisodeRunner(self.maddpg, self.config.map_name)
         self.influence_analyzer = InfluenceAnalyzer()
         self.metrics_computer = AttackMetricsComputer(gamma=0.99)
         self.data_logger = ExperimentDataLogger(self.maddpg.nagents)
@@ -169,7 +171,7 @@ class MultiSeedExperimentRunner:
                     print(f"  Min influence timesteps (negative derivatives): {min_influence_t}")
                     continue
                 
-                print(f"Max influence timestep: {max_influence_t}, Min influence timestep: {min_influence_t}")
+                print(f"Max influence timesteps: {max_influence_t}, Min influence timesteps: {min_influence_t}")
                 
                 # Step 5: Run attacked episodes using episode runner
                 high_influence_attack = self.episode_runner.run_attacked_episode(
@@ -185,14 +187,11 @@ class MultiSeedExperimentRunner:
                 # Save attacked episode GIFs in single-seed mode
                 if collect_frames:
                     if 'frames' in high_influence_attack:
-                        gif_path = os.path.join(self.logdir, 
-                            f"high_influence_attack_seed{seed}_agent{agent_i}_to_agent{agent_j}.gif")
+                        gif_path = os.path.join(self.logdir, f"high_attack_seed{seed}_agent{agent_i}_to_agent{agent_j}.gif")
                         save_frames_as_gif(high_influence_attack['frames'], gif_path, fps=10)
                         print(f"Saved high influence attack GIF to: {gif_path}")
-                    
                     if 'frames' in low_influence_attack:
-                        gif_path = os.path.join(self.logdir, 
-                            f"low_influence_attack_seed{seed}_agent{agent_i}_to_agent{agent_j}.gif")
+                        gif_path = os.path.join(self.logdir, f"low_attack_seed{seed}_agent{agent_i}_to_agent{agent_j}.gif")
                         save_frames_as_gif(low_influence_attack['frames'], gif_path, fps=10)
                         print(f"Saved low influence attack GIF to: {gif_path}")
                 
@@ -361,8 +360,7 @@ class MultiSeedExperimentRunner:
     
     def cleanup(self):
         """Clean up resources."""
-        if self.env:
-            self.env.close()
+        pass
     
     def run_precomputation_mode(self):
         """Run precomputation mode to generate reference Taylor values."""
@@ -377,7 +375,7 @@ class MultiSeedExperimentRunner:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         env_type = 'discrete' if self.maddpg.discrete_action else 'continuous'
         precompute_dir = os.path.join(cwd, 'data', 'precomputed_taylor_values', 
-                                     f"{self.config.env_id}_{env_type}_nagents{self.maddpg.nagents}_{timestamp}")
+                                     f"{self.config.map_name}_{env_type}_nagents{self.maddpg.nagents}_{timestamp}")
         
         # Precompute and save reference Taylor values using taylor manager
         self.taylor_manager.precompute_multiple_seeds(seeds, precompute_dir)
@@ -405,7 +403,7 @@ class MultiSeedExperimentRunner:
         # Patient zero analysis summary and results saving
         self.patient_zero_analyzer.print_summary_dual()
         patient_zero_stats = self.patient_zero_analyzer.get_statistics_dual()
-        
+
         # Save patient zero analysis results
         pz_analysis_file = os.path.join(self.logdir, "patient_zero_analysis_detailed.csv")
         pz_summary_file = os.path.join(self.logdir, "patient_zero_analysis_summary.json")
@@ -433,9 +431,9 @@ class MultiSeedExperimentRunner:
 def create_config_from_args():
     """Create configuration from command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Multi-seed or single-seed statistics experiment for gym_multigrid environments"
+        description="Multi-seed or single-seed statistics experiment for SMAC environments"
     )
-    parser.add_argument("env_id", help="Name of environment (e.g., 'soccer', 'collect')")
+    parser.add_argument("map_name", help="Name of SMAC map")
     parser.add_argument("model_path", help="Model directory")
     parser.add_argument("--total_experiments", type=int, default=100,
                         help="Total number of seed experiments to run (for multi-seed mode)")

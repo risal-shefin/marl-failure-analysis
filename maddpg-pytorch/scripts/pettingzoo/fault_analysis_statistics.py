@@ -3,7 +3,7 @@ Multi-seed statistics experiment for analyzing action influence-based attacks.
 This script performs experiments across multiple seeds to evaluate the effectiveness
 of attacking at high vs low influence timesteps.
 
-Adapted for gym_multigrid_wrapper environments (soccer, collect, etc.)
+Adapted for PettingZoo environments (simple_spread, simple_adversary, etc.)
 
 REFACTORED VERSION - Uses modular components from modules/ directory.
 """
@@ -11,14 +11,17 @@ import argparse
 import os
 import math
 import json
+import random
+import numpy as np
+import torch
 from datetime import datetime
 from tqdm import tqdm
 
 from algorithms.maddpg import MADDPG
-from utils.gym_multigrid_wrapper import GymMultiGridWrapper
 
 # Import all the modular components
 from modules.constants import DEVICE
+from modules.environment import create_environment
 from modules.detection import get_patient_zero_detection
 from modules.traceback import PatientZeroAnalyzer
 
@@ -80,8 +83,8 @@ class MultiSeedExperimentRunner:
                                       f"{timestamp}_nagents{self.maddpg.nagents}_total_experiments{self.total_experiments}")
         os.makedirs(self.logdir, exist_ok=True)
         
-        # Create environment using GymMultiGridWrapper
-        self.env = GymMultiGridWrapper.make_and_wrap_env(self.config.env_id, do_flat_obs=True)
+        # Create environment
+        self.env = create_environment(self.config, self.maddpg)
         
         # Prepare MADDPG for training mode
         device_str = 'gpu' if DEVICE == 'gpu' else 'cpu'
@@ -185,14 +188,12 @@ class MultiSeedExperimentRunner:
                 # Save attacked episode GIFs in single-seed mode
                 if collect_frames:
                     if 'frames' in high_influence_attack:
-                        gif_path = os.path.join(self.logdir, 
-                            f"high_influence_attack_seed{seed}_agent{agent_i}_to_agent{agent_j}.gif")
+                        gif_path = os.path.join(self.logdir, f"high_influence_attack_seed{seed}_agent{agent_i}_to_agent{agent_j}.gif")
                         save_frames_as_gif(high_influence_attack['frames'], gif_path, fps=10)
                         print(f"Saved high influence attack GIF to: {gif_path}")
                     
                     if 'frames' in low_influence_attack:
-                        gif_path = os.path.join(self.logdir, 
-                            f"low_influence_attack_seed{seed}_agent{agent_i}_to_agent{agent_j}.gif")
+                        gif_path = os.path.join(self.logdir, f"low_influence_attack_seed{seed}_agent{agent_i}_to_agent{agent_j}.gif")
                         save_frames_as_gif(low_influence_attack['frames'], gif_path, fps=10)
                         print(f"Saved low influence attack GIF to: {gif_path}")
                 
@@ -433,9 +434,9 @@ class MultiSeedExperimentRunner:
 def create_config_from_args():
     """Create configuration from command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Multi-seed or single-seed statistics experiment for gym_multigrid environments"
+        description="Multi-seed or single-seed statistics experiment for PettingZoo environments"
     )
-    parser.add_argument("env_id", help="Name of environment (e.g., 'soccer', 'collect')")
+    parser.add_argument("env_id", help="Name of environment (e.g., 'simple_spread', 'simple_adversary')")
     parser.add_argument("model_path", help="Model directory")
     parser.add_argument("--total_experiments", type=int, default=100,
                         help="Total number of seed experiments to run (for multi-seed mode)")

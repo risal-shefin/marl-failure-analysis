@@ -15,6 +15,7 @@ from .influence_metrics import (
     collect_agent_q_values,
     compute_pairwise_action_directional_second_derivatives
 )
+from .attack_metrics import AttackMetricsComputer
 
 __all__ = [
     'compute_taylor_delta_policy',
@@ -26,5 +27,6 @@ __all__ = [
     'compute_pairwise_observation_influences',
     'compute_second_order_observation_influences',
     'collect_agent_q_values',
-    'compute_pairwise_action_directional_second_derivatives'
+    'compute_pairwise_action_directional_second_derivatives',
+    'AttackMetricsComputer',
 ]

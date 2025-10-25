@@ -1,5 +1,5 @@
 """
-Episode execution logic for normal and attacked episodes.
+SMAC-specific episode execution logic for normal and attacked episodes.
 """
 import random
 import numpy as np
@@ -7,6 +7,7 @@ import torch
 from torch.autograd import Variable
 from collections import deque
 
+from utils.smac_wrapper import SmacWrapper
 from modules.constants import torch_device, K_SIGMA
 from modules.metrics import (
     compute_pairwise_action_influences,
@@ -18,21 +19,21 @@ from modules.metrics import (
 ATTACK_WINDOW_LENGTH = 5
 
 
-class EpisodeRunner:
+class SmacEpisodeRunner:
     """
-    Handles execution of normal and attacked episodes.
+    Handles execution of normal and attacked episodes for SMAC environments.
     """
     
-    def __init__(self, maddpg, env):
+    def __init__(self, maddpg, map_name):
         """
-        Initialize episode runner.
+        Initialize SMAC episode runner.
         
         Args:
             maddpg: MADDPG model instance
-            env: Environment instance
+            map_name: Name of the SMAC map
         """
         self.maddpg = maddpg
-        self.env = env
+        self.map_name = map_name
         self.directional_derivatives_history = []
     
     def run_normal_episode(self, seed, collect_frames=False):
@@ -57,75 +58,73 @@ class EpisodeRunner:
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
         
-        obs = self.env.reset(seed=seed)
+        env = SmacWrapper.make_env(self.map_name, seed=seed)
+        obs, action_masks = env.reset()
         action_influences_history = []
         q_values_history = []
         rewards_history = []
         timestep = 0
         episode_reward = 0
-        # Collect frame if requested
+        
+        # Collect initial frame if requested
         if collect_frames:
-            try:
-                frame = self.env.render(mode='rgb_array')
-            except TypeError:
-                frame = self.env.render()
+            frame = env.render()
             frames.append(frame)
         
         while True:
-            torch_obs = [Variable(torch.tensor([obs[i]], dtype=torch.float32).to(torch_device), 
-                                requires_grad=False) 
+            torch_obs = [torch.tensor([obs[i]], dtype=torch.float32, requires_grad=False).to(torch_device)
                         for i in range(self.maddpg.nagents)]
+            torch_masks = [torch.tensor(action_masks[i], requires_grad=False).to(torch_device)
+                           if action_masks[i] is not None else None for i in range(self.maddpg.nagents)]
             
             # Get actions
-            torch_agent_actions = self.maddpg.step(torch_obs, explore=False)
+            torch_agent_actions = self.maddpg.step(torch_obs, explore=False, action_masks=torch_masks)
             agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
             
             if self.maddpg.discrete_action:
                 actions = {agent_name: agent_actions[i].argmax() 
-                         for i, agent_name in enumerate(self.env.possible_agents)}
+                         for i, agent_name in enumerate(env.possible_agents)}
             else:
                 actions = {agent_name: agent_actions[i].squeeze() 
-                         for i, agent_name in enumerate(self.env.possible_agents)}
+                         for i, agent_name in enumerate(env.possible_agents)}
             
             # Collect Q-values
-            q_values = collect_agent_q_values(self.maddpg, obs, list(actions.values()), self.env.action_space)
+            q_values = collect_agent_q_values(
+                self.maddpg, obs, list(actions.values()), env.action_space
+            )
             q_values_history.append(q_values)
             
             # Compute pairwise action influences
-            action_influences_matrix = compute_pairwise_action_influences(
-                self.maddpg, obs, list(actions.values()), self.env.action_space
+            pairwise_action_influences = compute_pairwise_action_influences(
+                self.maddpg, obs, list(actions.values()), env.action_space
             )
-            action_influences_history.append(action_influences_matrix)
+            action_influences_history.append(pairwise_action_influences)
             
-            # Compute directional second derivatives
-            directional_derivatives_matrix = compute_pairwise_action_directional_second_derivatives(
-                self.maddpg, obs, list(actions.values()), self.env.action_space
+            # Compute directional second derivatives for influence analysis
+            directional_second_derivatives = compute_pairwise_action_directional_second_derivatives(
+                self.maddpg, obs, list(actions.values()), env.action_space
             )
-            self.directional_derivatives_history.append(directional_derivatives_matrix)
+            self.directional_derivatives_history.append(directional_second_derivatives)
             
             # Environment step
-            next_obs, rewards, dones, infos = self.env.step(actions)
+            next_obs, rewards, dones, infos, action_masks = env.step(actions)
             
-            # Collect frame if requested
-            if collect_frames:
-                try:
-                    frame = self.env.render(mode='rgb_array')
-                except TypeError:
-                    frame = self.env.render()
-                frames.append(frame)
-            
-            # Store rewards for each agent
+            # Store rewards for each agent at this timestep
             agent_rewards = np.array(rewards).squeeze()
-            rewards_history.append(agent_rewards)
-            print("Actions at timestep", timestep, ":", actions)
-            print(" Agent rewards at timestep", timestep, ":", agent_rewards)
             episode_reward += np.sum(agent_rewards)
+            rewards_history.append(agent_rewards)
             
             obs = next_obs
             timestep += 1
             
+            # Collect frame after step if requested
+            if collect_frames:
+                frame = env.render()
+                frames.append(frame)
+            
             if dones.all():
                 break
+        env.close()
         
         print("Episode reward (normal):", episode_reward)
         result = {
@@ -136,7 +135,7 @@ class EpisodeRunner:
             'episode_length': timestep
         }
         
-        if collect_frames:
+        if collect_frames and frames:
             result['frames'] = frames
         
         return result
@@ -169,7 +168,8 @@ class EpisodeRunner:
         # Determine which agent to observe impact on
         observe_agent_id = observe_agent if observe_agent is not None else attack_agent_i
         
-        obs = self.env.reset(seed=seed)
+        env = SmacWrapper.make_env(self.map_name, seed=seed)
+        obs, action_masks = env.reset()
         episode_reward = 0
         frames = [] if collect_frames else None
         
@@ -181,12 +181,10 @@ class EpisodeRunner:
         rewards_history = []
         taylor_errors_history = []
         timestep = 0
-        # Collect frame if requested
+        
+        # Collect initial frame if requested
         if collect_frames:
-            try:
-                frame = self.env.render(mode='rgb_array')
-            except TypeError:
-                frame = self.env.render()
+            frame = env.render()
             frames.append(frame)
         
         while True:
@@ -198,25 +196,29 @@ class EpisodeRunner:
             torch_obs = [Variable(torch.tensor([obs_noisy[i]], dtype=torch.float32).to(torch_device), 
                                 requires_grad=False) 
                        for i in range(self.maddpg.nagents)]
+            torch_masks = [torch.tensor(action_masks[i], requires_grad=False).to(torch_device)
+                           if action_masks[i] is not None else None for i in range(self.maddpg.nagents)]
             
             # Get actions
-            torch_agent_actions = self.maddpg.step(torch_obs, explore=False)
+            torch_agent_actions = self.maddpg.step(torch_obs, explore=False, action_masks=torch_masks)
             agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
             
             if self.maddpg.discrete_action:
                 actions = {agent_name: agent_actions[i].argmax() 
-                         for i, agent_name in enumerate(self.env.possible_agents)}
+                         for i, agent_name in enumerate(env.possible_agents)}
             else:
                 actions = {agent_name: agent_actions[i].squeeze() 
-                         for i, agent_name in enumerate(self.env.possible_agents)}
+                         for i, agent_name in enumerate(env.possible_agents)}
             
             # Collect Q-values
-            q_values = collect_agent_q_values(self.maddpg, obs, list(actions.values()), self.env.action_space)
+            q_values = collect_agent_q_values(
+                self.maddpg, obs, list(actions.values()), env.action_space
+            )
             q_values_history.append(q_values)
             
             # Compute Taylor delta policy for fault detection
             taylor_results = compute_taylor_delta_policy(
-                self.maddpg, obs_noisy, list(actions.values()), self.env.action_space, 0.01
+                self.maddpg, obs_noisy, list(actions.values()), env.action_space, 0.01
             )
             
             # Store Taylor errors
@@ -253,23 +255,24 @@ class EpisodeRunner:
                 # Inject fault
                 if self.maddpg.discrete_action:
                     # Worst action attack for discrete action space
-                    action_logits = self.maddpg.get_action_logits(torch_obs)
-                    worst_action = torch.argmin(action_logits[attack_agent_i]).item()
-                    actions[self.env.possible_agents[attack_agent_i]] = worst_action
+                    action_logits = self.maddpg.get_action_logits(torch_obs, torch_masks)
+                    
+                    # Apply action mask - set invalid actions to very high values so they won't be selected as minimum
+                    masked_logits = action_logits[attack_agent_i].clone().squeeze()
+                    masked_logits[action_masks[attack_agent_i] == 0] = float('inf')
+                    worst_action = torch.argmin(masked_logits).item()
+                    actions[env.possible_agents[attack_agent_i]] = worst_action
                 else:
                     # For continuous actions, negate the action
-                    actions[self.env.possible_agents[attack_agent_i]] = \
-                        -actions[self.env.possible_agents[attack_agent_i]]
+                    actions[env.possible_agents[attack_agent_i]] = \
+                        -actions[env.possible_agents[attack_agent_i]]
             
             # Environment step
-            next_obs, rewards, dones, infos = self.env.step(actions)
+            next_obs, rewards, dones, infos, action_masks = env.step(actions)
             
             # Collect frame if requested
             if collect_frames:
-                try:
-                    frame = self.env.render(mode='rgb_array')
-                except TypeError:
-                    frame = self.env.render()
+                frame = env.render()
                 frames.append(frame)
             
             # Store rewards for each agent
@@ -282,6 +285,7 @@ class EpisodeRunner:
             
             if dones.all():
                 break
+        env.close()
         
         result = {
             'fault_timeline': fault_timeline,
@@ -295,7 +299,7 @@ class EpisodeRunner:
             'observed_agent': observe_agent_id
         }
         
-        if collect_frames:
+        if collect_frames and frames:
             result['frames'] = frames
         
         return result
