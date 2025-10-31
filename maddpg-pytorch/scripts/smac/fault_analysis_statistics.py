@@ -67,7 +67,7 @@ class MultiSeedExperimentRunner:
     def setup_experiment(self):
         """Set up the experiment environment and logging."""
         # Load MADDPG model
-        self.maddpg = MADDPG.init_from_save(self.config.model_path, test_mode=True)
+        self.maddpg = MADDPG.init_from_save(self.config.model_path)
         
         # Create log directory
         cwd = os.getcwd()

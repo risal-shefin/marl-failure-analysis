@@ -15,8 +15,7 @@ class MADDPG(object):
     def __init__(self, agent_init_params, alg_types,
                  gamma=0.95, tau=0.01, lr=0.01, hidden_dim=64,
                  discrete_action=False, obs_shapes=None,
-                 total_action_dim=None, test_mode=False,
-                 local_q=False):
+                 total_action_dim=None, local_q=False):
         """
         Inputs:
             agent_init_params (list of dict): List of dicts with parameters to
@@ -39,14 +38,12 @@ class MADDPG(object):
                  hidden_dim=hidden_dim,
                  obs_shapes_critic=obs_shapes,
                  total_action_dim=total_action_dim,
-                 test_mode=test_mode,
                  has_local_q=local_q,
                  **params)
                for params in agent_init_params]
         else:
             self.agents = [DDPGAgent(lr=lr, discrete_action=discrete_action,
                     hidden_dim=hidden_dim,
-                    test_mode=test_mode,
                     has_local_q=local_q,
                     **params)
                 for params in agent_init_params]
@@ -275,6 +272,7 @@ class MADDPG(object):
     def prep_rollouts(self, device='cpu'):
         for a in self.agents:
             a.policy.eval()
+            a.critic.eval()
         if device == 'gpu':
             fn = lambda x: x.cuda()
         else:
@@ -342,13 +340,13 @@ class MADDPG(object):
         return instance
 
     @classmethod
-    def init_from_save(cls, filename, test_mode=False):
+    def init_from_save(cls, filename):
         """
         Instantiate instance of this class from file created by 'save' method
         """
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         save_dict = torch.load(filename, map_location=device)
-        instance = cls(test_mode=test_mode, **save_dict['init_dict'])
+        instance = cls(**save_dict['init_dict'])
         instance.init_dict = save_dict['init_dict']
         for a, params in zip(instance.agents, save_dict['agent_params']):
             a.load_params(params)

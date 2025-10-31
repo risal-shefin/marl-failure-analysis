@@ -7,7 +7,7 @@ import torch
 from torch.autograd import Variable
 from collections import deque
 
-from modules.constants import torch_device, K_SIGMA
+from modules.constants import torch_device, K_SIGMA, DEVICE
 from modules.metrics import (
     compute_pairwise_action_influences,
     collect_agent_q_values,
@@ -56,6 +56,8 @@ class EpisodeRunner:
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
+        with torch.no_grad():
+            self.maddpg.prep_rollouts(device=DEVICE)
         
         obs = self.env.reset(seed=seed)
         action_influences_history = []
@@ -117,8 +119,6 @@ class EpisodeRunner:
             # Store rewards for each agent
             agent_rewards = np.array(rewards).squeeze()
             rewards_history.append(agent_rewards)
-            print("Actions at timestep", timestep, ":", actions)
-            print(" Agent rewards at timestep", timestep, ":", agent_rewards)
             episode_reward += np.sum(agent_rewards)
             
             obs = next_obs
@@ -165,6 +165,8 @@ class EpisodeRunner:
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
+        with torch.no_grad():
+            self.maddpg.prep_rollouts(device=DEVICE)
         
         # Determine which agent to observe impact on
         observe_agent_id = observe_agent if observe_agent is not None else attack_agent_i

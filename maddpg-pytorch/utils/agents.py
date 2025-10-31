@@ -12,8 +12,7 @@ class DDPGAgent(object):
     critic, exploration noise)
     """
     def __init__(self, num_in_pol, num_out_pol, num_in_critic, hidden_dim=64,
-                 lr=0.01, discrete_action=True, test_mode=False,
-                 has_local_q=False):
+                 lr=0.01, discrete_action=True, has_local_q=False):
         """
         Inputs:
             num_in_pol (int): number of dimensions for policy input
@@ -23,27 +22,22 @@ class DDPGAgent(object):
         self.policy = MLPNetwork(num_in_pol, num_out_pol,
                                  hidden_dim=hidden_dim,
                                  constrain_out=True,
-                                 discrete_action=discrete_action,
-                                 test_mode=test_mode)
+                                 discrete_action=discrete_action)
         self.critic = MLPNetwork(num_in_critic, 1,
                                  hidden_dim=hidden_dim,
-                                 constrain_out=False,
-                                 test_mode=test_mode)
+                                 constrain_out=False)
         self.target_policy = MLPNetwork(num_in_pol, num_out_pol,
                                         hidden_dim=hidden_dim,
                                         constrain_out=True,
-                                        discrete_action=discrete_action,
-                                        test_mode=test_mode)
+                                        discrete_action=discrete_action)
         self.target_critic = MLPNetwork(num_in_critic, 1,
                                         hidden_dim=hidden_dim,
-                                        constrain_out=False,
-                                        test_mode=test_mode)
+                                        constrain_out=False)
         self.has_local_q = has_local_q
         if self.has_local_q:
             self.local_critic = MLPNetwork(num_in_pol + num_out_pol, 1,
                                            hidden_dim=hidden_dim,
-                                           constrain_out=False,
-                                           test_mode=test_mode)
+                                           constrain_out=False)
             self.local_critic_optimizer = Adam(self.local_critic.parameters(),
                                                lr=lr)
         hard_update(self.target_policy, self.policy)
