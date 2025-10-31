@@ -15,8 +15,9 @@ from algorithms.maddpg import MADDPG
 USE_CUDA = torch.cuda.is_available()
 DEVICE = 'gpu' if USE_CUDA else 'cpu'
 
-def eval(env, is_discrete_action, maddpg, n_episodes):
+def eval(env, is_discrete_action, maddpg, n_episodes, use_terminal_reward_only=False):
     total_reward = 0
+    success_rate = 0
 
     for ep_i in range(n_episodes):
         obs = env.reset()
@@ -30,14 +31,21 @@ def eval(env, is_discrete_action, maddpg, n_episodes):
                 torch_agent_actions = maddpg.step(torch_obs, explore=False)
             actions = [ac.data.cpu().numpy().argmax() for ac in torch_agent_actions]
             next_obs, rewards, dones, infos = env.step(actions)
-            episode_reward += np.sum([rewards[:,i] if env.agent_types[i] != 'adversary' else np.zeros_like(rewards[:,i]) for i in range(maddpg.nagents)])  # sum rewards for all agents except adversaries
+            agent_rewards = np.array(rewards).squeeze()
+            if not use_terminal_reward_only:
+                episode_reward += np.sum(agent_rewards)
             obs = next_obs
             if dones.all():
+                if use_terminal_reward_only:
+                    episode_reward = np.sum(agent_rewards)  # only terminal reward
+                if infos[0][0]['success']:
+                    success_rate += 1
                 break
         total_reward += episode_reward
     
+    success_rate /= n_episodes
     avg_reward = total_reward / n_episodes
-    return avg_reward
+    return avg_reward, success_rate
 
 
 def run(config):
@@ -78,6 +86,7 @@ def run(config):
                                   for acsp in env.action_space])
     t = 0
     best_eval_reward = -np.inf
+    best_eval_success_rate = 0.0
     for ep_i in range(0, config.n_episodes, config.n_rollout_threads):
         obs = env.reset()
         # obs.shape = (n_rollout_threads, nagent)(nobs), nobs differs per agent so not tensor
@@ -128,11 +137,12 @@ def run(config):
         print(f"Ep#{ep_i+1},rew:{np.mean(ep_rews):.3f}", flush=True)
 
         if ep_i % config.save_interval < config.n_rollout_threads:
-            eval_reward = eval(eval_env, config.discrete_action, maddpg, n_episodes=5)
-            if eval_reward >= best_eval_reward:
-                maddpg.save(run_dir / f'model_{eval_reward}.pt')
+            eval_reward, eval_success_rate = eval(eval_env, config.discrete_action, maddpg, n_episodes=10)
+            if eval_success_rate > best_eval_success_rate or (eval_success_rate == best_eval_success_rate and eval_reward >= best_eval_reward):
+                maddpg.save(run_dir / f'model_sr{eval_success_rate}_r{eval_reward}.pt')
                 best_eval_reward = eval_reward
-                print(f"Model saved with eval reward: {eval_reward:.3f}", flush=True)
+                best_eval_success_rate = eval_success_rate
+                print(f"Model saved with success rate: {eval_success_rate:.3f}, eval reward: {eval_reward:.3f}", flush=True)
 
     maddpg.save(run_dir / 'model_end.pt')
     env.close()
@@ -162,7 +172,7 @@ if __name__ == '__main__':
     parser.add_argument("--init_noise_scale", default=0.3, type=float)
     parser.add_argument("--final_noise_scale", default=0.0, type=float)
     parser.add_argument("--save_interval", default=100, type=int)
-    parser.add_argument("--hidden_dim", default=64, type=int)
+    parser.add_argument("--hidden_dim", default=256, type=int)
     parser.add_argument("--lr", default=0.01, type=float)
     parser.add_argument("--tau", default=0.01, type=float)
     parser.add_argument("--agent_alg",

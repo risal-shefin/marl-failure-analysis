@@ -39,7 +39,8 @@ class CollectGameEnv(MultiGridEnv):
         balls_index=[],
         balls_reward=[],
         zero_sum = False,
-        view_size=7
+        view_size=7,
+        partial_obs=False
     ):
         self.num_balls = num_balls
         self.balls_index = balls_index
@@ -62,14 +63,15 @@ class CollectGameEnv(MultiGridEnv):
             see_through_walls=False,
             agents=agents,
             agent_view_size=view_size,
-            actions_set=CollectGameActions
+            actions_set=CollectGameActions,
+            partial_obs=partial_obs
         )
 
         # Track the positions of balls grouped by their color index so we
         # don't need to rescan the grid every step.
         self._ball_positions_by_color = {}
         self._prev_distances = {}
-
+        self._correct_pickup_count = 0
 
 
     def _gen_grid(self, width, height):
@@ -96,24 +98,28 @@ class CollectGameEnv(MultiGridEnv):
 
     def _reward(self, i, rewards, reward=1):
         """
-        Compute the reward to be given upon success
+        Compute the team reward to be given upon success
         """
+        color_index = self.agents[i].index
         for j,a in enumerate(self.agents):
-            if a.index==i or a.index==0:
+            if a.index==color_index:
                 rewards[j]+=reward
             if self.zero_sum:
-                if a.index!=i or a.index==0:
+                if a.index!=color_index:
                     rewards[j] -= reward
 
     def _handle_pickup(self, i, rewards, fwd_pos, fwd_cell):
         if fwd_cell:
             if fwd_cell.can_pickup():
-                if fwd_cell.index in [0, self.agents[i].index]:
-                    fwd_cell.cur_pos = np.array([-1, -1])
-                    # Don't set grid to None here - the agent is already placed at fwd_pos in the step function
-                    # self.grid.set(*fwd_pos, None)
-                    self._remove_ball_position(fwd_cell.index, tuple(fwd_pos))
+                fwd_cell.cur_pos = np.array([-1, -1])
+                # Don't set grid to None here - the agent is already placed at fwd_pos in the step function
+                # self.grid.set(*fwd_pos, None)
+                self._remove_ball_position(fwd_cell.index, tuple(fwd_pos))
+                if fwd_cell.index == self.agents[i].index:
                     self._reward(i, rewards, fwd_cell.reward)
+                    self._correct_pickup_count += 1
+                else:
+                    self._reward(i, rewards, -2*fwd_cell.reward)  # penalty for picking other color ball
 
     def _handle_drop(self, i, rewards, fwd_pos, fwd_cell):
         pass
@@ -126,7 +132,7 @@ class CollectGameEnv(MultiGridEnv):
         if fwd_cell is None or fwd_cell.can_overlap():
             # Only reward if the move was valid (agent actually moved)
             for j, a in enumerate(self.agents):
-                if a.index == i or a.index == 0:
+                if a.index == i:
                     rewards[j] -= 0.01  # Small positive reward for moving
 
     def _remove_ball_position(self, color_index, position):
@@ -182,9 +188,15 @@ class CollectGameEnv(MultiGridEnv):
                 # distance_change = prev_distance - total_distance
                 # shared_rewards[agent_idx] += distance_change
                 # self._prev_distances[agent_idx] = total_distance
+                
                 # shared_rewards[agent_idx] += -1 if abs(reward_value)>0 else 0
 
         return shared_rewards, is_ball_present
+
+    def reset(self):
+        self._correct_pickup_count = 0
+        self._prev_distances = {}
+        return super().reset()
 
     def step(self, actions):
         obs, rewards, done, info = MultiGridEnv.step(self, actions)
@@ -192,6 +204,7 @@ class CollectGameEnv(MultiGridEnv):
         rewards += distance_rewards   # element-wise (index-wise) sum
         if not is_ball_present:
             done = True # end episode if all balls are collected
+        info['success'] = self._correct_pickup_count == np.sum(self.num_balls)
         return obs, rewards, done, info
 
 
@@ -204,11 +217,29 @@ class CollectGameEnv(MultiGridEnv):
 #         balls_reward=[1],
 #         zero_sum=True)
 
+# class CollectGame4HEnv10x10N2(CollectGameEnv):
+#     def __init__(self):
+#         super().__init__(size=7,
+#         num_balls=[2],
+#         agents_index = [0, 0, 0],   # 3 agents with index 0
+#         balls_index=[0],     # 2 balls with index 0
+#         balls_reward=[10, 10],    # rewards to pick balls
+#         zero_sum=False)
+
 class CollectGame4HEnv10x10N2(CollectGameEnv):
     def __init__(self):
-        super().__init__(size=10,
-        num_balls=[2],
-        agents_index = [0, 0, 0],   # 3 agents with index 0
-        balls_index=[0, 0],     # 2 balls with index 0
-        balls_reward=[5, 5],    # rewards to pick balls
+        super().__init__(size=7,
+        num_balls=[1, 1],
+        agents_index = [0, 1],   # 2 agents with index 0
+        balls_index=[0, 1],     # 2 balls with index 0
+        balls_reward=[10, 10],    # rewards to pick balls
         zero_sum=False)
+
+# class CollectGame4HEnv10x10N2(CollectGameEnv):
+#     def __init__(self):
+#         super().__init__(size=7,
+#         num_balls=[2],
+#         agents_index = [0, 0],   # 2 agents with index 0
+#         balls_index=[0],     # 2 balls with index 0
+#         balls_reward=[10, 10],    # rewards to pick balls
+#         zero_sum=False)
