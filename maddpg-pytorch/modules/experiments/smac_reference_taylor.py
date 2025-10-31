@@ -13,11 +13,11 @@ from torch.autograd import Variable
 from datetime import datetime
 
 from utils.smac_wrapper import SmacWrapper
-from modules.constants import torch_device
+from modules.constants import torch_device, DEVICE
 from modules.metrics import compute_taylor_delta_policy
 
 
-REF_TAYLOR_EPISODE_COUNT = 100
+REF_TAYLOR_EPISODE_COUNT = 1
 
 
 class SmacReferenceTaylorManager:
@@ -57,6 +57,8 @@ class SmacReferenceTaylorManager:
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
+        with torch.no_grad():
+            self.maddpg.prep_rollouts(device=DEVICE)
         
         total_episodes = REF_TAYLOR_EPISODE_COUNT
         result_dataset = [{} for _ in range(self.maddpg.nagents)]

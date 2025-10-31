@@ -8,7 +8,7 @@ from torch.autograd import Variable
 from collections import deque
 
 from utils.smac_wrapper import SmacWrapper
-from modules.constants import torch_device, K_SIGMA
+from modules.constants import torch_device, K_SIGMA, DEVICE
 from modules.metrics import (
     compute_pairwise_action_influences,
     collect_agent_q_values,
@@ -57,6 +57,8 @@ class SmacEpisodeRunner:
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
+        with torch.no_grad():
+            self.maddpg.prep_rollouts(device=DEVICE)
         
         env = SmacWrapper.make_env(self.map_name, seed=seed)
         obs, action_masks = env.reset()
@@ -164,6 +166,8 @@ class SmacEpisodeRunner:
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
+        with torch.no_grad():
+            self.maddpg.prep_rollouts(device=DEVICE)
         
         # Determine which agent to observe impact on
         observe_agent_id = observe_agent if observe_agent is not None else attack_agent_i
