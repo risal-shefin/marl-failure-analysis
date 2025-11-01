@@ -342,6 +342,7 @@ AgileRL/logs
 .mypy_cache/
 **/models/
 **/results/
+!**/modules/results/
 **/slurm_files/
 **/baselines/
 **/assets/

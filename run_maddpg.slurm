@@ -8,6 +8,7 @@
 #SBATCH --partition=gpu
 #SBATCH --cpus-per-task=1
 #SBATCH --gres=gpu:1
+#SBATCH --nodelist=gpu-v100-03
 #SBATCH --mem=64gb					#Change depending on how much Memory you need
 #SBATCH --time=20-00:00:00				#4 days - change if you need more time
 
@@ -38,6 +39,7 @@ export SC2PATH=/deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/StarCraft
 # python train_pettingzoo.py simple_spread_v3 maddpg_discrete_n5_tanh_activ --discrete_action True --episode_length 100
 # python train_pettingzoo.py simple_spread_v3 maddpg_discrete_tanh_localq --discrete_action True --episode_length 100 --local_q
 # python train_pettingzoo.py simple_spread_v3 maddpg_discrete_tanh_localq_fxseed12345 --discrete_action True --episode_length 100 --local_q --seed 12345
+# python train_pettingzoo.py simple_spread_v3 maddpg_discrete_n2_tanh_localq --discrete_action True --episode_length 100 --local_q
 
 # petingzoo test
 # Shapley frob analysis
@@ -46,7 +48,7 @@ export SC2PATH=/deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/StarCraft
 # python -m scripts.pettingzoo.multi_seed_statistics simple_spread_v3 /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/maddpg-pytorch/models/simple_spread_v3/maddpg_discrete_tanh_localq/run1/model_-22.824949662226082.pt --total_experiments 50
 
 # Multigrid
-python train_multigrid.py collect maddpg_multigrid_3a0_2b0 --discrete_action True --local_q --episode_length 100 --save_interval 10
+python train_multigrid.py collect maddpg_multigrid_2a01_2b01_s7_manh_dist_no_rot_pick --discrete_action True --local_q --episode_length 100 --save_interval 10 --init_noise_scale 0.5 --hidden_dim 256
 
 #VMAS42
 # python train_vmas.py flocking maddpg_discrete --discrete_action True --episode_length 100
