@@ -28,7 +28,7 @@ class PatientZeroAnalyzer:
         self.nagents = nagents
         self.all_agents = list(range(nagents))
         
-        # Statistics tracking for influence tie-breaking
+        # Statistics tracking for influence scoring
         self.detection_stats_influence = {
             'total_cases': 0,
             'correct_detections': 0,
@@ -40,7 +40,7 @@ class PatientZeroAnalyzer:
             'no_detection': 0
         }
         
-        # Statistics tracking for Taylor tie-breaking
+        # Statistics tracking for Taylor scoring
         self.detection_stats_taylor = {
             'total_cases': 0,
             'correct_detections': 0,
@@ -66,7 +66,7 @@ class PatientZeroAnalyzer:
                                  seed: int = None,
                                  agent_pair: Tuple[int, int] = None) -> Dict[str, Any]:
         """
-        Analyze the accuracy of patient zero detection using both tie-breaking methods.
+        Analyze the accuracy of patient zero detection using both scoring methods.
         
         Args:
             fault_timeline: List of fault detection events
@@ -165,15 +165,15 @@ class PatientZeroAnalyzer:
             self.detection_stats_influence['traceback_needed'] += 1
             self.detection_stats_taylor['traceback_needed'] += 1
             
-            print(f"  Performing traceback for seed {seed} with both tie-breaking methods...")
+            print(f"  Performing traceback for seed {seed} with both scoring methods...")
             
-            # Perform traceback with influence tie-breaking
+            # Perform traceback with influence scoring
             true_patient_zero_influence, influence_chain_influence, _ = perform_patient_zero_traceback(
                 fault_timeline, directional_derivative_history, taylor_errors_history,
                 ref_vals, self.all_agents, action_influences_history, use_taylor_scoring=False
             )
             
-            # Perform traceback with Taylor tie-breaking
+            # Perform traceback with Taylor scoring
             true_patient_zero_taylor, influence_chain_taylor, _ = perform_patient_zero_traceback(
                 fault_timeline, directional_derivative_history, taylor_errors_history,
                 ref_vals, self.all_agents, action_influences_history, use_taylor_scoring=True
@@ -225,7 +225,7 @@ class PatientZeroAnalyzer:
         Get comprehensive statistics about detection accuracy.
         
         Args:
-            method: Which tie-breaking method statistics to return ('influence' or 'taylor')
+            method: Which scoring method statistics to return ('influence' or 'taylor')
         
         Returns:
             Dictionary containing statistics and percentages
@@ -267,7 +267,7 @@ class PatientZeroAnalyzer:
     
     def get_statistics_dual(self) -> Dict[str, Dict[str, Any]]:
         """
-        Get comprehensive statistics for both tie-breaking methods.
+        Get comprehensive statistics for both scoring methods.
         
         Returns:
             Dictionary containing statistics for both methods
@@ -278,16 +278,16 @@ class PatientZeroAnalyzer:
         }
     
     def print_summary_dual(self):
-        """Print a summary comparing both tie-breaking methods."""
+        """Print a summary comparing both scoring methods."""
         stats_dual = self.get_statistics_dual()
         
         print("\n" + "="*80)
-        print("PATIENT ZERO DETECTION ANALYSIS SUMMARY - DUAL TIE-BREAKING COMPARISON")
+        print("PATIENT ZERO DETECTION ANALYSIS SUMMARY - DUAL SCORING COMPARISON")
         print("="*80)
         
         for method in ['influence', 'taylor']:
             stats = stats_dual[method]
-            method_title = method.upper() + " TIE-BREAKING"
+            method_title = method.upper() + " SCORING"
             
             print(f"\n{method_title}:")
             print("-" * len(method_title))
@@ -314,15 +314,15 @@ class PatientZeroAnalyzer:
         print(f"\n{'='*40}")
         print("COMPARISON:")
         print(f"{'='*40}")
-        print(f"Influence tie-breaking final accuracy: {influence_accuracy:.1f}%")
-        print(f"Taylor tie-breaking final accuracy: {taylor_accuracy:.1f}%")
+        print(f"Influence Scoring final accuracy: {influence_accuracy:.1f}%")
+        print(f"Taylor Scoring final accuracy: {taylor_accuracy:.1f}%")
         
         if taylor_accuracy > influence_accuracy:
             improvement = taylor_accuracy - influence_accuracy
-            print(f"Taylor tie-breaking performs BETTER by {improvement:.1f} percentage points")
+            print(f"Taylor Scoring performs BETTER by {improvement:.1f} percentage points")
         elif influence_accuracy > taylor_accuracy:
             improvement = influence_accuracy - taylor_accuracy
-            print(f"Influence tie-breaking performs BETTER by {improvement:.1f} percentage points")
+            print(f"Influence Scoring performs BETTER by {improvement:.1f} percentage points")
         else:
             print("Both methods perform EQUALLY well")
         
@@ -333,7 +333,7 @@ class PatientZeroAnalyzer:
         stats = self.get_statistics(method)
         
         print("\n" + "="*60)
-        print(f"PATIENT ZERO DETECTION ANALYSIS SUMMARY - {method.upper()} TIE-BREAKING")
+        print(f"PATIENT ZERO DETECTION ANALYSIS SUMMARY - {method.upper()} SCORING")
         print("="*60)
         
         print(f"Total cases analyzed: {stats['total_cases']}")

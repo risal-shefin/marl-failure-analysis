@@ -95,7 +95,7 @@ def update_most_influential(current_most_influential: Optional[Dict],
         current_most_influential: Current most influential agent info
         candidate_agent: Candidate agent ID
         dij_rate: Positive influence rate
-        tie_breaking_score: Score for scoring (higher is better)
+        score: Score (higher is better)
         
     Returns:
         Updated most influential agent info
@@ -167,7 +167,6 @@ def trace_back_influence_chain(current_agent: int,
                 score += abs(current_error - ref_vals[other_agent][detection_time])
         else:
             # Use influence score for scoring (default)
-            tie_breaking_score = 0.0
             for t in range(start_time, end_time+1):
                 if directional_derivative_history[t][current_agent][other_agent] <= 0:
                     continue
