@@ -232,7 +232,7 @@ if __name__ == '__main__':
                         default="MADDPG", type=str,
                         choices=['MADDPG', 'DDPG'])
     parser.add_argument("--discrete_action",
-                        default=False,
+                        action='store_true',
                         help="Use discrete action space")
     parser.add_argument("--local_q", action='store_true',
                         help="Train additional decentralized Q functions")

@@ -302,36 +302,3 @@ def compute_second_order_observation_influences(maddpg, obs, actions, action_spa
                 results[i][j] = second_order_influence
 
     return results
-
-
-def collect_agent_q_values(maddpg, obs, actions, action_spaces):
-    """
-    Return the critic output for each agent given observations and actions at a timestep.
-    
-    Args:
-        maddpg: MADDPG agent
-        obs: List of observations
-        actions: List of actions
-        action_spaces: List of action spaces
-        
-    Returns:
-        List of Q-values for each agent
-    """
-    if maddpg.discrete_action:
-        one_hot_actions = []
-        for i, action in enumerate(actions):
-            one_hot = np.zeros(action_spaces[i].n)
-            one_hot[action] = 1.0
-            one_hot_actions.append(one_hot)
-        actions = one_hot_actions
-
-    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
-    torch_actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
-    vf_in = torch.cat((*torch_obs, *torch_actions), dim=1)
-
-    q_values = []
-    for agent in maddpg.agents:
-        critic_val = agent.critic(vf_in).mean().item()
-        q_values.append(critic_val)
-
-    return q_values

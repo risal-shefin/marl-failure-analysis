@@ -192,12 +192,7 @@ class SmacEpisodeRunner:
             frames.append(frame)
         
         while True:
-            noise_scale = 1e-4
-            noise = [np.random.normal(loc=0, scale=noise_scale, size=obs[i].shape) 
-                    for i in range(self.maddpg.nagents)]
-            obs_noisy = [obs[i] + noise[i] for i in range(self.maddpg.nagents)]
-
-            torch_obs = [Variable(torch.tensor([obs_noisy[i]], dtype=torch.float32).to(torch_device), 
+            torch_obs = [Variable(torch.tensor([obs[i]], dtype=torch.float32).to(torch_device), 
                                 requires_grad=False) 
                        for i in range(self.maddpg.nagents)]
             torch_masks = [torch.tensor(action_masks[i], requires_grad=False).to(torch_device)

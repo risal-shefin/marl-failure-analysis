@@ -181,8 +181,8 @@ if __name__ == '__main__':
     parser.add_argument("--adversary_alg",
                         default="MADDPG", type=str,
                         choices=['MADDPG', 'DDPG'])
-    parser.add_argument("--discrete_action",
-                        default=False,
+    parser.add_argument("--discrete_action", default=True,
+                        action='store_true',
                         help="Use discrete action space")
     parser.add_argument("--local_q", action='store_true',
                         help="Train additional decentralized Q functions")

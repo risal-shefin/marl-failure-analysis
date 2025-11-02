@@ -12,7 +12,8 @@ from modules.metrics import (
     compute_pairwise_action_influences,
     collect_agent_q_values,
     compute_pairwise_action_directional_second_derivatives,
-    compute_taylor_delta_policy
+    compute_taylor_delta_policy,
+    collect_agent_q_value
 )
 
 ATTACK_WINDOW_LENGTH = 5
@@ -192,12 +193,7 @@ class EpisodeRunner:
             frames.append(frame)
         
         while True:
-            noise_scale = 1e-4
-            noise = [np.random.normal(loc=0, scale=noise_scale, size=obs[i].shape) 
-                    for i in range(self.maddpg.nagents)]
-            obs_noisy = [obs[i] + noise[i] for i in range(self.maddpg.nagents)]
-
-            torch_obs = [Variable(torch.tensor([obs_noisy[i]], dtype=torch.float32).to(torch_device), 
+            torch_obs = [Variable(torch.tensor([obs[i]], dtype=torch.float32).to(torch_device), 
                                 requires_grad=False) 
                        for i in range(self.maddpg.nagents)]
             
@@ -218,7 +214,7 @@ class EpisodeRunner:
             
             # Compute Taylor delta policy for fault detection
             taylor_results = compute_taylor_delta_policy(
-                self.maddpg, obs_noisy, list(actions.values()), self.env.action_space, 0.01
+                self.maddpg, obs, list(actions.values()), self.env.action_space, 0.01
             )
             
             # Store Taylor errors
@@ -255,13 +251,31 @@ class EpisodeRunner:
                 # Inject fault
                 if self.maddpg.discrete_action:
                     # Worst action attack for discrete action space
-                    action_logits = self.maddpg.get_action_logits(torch_obs)
-                    worst_action = torch.argmin(action_logits[attack_agent_i]).item()
+                    # action_logits = self.maddpg.get_action_logits(torch_obs)
+                    # worst_action = torch.argmin(action_logits[attack_agent_i]).item()
+                    worst_action = 0
+                    worst_q_value = float('inf')
+                    for action in range(self.env.action_space[attack_agent_i].n):
+                        temp_actions = actions.copy()
+                        temp_actions[self.env.possible_agents[attack_agent_i]] = action
+                        observe_agent_q_val = collect_agent_q_value(self.maddpg, observe_agent_id, obs, list(temp_actions.values()), self.env.action_space)
+                        if observe_agent_q_val < worst_q_value:
+                            worst_q_value = observe_agent_q_val
+                            worst_action = action
                     actions[self.env.possible_agents[attack_agent_i]] = worst_action
                 else:
-                    # For continuous actions, negate the action
-                    actions[self.env.possible_agents[attack_agent_i]] = \
-                        -actions[self.env.possible_agents[attack_agent_i]]
+                    # # For continuous actions, negate the action
+                    # actions[self.env.possible_agents[attack_agent_i]] = \
+                    #     -actions[self.env.possible_agents[attack_agent_i]]
+
+                    # Perturb action in direction of negative gradient to minimize observed agent's Q value
+                    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(self.maddpg.nagents)]
+                    torch_actions = [Variable(torch.Tensor([actions[self.env.possible_agents[i]]]).to(torch_device), requires_grad=True) for i in range(self.maddpg.nagents)]
+                    vf_in = torch.cat((*torch_obs, *torch_actions), dim=1)
+                    critic_val = self.maddpg.agents[observe_agent_id].critic(vf_in).mean()
+                    grad_a = torch.autograd.grad(critic_val, torch_actions[attack_agent_i], retain_graph=True)[0]
+                    perturbed_action = actions[self.env.possible_agents[attack_agent_i]] - grad_a.cpu().numpy().squeeze()
+                    actions[self.env.possible_agents[attack_agent_i]] = np.clip(perturbed_action, self.env.action_space[attack_agent_i].low, self.env.action_space[attack_agent_i].high)
             
             # Environment step
             next_obs, rewards, dones, infos = self.env.step(actions)
