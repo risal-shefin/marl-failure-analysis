@@ -217,7 +217,7 @@ class SmacEpisodeRunner:
             
             # Compute Taylor delta policy for fault detection
             taylor_results = compute_taylor_delta_policy(
-                self.maddpg, obs_noisy, list(actions.values()), env.action_space, 0.01
+                self.maddpg, obs, list(actions.values()), env.action_space, 0.01
             )
             
             # Store Taylor errors
