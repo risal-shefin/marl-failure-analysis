@@ -65,7 +65,7 @@ class ReferenceTaylorManager:
         per_agent: List[Dict[int, List[float]]] = [defaultdict(list) for _ in range(nagents)]
 
         for episode in range(episodes):
-            states = self.env.reset(seed=seed + episode)
+            states, masks = self._reset_env(seed + episode)
             done = [False for _ in range(nagents)]
             timestep = 0
 
@@ -76,10 +76,13 @@ class ReferenceTaylorManager:
 
                 actions = []
                 for agent_id in range(nagents):
-                    action, _ = self.runner.agent_n.select_action(states[agent_id], agent_id, evaluate=True, return_dist=True)
+                    mask = masks[agent_id] if masks is not None else None
+                    action, _ = self.runner.agent_n.select_action(
+                        states[agent_id], agent_id, evaluate=True, return_dist=True, action_mask=mask
+                    )
                     actions.append(int(action))
 
-                next_states, _, done, _ = self.env.step(actions)
+                next_states, _, done, _, masks = self._step_env(actions)
                 states = next_states
                 timestep += 1
 
@@ -98,3 +101,52 @@ class ReferenceTaylorManager:
             stds.append(agent_stds)
 
         return means, stds
+
+    # ------------------------------------------------------------------
+    # Environment helpers shared with the episode runner
+    # ------------------------------------------------------------------
+    def _reset_env(self, seed: int):
+        try:
+            result = self.env.reset(seed=seed)
+        except TypeError:
+            if hasattr(self.env, 'seed'):
+                self.env.seed(seed)
+            result = self.env.reset()
+        return self._extract_states_and_masks(result)
+
+    def _step_env(self, actions):
+        result = self.env.step(actions)
+        if not isinstance(result, tuple):
+            raise ValueError('Environment step is expected to return a tuple')
+        states = result[0]
+        rewards = result[1]
+        dones = result[2]
+        info = result[3] if len(result) > 3 else {}
+        masks = None
+        if len(result) > 4:
+            for extra in result[4:]:
+                if self._is_mask_like(extra, states):
+                    masks = extra
+                    break
+        return states, rewards, dones, info, masks
+
+    @staticmethod
+    def _extract_states_and_masks(result):
+        if isinstance(result, tuple):
+            states = result[0]
+            masks = None
+            for extra in result[1:]:
+                if ReferenceTaylorManager._is_mask_like(extra, states):
+                    masks = extra
+                    break
+            return states, masks
+        return result, None
+
+    @staticmethod
+    def _is_mask_like(candidate, states):
+        if candidate is None:
+            return False
+        try:
+            return len(candidate) == len(states)
+        except TypeError:
+            return False

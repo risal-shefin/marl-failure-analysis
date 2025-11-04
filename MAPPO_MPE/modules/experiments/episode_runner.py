@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import random
 from collections import deque
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -25,6 +25,7 @@ class EpisodeRunner:
         self.env = env
         self.epsilon = epsilon
         self.attack_metrics = AttackMetricsComputer()
+        self._last_action_masks: Optional[Iterable] = None
 
     def _set_seed(self, seed: int):
         random.seed(seed)
@@ -33,11 +34,89 @@ class EpisodeRunner:
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
 
+    # ------------------------------------------------------------------
+    # Environment helpers
+    # ------------------------------------------------------------------
+    def _reset_env(self, seed: Optional[int] = None) -> Tuple[Iterable, Optional[Iterable]]:
+        if seed is not None:
+            try:
+                result = self.env.reset(seed=seed)
+            except TypeError:
+                if hasattr(self.env, 'seed'):
+                    self.env.seed(seed)
+                result = self.env.reset()
+        else:
+            result = self.env.reset()
+
+        states, masks = self._extract_states_and_masks(result)
+        self._last_action_masks = masks
+        return states, masks
+
+    def _step_env(self, actions: Iterable) -> Tuple[Iterable, Iterable, Iterable, Dict, Optional[Iterable]]:
+        result = self.env.step(actions)
+        if not isinstance(result, tuple):
+            raise ValueError('Environment step is expected to return a tuple')
+
+        states = result[0]
+        rewards = result[1]
+        dones = result[2]
+        info = result[3] if len(result) > 3 else {}
+        masks = None
+
+        if len(result) > 4:
+            for extra in result[4:]:
+                if self._is_mask_like(extra, states):
+                    masks = extra
+                    break
+
+        self._last_action_masks = masks
+        return states, rewards, dones, info, masks
+
+    @staticmethod
+    def _extract_states_and_masks(
+        result: Union[Iterable, Tuple[Iterable, ...]]
+    ) -> Tuple[Iterable, Optional[Iterable]]:
+        if isinstance(result, tuple):
+            states = result[0]
+            masks = None
+            for extra in result[1:]:
+                if EpisodeRunner._is_mask_like(extra, states):
+                    masks = extra
+                    break
+            return states, masks
+        return result, None
+
+    @staticmethod
+    def _is_mask_like(candidate, states: Iterable) -> bool:
+        if candidate is None:
+            return False
+        try:
+            return len(candidate) == len(states)
+        except TypeError:
+            return False
+
+    def _get_action_mask(self, agent_id: int) -> Optional[Iterable]:
+        if self._last_action_masks is None:
+            return None
+        try:
+            return self._last_action_masks[agent_id]
+        except (IndexError, TypeError):
+            return None
+
+    def _select_action(self, state, agent_id: int):
+        mask = self._get_action_mask(agent_id)
+        action, dist = self.runner.agent_n.select_action(
+            state,
+            agent_id,
+            evaluate=True,
+            action_mask=mask,
+            return_dist=True,
+        )
+        return int(action), dist
+
     def run_normal_episode(self, seed: int, collect_frames: bool = False) -> Dict:
         self._set_seed(seed)
-        states = self.env.reset(seed=seed)
-        action_influences_history: List[List[List[float]]] = []
-        directional_derivatives_history: List[List[List[float]]] = []
+        states, _ = self._reset_env(seed)
         action_influences_history: List[List[List[float]]] = []
         directional_derivatives_history: List[List[List[float]]] = []
         values_history: List[List[float]] = []
@@ -54,9 +133,6 @@ class EpisodeRunner:
             influences = compute_pairwise_frob_norms(self.runner, states)
             action_influences_history.append(influences)
             directional_derivatives_history.append(influences)
-            influences = compute_pairwise_frob_norms(self.runner, states)
-            action_influences_history.append(influences)
-            directional_derivatives_history.append(influences)
             values = collect_agent_values(self.runner, states)
             values_history.append(values)
             taylor_errors = compute_taylor_error_policy(self.runner, states, self.epsilon)
@@ -64,11 +140,12 @@ class EpisodeRunner:
 
             actions = []
             for agent_id in range(self.runner.args.N):
-                action, _ = self.runner.agent_n.select_action(states[agent_id], agent_id, evaluate=True, return_dist=True)
-                actions.append(int(action))
+                action, _ = self._select_action(states[agent_id], agent_id)
+                actions.append(action)
 
-            next_states, rewards, dones, _ = self.env.step(actions)
-            rewards_history.append(list(np.array(rewards).squeeze()))
+            next_states, rewards, dones, _, _ = self._step_env(actions)
+            rewards_array = np.array(rewards)
+            rewards_history.append(list(rewards_array.squeeze()))
 
             if collect_frames:
                 frame = self.env.render()
@@ -104,7 +181,7 @@ class EpisodeRunner:
         collect_frames: bool = False,
     ) -> Dict:
         self._set_seed(seed)
-        states = self.env.reset(seed=seed)
+        states, _ = self._reset_env(seed)
         frames = [] if collect_frames else None
         result_deques = [deque(maxlen=5) for _ in range(self.runner.args.N)]
         fault_timeline = []
@@ -132,7 +209,7 @@ class EpisodeRunner:
 
             actions = []
             for agent_id in range(self.runner.args.N):
-                action, dist = self.runner.agent_n.select_action(states[agent_id], agent_id, evaluate=True, return_dist=True)
+                action, dist = self._select_action(states[agent_id], agent_id)
                 if timestep in attack_timesteps and agent_id == attack_agent_i:
                     probs = dist.probs.squeeze()
                     worst_action = int(torch.argmin(probs).item())
@@ -156,8 +233,9 @@ class EpisodeRunner:
                             'taylor_deviation': abs(detection_value - ref_vals[agent_id][timestep]),
                         })
 
-            next_states, rewards, dones, _ = self.env.step(actions)
-            rewards_history.append(list(np.array(rewards).squeeze()))
+            next_states, rewards, dones, _, _ = self._step_env(actions)
+            rewards_array = np.array(rewards)
+            rewards_history.append(list(rewards_array.squeeze()))
 
             if collect_frames:
                 frames.append(self.env.render())
