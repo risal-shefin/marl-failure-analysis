@@ -148,7 +148,9 @@ class Runner_MAPPO_Multigrid:
             'steps': self.total_steps,
             'reward': self.best_eval_reward
         }
-        
+        if self.args.use_central_q:
+            model_data['central_q_state_dict'] = self.agent_n.central_q.state_dict()
+
         torch.save(model_data, model_path)
         print(f"Best model successfully saved at step {self.total_steps} at {model_path}", flush=True)
 
@@ -181,6 +183,10 @@ class Runner_MAPPO_Multigrid:
                     actions.append(action[0])  # choose_action returns a numpy array
                     action_logprobs.append(action_logprob[0])  # choose_action returns a numpy array
 
+            q = None
+            if not evaluate and self.args.use_central_q:
+                q = self.agent_n.get_central_q(s, actions)
+
             # Take a step in the environment
             next_obs_n, reward_n, done_n, info_n = self.env.step(actions)
 
@@ -195,7 +201,8 @@ class Runner_MAPPO_Multigrid:
                     a_logprob_n=np.array(action_logprobs),
                     r_n=np.array(reward_n),
                     done_n=np.array(done_n),
-                    action_mask_n=np.array(action_masks)
+                    action_mask_n=np.array(action_masks),
+                    q_n=q
                 )
             
             # Calculate the total reward
@@ -257,7 +264,8 @@ if __name__ == '__main__':
     parser.add_argument("--add_agent_id", type=float, default=False, help="Whether to add agent_id. Here, we do not use it.")
     parser.add_argument("--use_value_clip", type=float, default=False, help="Whether to use value clip.")
     parser.add_argument("--env_id", type=str, required=True, help="The name of the environment to run")
-    
+    parser.add_argument("--use_central_q", action="store_true", help="Enable centralized Q-function training")
+
     # Add output directory argument
     parser.add_argument("--output_dir", type=str, default="./runs", help="Directory to save all output files")
 

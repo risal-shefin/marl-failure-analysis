@@ -118,6 +118,7 @@ class MAPPO:
         self.episode_limit = args.episode_limit
         self.rnn_hidden_dim = args.rnn_hidden_dim
 
+        self.use_central_q = getattr(args, "use_central_q", False)
         self.batch_size = args.batch_size
         self.mini_batch_size = args.mini_batch_size
         self.max_train_steps = args.max_train_steps
@@ -147,11 +148,22 @@ class MAPPO:
             print("------use rnn------")
             self.actor = Actor_RNN(args, self.actor_input_dim)
             self.critic = Critic_RNN(args, self.critic_input_dim)
+            if self.use_central_q:
+                q_input_dim = self.critic_input_dim + self.N * self.action_dim
+                self.central_q = Critic_RNN(args, q_input_dim)
         else:
             self.actor = Actor_MLP(args, self.actor_input_dim)
             self.critic = Critic_MLP(args, self.critic_input_dim)
+            if self.use_central_q:
+                q_input_dim = self.critic_input_dim + self.N * self.action_dim
+                self.central_q = Critic_MLP(args, q_input_dim)
+
+        if not self.use_central_q:
+            self.central_q = None
 
         self.ac_parameters = list(self.actor.parameters()) + list(self.critic.parameters())
+        if self.use_central_q:
+            self.ac_parameters += list(self.central_q.parameters())
         if self.set_adam_eps:
             print("------set adam eps------")
             self.ac_optimizer = torch.optim.Adam(self.ac_parameters, lr=self.lr, eps=1e-5)
@@ -223,15 +235,39 @@ class MAPPO:
             if self.add_agent_id:  # Add an one-hot vector to represent the agent_id
                 critic_inputs.append(torch.eye(self.N))
             critic_inputs = torch.cat([x for x in critic_inputs], dim=-1)  # critic_input.shape=(N, critic_input_dim)
-            
+
             # Reset the RNN hidden state if using RNN
             if self.use_rnn:
                 batch_size = critic_inputs.size(0)  # Should be N
-                self.critic.rnn_hidden = torch.zeros(batch_size, self.rnn_hidden_dim, 
+                self.critic.rnn_hidden = torch.zeros(batch_size, self.rnn_hidden_dim,
                                                     device=critic_inputs.device)
-            
+
             v_n = self.critic(critic_inputs)  # v_n.shape(N,1)
             return v_n.numpy().flatten()
+
+    def get_central_q(self, s, a_n):
+        if not self.use_central_q:
+            raise RuntimeError("Central Q network is disabled. Enable it by setting use_central_q to True.")
+
+        with torch.no_grad():
+            critic_inputs = []
+            s_tensor = torch.tensor(s, dtype=torch.float32).unsqueeze(0).repeat(self.N, 1)
+            critic_inputs.append(s_tensor)
+            if self.add_agent_id:
+                critic_inputs.append(torch.eye(self.N))
+            critic_inputs = torch.cat([x for x in critic_inputs], dim=-1)
+
+            actions = torch.tensor(a_n, dtype=torch.long)
+            action_one_hot = F.one_hot(actions, num_classes=self.action_dim).float()
+            joint_action = action_one_hot.reshape(1, self.N * self.action_dim).repeat(self.N, 1)
+            q_inputs = torch.cat([critic_inputs, joint_action], dim=-1)
+
+            if self.use_rnn:
+                batch_size = q_inputs.size(0)
+                self.central_q.rnn_hidden = torch.zeros(batch_size, self.rnn_hidden_dim, device=q_inputs.device)
+
+            q_values = self.central_q(q_inputs)
+            return q_values.numpy().flatten()
 
     def train(self, replay_buffer, total_steps):
         batch = replay_buffer.get_training_data()  # get training data
@@ -260,7 +296,7 @@ class MAPPO:
             actor_inputs.shape=(batch_size, max_episode_len, N, actor_input_dim)
             critic_inputs.shape=(batch_size, max_episode_len, N, critic_input_dim)
         """
-        actor_inputs, critic_inputs = self.get_inputs(batch)
+        actor_inputs, critic_inputs, q_inputs = self.get_inputs(batch)
 
         # Optimize policy for K epochs:
         for _ in range(self.K_epochs):
@@ -274,7 +310,10 @@ class MAPPO:
                     # If use RNN, we need to reset the rnn_hidden of the actor and critic.
                     self.actor.rnn_hidden = None
                     self.critic.rnn_hidden = None
+                    if self.use_central_q:
+                        self.central_q.rnn_hidden = None
                     probs_now, values_now = [], []
+                    q_values_now = [] if self.use_central_q else None
                     for t in range(self.episode_limit):
                         prob = self.actor(actor_inputs[index, t].reshape(self.mini_batch_size * self.N, -1))  # prob.shape=(mini_batch_size*N, action_dim)
                         mask = batch['action_mask_n'][index, t].reshape(self.mini_batch_size * self.N, -1)
@@ -282,12 +321,19 @@ class MAPPO:
                         probs_now.append(prob.reshape(self.mini_batch_size, self.N, -1))  # prob.shape=(mini_batch_size,N,action_dim）
                         v = self.critic(critic_inputs[index, t].reshape(self.mini_batch_size * self.N, -1))  # v.shape=(mini_batch_size*N,1)
                         values_now.append(v.reshape(self.mini_batch_size, self.N))  # v.shape=(mini_batch_size,N)
+                        if self.use_central_q:
+                            q = self.central_q(q_inputs[index, t].reshape(self.mini_batch_size * self.N, -1))
+                            q_values_now.append(q.reshape(self.mini_batch_size, self.N))
                     probs_now = torch.stack(probs_now, dim=1)
                     values_now = torch.stack(values_now, dim=1)
+                    if self.use_central_q:
+                        q_values_now = torch.stack(q_values_now, dim=1)
                 else:
                     probs_now = self.actor(actor_inputs[index])
                     probs_now = self._apply_action_mask(probs_now, batch['action_mask_n'][index])
                     values_now = self.critic(critic_inputs[index]).squeeze(-1)
+                    if self.use_central_q:
+                        q_values_now = self.central_q(q_inputs[index]).squeeze(-1)
 
                 dist_now = Categorical(probs_now)
                 dist_entropy = dist_now.entropy()  # dist_entropy.shape=(mini_batch_size, episode_limit, N)
@@ -311,6 +357,16 @@ class MAPPO:
 
                 self.ac_optimizer.zero_grad()
                 ac_loss = actor_loss + critic_loss
+                if self.use_central_q:
+                    if self.use_value_clip:
+                        q_values_old = batch["q_n"][index].detach()
+                        q_error_clip = torch.clamp(q_values_now - q_values_old, -self.epsilon, self.epsilon) + q_values_old - v_target[index]
+                        q_error_original = q_values_now - v_target[index]
+                        q_loss = torch.max(q_error_clip ** 2, q_error_original ** 2)
+                    else:
+                        q_loss = (q_values_now - v_target[index]) ** 2
+                    q_loss = (q_loss * valid_mask_batch).sum() / valid_mask_batch.sum()
+                    ac_loss = ac_loss + q_loss
                 ac_loss.backward()
                 if self.use_grad_clip:
                     torch.nn.utils.clip_grad_norm_(self.ac_parameters, 10.0)
@@ -336,20 +392,35 @@ class MAPPO:
 
         actor_inputs = torch.cat([x for x in actor_inputs], dim=-1)  # actor_inputs.shape=(batch_size, episode_limit, N, actor_input_dim)
         critic_inputs = torch.cat([x for x in critic_inputs], dim=-1)  # critic_inputs.shape=(batch_size, episode_limit, N, critic_input_dim)
-        return actor_inputs, critic_inputs
+
+        q_inputs = None
+        if self.use_central_q:
+            action_one_hot = F.one_hot(batch['a_n'], num_classes=self.action_dim).float()
+            joint_action = action_one_hot.reshape(self.batch_size, self.episode_limit, 1, self.N * self.action_dim)
+            joint_action = joint_action.repeat(1, 1, self.N, 1)
+            q_inputs = torch.cat([critic_inputs, joint_action], dim=-1)
+
+        return actor_inputs, critic_inputs, q_inputs
 
     def save_model(self, env_name, number, seed, total_steps):
         torch.save(self.actor.state_dict(), "./model/MAPPO_actor_env_{}_number_{}_seed_{}_step_{}k.pth".format(env_name, number, seed, int(total_steps / 1000)))
         torch.save(self.critic.state_dict(), "./model/MAPPO_critic_env_{}_number_{}_seed_{}_step_{}k.pth".format(env_name, number, seed, int(total_steps / 1000)))
+        if self.use_central_q:
+            torch.save(self.central_q.state_dict(), "./model/MAPPO_central_q_env_{}_number_{}_seed_{}_step_{}k.pth".format(env_name, number, seed, int(total_steps / 1000)))
 
     def load_model(self, env_name, number, seed, step):
         self.actor.load_state_dict(torch.load("./model/MAPPO_actor_env_{}_number_{}_seed_{}_step_{}k.pth".format(env_name, number, seed, step)))
         self.critic.load_state_dict(torch.load("./model/MAPPO_critic_env_{}_number_{}_seed_{}_step_{}k.pth".format(env_name, number, seed, step)))
+        if self.use_central_q:
+            self.central_q.load_state_dict(torch.load("./model/MAPPO_central_q_env_{}_number_{}_seed_{}_step_{}k.pth".format(env_name, number, seed, step)))
 
     def load_model_from_directory(self, path):
         # self.actor.load_state_dict(torch.load(path))
-        self.actor.load_state_dict(torch.load(path)["actor_state_dict"])
-        self.critic.load_state_dict(torch.load(path)["critic_state_dict"])
+        checkpoint = torch.load(path)
+        self.actor.load_state_dict(checkpoint["actor_state_dict"])
+        self.critic.load_state_dict(checkpoint["critic_state_dict"])
+        if self.use_central_q and "central_q_state_dict" in checkpoint:
+            self.central_q.load_state_dict(checkpoint["central_q_state_dict"])
 
     def select_action(self, obs, agent_id, evaluate=False, action_mask=None, return_dist=False):
         """

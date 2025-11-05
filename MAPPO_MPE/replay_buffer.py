@@ -10,6 +10,7 @@ class ReplayBuffer:
         self.episode_limit = args.episode_limit
         self.batch_size = args.batch_size
         self.action_dim = args.action_dim
+        self.use_central_q = getattr(args, "use_central_q", False)
         self.episode_num = 0
         self.buffer = None
         self.reset_buffer()
@@ -30,9 +31,11 @@ class ReplayBuffer:
             # track actual episode lengths for masking padded steps
             'lengths': np.zeros([self.batch_size], dtype=np.int32)
         }
+        if self.use_central_q:
+            self.buffer['q_n'] = np.zeros([self.batch_size, self.episode_limit, self.N], dtype=np.float32)
         self.episode_num = 0
 
-    def store_transition(self, episode_step, obs_n, s, v_n, a_n, a_logprob_n, r_n, done_n, action_mask_n):
+    def store_transition(self, episode_step, obs_n, s, v_n, a_n, a_logprob_n, r_n, done_n, action_mask_n, q_n=None):
         self.buffer['obs_n'][self.episode_num][episode_step] = obs_n
         self.buffer['s'][self.episode_num][episode_step] = s
         self.buffer['v_n'][self.episode_num][episode_step] = v_n
@@ -41,6 +44,8 @@ class ReplayBuffer:
         self.buffer['r_n'][self.episode_num][episode_step] = r_n
         self.buffer['done_n'][self.episode_num][episode_step] = done_n
         self.buffer['action_mask_n'][self.episode_num][episode_step] = action_mask_n
+        if self.use_central_q and q_n is not None:
+            self.buffer['q_n'][self.episode_num][episode_step] = q_n
 
     def store_last_value(self, episode_step, v_n):
         self.buffer['v_n'][self.episode_num][episode_step] = v_n
