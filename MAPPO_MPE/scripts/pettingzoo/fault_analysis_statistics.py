@@ -15,11 +15,6 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-# Ensure project root is on the Python path
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in os.sys.path:
-    os.sys.path.append(str(PROJECT_ROOT))
-
 from MAPPO_MPE_main import Runner_MAPPO_MPE
 from MAPPO_MPE.modules.analysis import InfluenceAnalyzer
 from MAPPO_MPE.modules.constants import DEFAULT_INFLUENCE_DECAY_LAMBDA, DEVICE
@@ -38,7 +33,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--seed', type=int, default=42, help='Base random seed')
     parser.add_argument('--total_experiments', type=int, default=5, help='Number of seeds to evaluate')
     parser.add_argument('--single_seed', action='store_true', help='Run a single-seed analysis with visualizations')
-    parser.add_argument('--ref_episodes', type=int, default=10, help='Episodes to compute reference Taylor statistics')
     parser.add_argument('--taylor_epsilon', type=float, default=0.01, help='Perturbation magnitude for Taylor analysis')
     parser.add_argument('--taylor_cache_dir', type=str, default=None, help='Directory to cache reference Taylor statistics')
     parser.add_argument('--output_dir', type=str, default='./results', help='Base output directory')

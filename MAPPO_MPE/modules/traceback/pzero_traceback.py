@@ -218,7 +218,7 @@ def perform_patient_zero_traceback(fault_timeline: List[Dict],
         return None, [], None
     
     # Step 1: Get initial patient zero detection
-    from ..detection import get_patient_zero_detection
+    from modules.detection import get_patient_zero_detection
     initial_patient_zeros, detection_time = get_patient_zero_detection(fault_timeline)
     
     if not initial_patient_zeros or detection_time is None:

@@ -10,7 +10,7 @@ import pandas as pd
 import math
 from typing import List, Dict, Tuple, Optional, Any
 from .pzero_traceback import perform_patient_zero_traceback
-from ..detection import get_patient_zero_detection
+from modules.detection import get_patient_zero_detection
 
 
 class PatientZeroAnalyzer:

@@ -126,7 +126,10 @@ class EpisodeRunner:
         timestep = 0
 
         if collect_frames:
-            frame = self.env.render()
+            try:
+                frame = self.env.render(mode='rgb_array')
+            except TypeError:
+                frame = self.env.render()
             frames.append(frame)
 
         while True:
@@ -148,7 +151,10 @@ class EpisodeRunner:
             rewards_history.append(list(rewards_array.squeeze()))
 
             if collect_frames:
-                frame = self.env.render()
+                try:
+                    frame = self.env.render(mode='rgb_array')
+                except TypeError:
+                    frame = self.env.render()
                 frames.append(frame)
 
             states = next_states
@@ -196,7 +202,11 @@ class EpisodeRunner:
         timestep = 0
 
         if collect_frames:
-            frames.append(self.env.render())
+            try:
+                frame = self.env.render(mode='rgb_array')
+            except TypeError:
+                frame = self.env.render()
+            frames.append(frame)
 
         while True:
             influences = compute_pairwise_frob_norms(self.runner, states)
@@ -238,7 +248,11 @@ class EpisodeRunner:
             rewards_history.append(list(rewards_array.squeeze()))
 
             if collect_frames:
-                frames.append(self.env.render())
+                try:
+                    frame = self.env.render(mode='rgb_array')
+                except TypeError:
+                    frame = self.env.render()
+                frames.append(frame)
 
             states = next_states
             timestep += 1

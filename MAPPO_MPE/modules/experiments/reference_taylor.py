@@ -66,10 +66,10 @@ class ReferenceTaylorManager:
 
         for episode in range(episodes):
             states, masks = self._reset_env(seed + episode)
-            done = [False for _ in range(nagents)]
+            done = np.array([False for _ in range(nagents)])
             timestep = 0
 
-            while not all(done):
+            while not done.all():
                 errors = compute_taylor_error_policy(self.runner, states, epsilon)
                 for agent_id, value in enumerate(errors):
                     per_agent[agent_id][timestep].append(value)

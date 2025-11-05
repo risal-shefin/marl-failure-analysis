@@ -1,4 +1,6 @@
-"""Results helpers for MAPPO analysis."""
+"""
+Results computation and saving modules.
+"""
 
 from .accuracy_computer import AccuracyComputer
 from .results_saver import ResultsSaver

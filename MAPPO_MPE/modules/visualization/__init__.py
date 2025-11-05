@@ -1,7 +1,7 @@
-"""Visualization helpers for MAPPO analysis."""
+"""
+Visualization module initialization.
+"""
+from . import plot_utils
+from .plot_utils import *
 
-from .utils import save_frames_as_gif
-
-__all__ = [
-    'save_frames_as_gif',
-]
+__all__ = plot_utils.__all__

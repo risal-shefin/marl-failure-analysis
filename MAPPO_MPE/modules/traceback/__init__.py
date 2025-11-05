@@ -1,19 +1,25 @@
-"""Traceback helpers for MAPPO analysis."""
+"""
+Patient Zero Traceback Module
 
-from .detection_analysis import PatientZeroAnalyzer
+This module provides functionality to trace back the influence chain from an initially
+detected patient zero to find the true source of influence, and analyze detection accuracy.
+"""
+
 from .pzero_traceback import (
-    compute_critical_rate,
     perform_patient_zero_traceback,
-    select_agent_max_taylor_deviation,
     trace_back_influence_chain,
-    update_most_influential,
+    select_agent_max_taylor_deviation,
+    compute_critical_rate,
+    update_most_influential
 )
 
+from .detection_analysis import PatientZeroAnalyzer
+
 __all__ = [
-    'PatientZeroAnalyzer',
-    'compute_critical_rate',
     'perform_patient_zero_traceback',
+    'trace_back_influence_chain', 
     'select_agent_max_taylor_deviation',
-    'trace_back_influence_chain',
+    'compute_critical_rate',
     'update_most_influential',
+    'PatientZeroAnalyzer'
 ]

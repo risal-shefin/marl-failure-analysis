@@ -1,4 +1,6 @@
-"""Analysis helpers for MAPPO modules."""
+"""
+Analysis modules for influence and attack metrics.
+"""
 
 from .influence_analyzer import InfluenceAnalyzer
 
