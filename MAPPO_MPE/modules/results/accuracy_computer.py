@@ -63,6 +63,8 @@ class AccuracyComputer:
                 
                 high_metrics = pair_result['high_influence_metrics']
                 low_metrics = pair_result['low_influence_metrics']
+                high_patient_zero = pair_result['high_patient_zero']
+                low_patient_zero = pair_result['low_patient_zero']
                 high_detection_times = pair_result['high_influence_detection_times']
                 low_detection_times = pair_result['low_influence_detection_times']
                 high_attack_timesteps = pair_result['high_influence_attack_timesteps']
@@ -79,8 +81,7 @@ class AccuracyComputer:
                     high_total_with_detection += 1
                     total_with_detection += 1
                     first_detection = min(high_detection_times)
-                    
-                    if high_attack_timesteps and first_detection >= min(high_attack_timesteps):
+                    if high_attack_timesteps and agent_i in high_patient_zero and first_detection >= min(high_attack_timesteps):
                         high_correct_patient_zero += 1
                         correct_patient_zero += 1
                 
@@ -90,7 +91,7 @@ class AccuracyComputer:
                     total_with_detection += 1
                     first_detection = min(low_detection_times)
                     
-                    if low_attack_timesteps and first_detection >= min(low_attack_timesteps):
+                    if low_attack_timesteps and agent_i in low_patient_zero and first_detection >= min(low_attack_timesteps):
                         low_correct_patient_zero += 1
                         correct_patient_zero += 1
                 

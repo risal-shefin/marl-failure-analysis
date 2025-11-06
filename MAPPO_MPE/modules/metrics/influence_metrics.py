@@ -7,43 +7,61 @@ from torch.autograd import Variable
 from ..constants import torch_device
 
 
-def compute_pairwise_action_influences(maddpg, obs, actions, action_spaces):
+def compute_pairwise_action_influences(mappo, state, obs, actions, action_spaces):
     """
-    Compute direct influence of each agent's action on every other agent's Q-value.
+    Compute direct influence of each agent's action on every other agent's Q-value using MAPPO's centralized Q.
     
     Args:
-        maddpg: MADDPG agent
-        obs: List of observations
+        mappo: MAPPO agent
+        state: Global state (for centralized value function)
+        obs: List of observations for each agent
         actions: List of actions
-        action_spaces: List of action spaces
+        action_spaces: List of action spaces (kept for API compatibility)
         
     Returns:
         N x N list where entry [i][j] represents || ∂Q_i/∂a_j ||_2
     """
-    # Convert discrete actions to one-hot encoding
-    if maddpg.discrete_action:
-        one_hot_actions = []
-        for i, action in enumerate(actions):
-            one_hot = np.zeros(action_spaces[i].n)
-            one_hot[action] = 1.0
-            one_hot_actions.append(one_hot)
-        actions = one_hot_actions
+    if not mappo.use_central_q:
+        raise RuntimeError("Central Q network is required for compute_pairwise_action_influences. Enable it by setting use_central_q to True.")
+    
+    # Convert observations and state to tensors
+    torch_obs = [torch.tensor([obs[i]], dtype=torch.float32, requires_grad=False) for i in range(mappo.N)]
+    state_tensor = torch.tensor([state], dtype=torch.float32, requires_grad=False)
+    
+    # Create action tensors with gradient tracking - use one-hot encoding for gradients
+    actions_one_hot = []
+    for i in range(mappo.N):
+        action_oh = torch.nn.functional.one_hot(torch.tensor([actions[i]]), num_classes=mappo.action_dim).float()
+        action_oh.requires_grad = True
+        actions_one_hot.append(action_oh)
 
-    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
-    torch_actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
-    vf_in = torch.cat((*torch_obs, *torch_actions), dim=1)
-
-    N = maddpg.nagents
+    N = mappo.N
     results = [[0.0 for _ in range(N)] for _ in range(N)]
 
     for i in range(N):
-        critic_val = maddpg.agents[i].critic(vf_in).mean()
+        # Prepare inputs for centralized Q network for agent i
+        critic_inputs = []
+        s = state_tensor.repeat(N, 1)  # (N, state_dim)
+        critic_inputs.append(s)
+        
+        if mappo.add_agent_id:
+            critic_inputs.append(torch.eye(N))
+        
+        critic_inputs = torch.cat([x for x in critic_inputs], dim=-1)
+        
+        # Prepare joint action
+        joint_action = torch.cat([a for a in actions_one_hot], dim=-1).repeat(N, 1)
+        q_inputs = torch.cat([critic_inputs, joint_action], dim=-1)
+        
+        # Get Q-value for agent i
+        q_values = mappo.central_q(q_inputs)
+        critic_val = q_values[i].mean()
         
         for j in range(N):
             # Compute gradient of Q_i with respect to action of agent j
             grad_qi_aj = torch.autograd.grad(
                 critic_val,
-                torch_actions[j],
+                actions_one_hot[j],
                 retain_graph=True,
                 allow_unused=True
             )[0]
@@ -55,49 +73,65 @@ def compute_pairwise_action_influences(maddpg, obs, actions, action_spaces):
     return results
 
 
-def compute_pairwise_action_directional_second_derivatives(maddpg, obs, actions, action_spaces):
+def compute_pairwise_action_directional_second_derivatives(mappo, state, obs, actions, action_spaces):
     """
-    Compute second-order directional derivative g^T H g for each agent's action influence.
+    Compute second-order directional derivative g^T H g for each agent's action influence using MAPPO's centralized Q.
     
     This computes the directional second derivative along the gradient direction,
     where g = ∂Q_i/∂a_j and H = ∂²Q_i/(∂a_j)².
     
     Args:
-        maddpg: MADDPG agent
-        obs: List of observations
+        mappo: MAPPO agent
+        state: Global state (for centralized value function)
+        obs: List of observations for each agent
         actions: List of actions
-        action_spaces: List of action spaces
+        action_spaces: List of action spaces (kept for API compatibility)
         
     Returns:
         N x N list where entry [i][j] represents g^T H g for the influence of 
         agent j's action on agent i's Q-value
     """
-    # Convert discrete actions to one-hot encoding
-    if maddpg.discrete_action:
-        one_hot_actions = []
-        for i, action in enumerate(actions):
-            one_hot = np.zeros(action_spaces[i].n)
-            one_hot[action] = 1.0
-            one_hot_actions.append(one_hot)
-        actions = one_hot_actions
+    if not mappo.use_central_q:
+        raise RuntimeError("Central Q network is required for compute_pairwise_action_directional_second_derivatives. Enable it by setting use_central_q to True.")
+    
+    # Convert observations and state to tensors
+    torch_obs = [torch.tensor([obs[i]], dtype=torch.float32, requires_grad=False) for i in range(mappo.N)]
+    state_tensor = torch.tensor([state], dtype=torch.float32, requires_grad=False)
+    
+    # Create action tensors with gradient tracking - use one-hot encoding for gradients
+    actions_one_hot = []
+    for i in range(mappo.N):
+        action_oh = torch.nn.functional.one_hot(torch.tensor([actions[i]]), num_classes=mappo.action_dim).float()
+        action_oh.requires_grad = True
+        actions_one_hot.append(action_oh)
 
-    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
-    torch_actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
-    vf_in = torch.cat((*torch_obs, *torch_actions), dim=1)
-
-    N = maddpg.nagents
+    N = mappo.N
     results = [[0.0 for _ in range(N)] for _ in range(N)]
 
     for i in range(N):
-        # Negate critic value because from attacker's pov, it will try to maximize a function's value.
-        # Then, the positive directional second derivatives indicate a potential attacking zone.
-        critic_val = -maddpg.agents[i].critic(vf_in).mean()
+        # Prepare inputs for centralized Q network for agent i
+        critic_inputs = []
+        s = state_tensor.repeat(N, 1)  # (N, state_dim)
+        critic_inputs.append(s)
+        
+        if mappo.add_agent_id:
+            critic_inputs.append(torch.eye(N))
+        
+        critic_inputs = torch.cat([x for x in critic_inputs], dim=-1)
+        
+        # Prepare joint action
+        joint_action = torch.cat([a for a in actions_one_hot], dim=-1).repeat(N, 1)
+        q_inputs = torch.cat([critic_inputs, joint_action], dim=-1)
+        
+        # Get Q-value for agent i (negate for attacker's perspective)
+        q_values = mappo.central_q(q_inputs)
+        critic_val = -q_values[i].mean()
         
         for j in range(N):
             # Compute first-order gradient g = ∂Q_i/∂a_j
             grad_qi_aj = torch.autograd.grad(
                 critic_val,
-                torch_actions[j],
+                actions_one_hot[j],
                 create_graph=True,
                 retain_graph=True,
                 allow_unused=True
@@ -110,7 +144,7 @@ def compute_pairwise_action_directional_second_derivatives(maddpg, obs, actions,
             # This is more efficient than computing the full Hessian matrix
             hvp = torch.autograd.grad(
                 grad_qi_aj,
-                torch_actions[j],
+                actions_one_hot[j],
                 grad_outputs=grad_qi_aj,
                 retain_graph=True,
                 allow_unused=True
@@ -126,43 +160,61 @@ def compute_pairwise_action_directional_second_derivatives(maddpg, obs, actions,
     return results
 
 
-def compute_second_order_action_influences(maddpg, obs, actions, action_spaces):
+def compute_second_order_action_influences(mappo, state, obs, actions, action_spaces):
     """
-    Compute second-order action influences between agents.
+    Compute second-order action influences between agents using MAPPO's centralized Q.
     
     Args:
-        maddpg: MADDPG agent
-        obs: List of observations
+        mappo: MAPPO agent
+        state: Global state (for centralized value function)
+        obs: List of observations for each agent
         actions: List of actions
-        action_spaces: List of action spaces
+        action_spaces: List of action spaces (kept for API compatibility)
         
     Returns:
         N x N list where entry [i][j] represents || ∂²Q_i/(∂a_j)² ||_F
     """
-    # Convert discrete actions to one-hot encoding
-    if maddpg.discrete_action:
-        one_hot_actions = []
-        for i, action in enumerate(actions):
-            one_hot = np.zeros(action_spaces[i].n)
-            one_hot[action] = 1.0
-            one_hot_actions.append(one_hot)
-        actions = one_hot_actions
+    if not mappo.use_central_q:
+        raise RuntimeError("Central Q network is required for compute_second_order_action_influences. Enable it by setting use_central_q to True.")
+    
+    # Convert observations and state to tensors
+    torch_obs = [torch.tensor([obs[i]], dtype=torch.float32, requires_grad=False) for i in range(mappo.N)]
+    state_tensor = torch.tensor([state], dtype=torch.float32, requires_grad=False)
+    
+    # Create action tensors with gradient tracking - use one-hot encoding for gradients
+    actions_one_hot = []
+    for i in range(mappo.N):
+        action_oh = torch.nn.functional.one_hot(torch.tensor([actions[i]]), num_classes=mappo.action_dim).float()
+        action_oh.requires_grad = True
+        actions_one_hot.append(action_oh)
 
-    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
-    torch_actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
-    vf_in = torch.cat((*torch_obs, *torch_actions), dim=1)
-
-    N = maddpg.nagents
+    N = mappo.N
     results = [[0.0 for _ in range(N)] for _ in range(N)]
 
     for i in range(N):
-        critic_val = maddpg.agents[i].critic(vf_in).mean()
+        # Prepare inputs for centralized Q network for agent i
+        critic_inputs = []
+        s = state_tensor.repeat(N, 1)  # (N, state_dim)
+        critic_inputs.append(s)
+        
+        if mappo.add_agent_id:
+            critic_inputs.append(torch.eye(N))
+        
+        critic_inputs = torch.cat([x for x in critic_inputs], dim=-1)
+        
+        # Prepare joint action
+        joint_action = torch.cat([a for a in actions_one_hot], dim=-1).repeat(N, 1)
+        q_inputs = torch.cat([critic_inputs, joint_action], dim=-1)
+        
+        # Get Q-value for agent i
+        q_values = mappo.central_q(q_inputs)
+        critic_val = q_values[i].mean()
         
         for j in range(N):
             # Compute first-order gradient ∂Q_i/∂a_j
             grad_qi_aj = torch.autograd.grad(
                 critic_val,
-                torch_actions[j],
+                actions_one_hot[j],
                 create_graph=True,
                 retain_graph=True,
                 allow_unused=True
@@ -173,7 +225,7 @@ def compute_second_order_action_influences(maddpg, obs, actions, action_spaces):
             for k in range(grad_qi_aj.shape[1]):  # iterate over action dimensions
                 second_grad = torch.autograd.grad(
                     grad_qi_aj[0, k],
-                    torch_actions[j],  # Same action variable j
+                    actions_one_hot[j],  # Same action variable j
                     retain_graph=True,
                     allow_unused=True
                 )[0]
@@ -188,37 +240,52 @@ def compute_second_order_action_influences(maddpg, obs, actions, action_spaces):
     return results
 
 
-def compute_pairwise_observation_influences(maddpg, obs, actions, action_spaces):
+def compute_pairwise_observation_influences(mappo, state, obs, actions, action_spaces):
     """
-    Compute direct influence of each agent's observation on every other agent's Q-value.
+    Compute direct influence of each agent's observation on every other agent's Q-value using MAPPO's centralized Q.
     
     Args:
-        maddpg: MADDPG agent
-        obs: List of observations
+        mappo: MAPPO agent
+        state: Global state (for centralized value function)
+        obs: List of observations for each agent
         actions: List of actions
-        action_spaces: List of action spaces
+        action_spaces: List of action spaces (kept for API compatibility)
         
     Returns:
         N x N list where entry [i][j] represents || ∂Q_i/∂obs_j ||_2
     """
-    # Convert discrete actions to one-hot encoding
-    if maddpg.discrete_action:
-        one_hot_actions = []
-        for i, action in enumerate(actions):
-            one_hot = np.zeros(action_spaces[i].n)
-            one_hot[action] = 1.0
-            one_hot_actions.append(one_hot)
-        actions = one_hot_actions
+    if not mappo.use_central_q:
+        raise RuntimeError("Central Q network is required for compute_pairwise_observation_influences. Enable it by setting use_central_q to True.")
+    
+    # Convert observations and state to tensors with gradient tracking
+    torch_obs = [torch.tensor([obs[i]], dtype=torch.float32, requires_grad=True) for i in range(mappo.N)]
+    state_tensor = torch.tensor([state], dtype=torch.float32, requires_grad=False)
+    
+    # Create action tensors
+    actions_tensor = [torch.tensor([actions[i]], dtype=torch.long, requires_grad=False) for i in range(mappo.N)]
 
-    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
-    torch_actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
-    vf_in = torch.cat((*torch_obs, *torch_actions), dim=1)
-
-    N = maddpg.nagents
+    N = mappo.N
     results = [[0.0 for _ in range(N)] for _ in range(N)]
 
     for i in range(N):
-        critic_val = maddpg.agents[i].critic(vf_in).mean()
+        # Prepare inputs for centralized Q network for agent i
+        critic_inputs = []
+        s = state_tensor.repeat(N, 1)  # (N, state_dim)
+        critic_inputs.append(s)
+        
+        if mappo.add_agent_id:
+            critic_inputs.append(torch.eye(N))
+        
+        critic_inputs = torch.cat([x for x in critic_inputs], dim=-1)
+        
+        # Prepare joint action (one-hot encoded)
+        action_one_hot = torch.nn.functional.one_hot(torch.cat(actions_tensor), num_classes=mappo.action_dim).float()
+        joint_action = action_one_hot.reshape(1, mappo.N * mappo.action_dim).repeat(N, 1)
+        q_inputs = torch.cat([critic_inputs, joint_action], dim=-1)
+        
+        # Get Q-value for agent i
+        q_values = mappo.central_q(q_inputs)
+        critic_val = q_values[i].mean()
         
         for j in range(N):
             # Compute gradient of Q_i with respect to observation of agent j
@@ -236,37 +303,52 @@ def compute_pairwise_observation_influences(maddpg, obs, actions, action_spaces)
     return results
 
 
-def compute_second_order_observation_influences(maddpg, obs, actions, action_spaces):
+def compute_second_order_observation_influences(mappo, state, obs, actions, action_spaces):
     """
-    Compute second-order observation influences between agents.
+    Compute second-order observation influences between agents using MAPPO's centralized Q.
     
     Args:
-        maddpg: MADDPG agent
-        obs: List of observations
+        mappo: MAPPO agent
+        state: Global state (for centralized value function)
+        obs: List of observations for each agent
         actions: List of actions
-        action_spaces: List of action spaces
+        action_spaces: List of action spaces (kept for API compatibility)
         
     Returns:
         N x N list where entry [i][j] represents || ∂²Q_i/(∂obs_j)² ||_F
     """
-    # Convert discrete actions to one-hot encoding
-    if maddpg.discrete_action:
-        one_hot_actions = []
-        for i, action in enumerate(actions):
-            one_hot = np.zeros(action_spaces[i].n)
-            one_hot[action] = 1.0
-            one_hot_actions.append(one_hot)
-        actions = one_hot_actions
+    if not mappo.use_central_q:
+        raise RuntimeError("Central Q network is required for compute_second_order_observation_influences. Enable it by setting use_central_q to True.")
+    
+    # Convert observations and state to tensors with gradient tracking
+    torch_obs = [torch.tensor([obs[i]], dtype=torch.float32, requires_grad=True) for i in range(mappo.N)]
+    state_tensor = torch.tensor([state], dtype=torch.float32, requires_grad=False)
+    
+    # Create action tensors
+    actions_tensor = [torch.tensor([actions[i]], dtype=torch.long, requires_grad=False) for i in range(mappo.N)]
 
-    torch_obs = [Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True) for i in range(maddpg.nagents)]
-    torch_actions = [Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=False) for i in range(maddpg.nagents)]
-    vf_in = torch.cat((*torch_obs, *torch_actions), dim=1)
-
-    N = maddpg.nagents
+    N = mappo.N
     results = [[0.0 for _ in range(N)] for _ in range(N)]
 
     for i in range(N):
-        critic_val = maddpg.agents[i].critic(vf_in).mean()
+        # Prepare inputs for centralized Q network for agent i
+        critic_inputs = []
+        s = state_tensor.repeat(N, 1)  # (N, state_dim)
+        critic_inputs.append(s)
+        
+        if mappo.add_agent_id:
+            critic_inputs.append(torch.eye(N))
+        
+        critic_inputs = torch.cat([x for x in critic_inputs], dim=-1)
+        
+        # Prepare joint action (one-hot encoded)
+        action_one_hot = torch.nn.functional.one_hot(torch.cat(actions_tensor), num_classes=mappo.action_dim).float()
+        joint_action = action_one_hot.reshape(1, mappo.N * mappo.action_dim).repeat(N, 1)
+        q_inputs = torch.cat([critic_inputs, joint_action], dim=-1)
+        
+        # Get Q-value for agent i
+        q_values = mappo.central_q(q_inputs)
+        critic_val = q_values[i].mean()
         
         for j in range(N):
             # Compute first-order gradient ∂Q_i/∂obs_j

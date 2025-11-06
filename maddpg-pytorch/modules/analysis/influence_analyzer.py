@@ -39,7 +39,7 @@ class InfluenceAnalyzer:
             # Separate timesteps based on directional derivative sign
             if directional_derivative > 0:
                 positive_derivative_timesteps.append(t)
-            elif directional_derivative < 0:
+            elif directional_derivative <= 0:
                 negative_derivative_timesteps.append(t)
         
         # For high influence: among positive derivative timesteps, choose maximum action influence

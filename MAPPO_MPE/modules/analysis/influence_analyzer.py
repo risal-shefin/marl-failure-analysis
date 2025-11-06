@@ -61,8 +61,6 @@ class InfluenceAnalyzer:
         
         max_influences_t.sort()
         min_influences_t.sort()
-        print(" >>>> ", action_influences_history[min_influences_t[0]][agent_j][agent_i])
-        print(" >>>> ", action_influences_history[max_influences_t[0]][agent_j][agent_i])
 
         return max_influences_t, min_influences_t
     

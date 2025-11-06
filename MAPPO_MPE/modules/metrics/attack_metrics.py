@@ -5,7 +5,7 @@ import numpy as np
 from modules.constants import K_SIGMA
 
 
-WATCH_WINDOW = 10  # Number of timesteps to watch after attack timestep
+WATCH_WINDOW = 5  # Number of timesteps to watch after attack timestep
 
 
 class AttackMetricsComputer:

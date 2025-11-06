@@ -183,6 +183,8 @@ class EpisodeRunner:
         q_values_history = []
         rewards_history = []
         taylor_errors_history = []
+        action_influences_history = []
+        directional_derivatives_history = []
         timestep = 0
         # Collect frame if requested
         if collect_frames:
@@ -211,6 +213,18 @@ class EpisodeRunner:
             # Collect Q-values
             q_values = collect_agent_q_values(self.maddpg, obs, list(actions.values()), self.env.action_space)
             q_values_history.append(q_values)
+
+            # Compute pairwise action influences
+            action_influences_matrix = compute_pairwise_action_influences(
+                self.maddpg, obs, list(actions.values()), self.env.action_space
+            )
+            action_influences_history.append(action_influences_matrix)
+            
+            # Compute directional second derivatives
+            directional_derivatives_matrix = compute_pairwise_action_directional_second_derivatives(
+                self.maddpg, obs, list(actions.values()), self.env.action_space
+            )
+            directional_derivatives_history.append(directional_derivatives_matrix)
             
             # Compute Taylor delta policy for fault detection
             taylor_results = compute_taylor_delta_policy(
@@ -304,6 +318,8 @@ class EpisodeRunner:
             'q_values_history': q_values_history,
             'rewards_history': rewards_history,
             'taylor_errors_history': taylor_errors_history,
+            'directional_derivatives_history': directional_derivatives_history,
+            'action_influences_history': action_influences_history,
             'episode_length': timestep,
             'episode_reward': episode_reward,
             'attack_timesteps': attack_timesteps,

@@ -242,10 +242,10 @@ class MultiSeedExperimentRunner:
                     high_influence_attack['fault_timeline'],
                     agent_i,
                     high_influence_attack['attack_timesteps'],
-                    directional_derivatives_history,
+                    high_influence_attack['directional_derivatives_history'],
                     high_influence_attack['taylor_errors_history'],
                     ref_vals,
-                    action_influences_history,
+                    high_influence_attack['action_influences_history'],
                     seed,
                     (agent_i, agent_j)
                 )
@@ -256,10 +256,10 @@ class MultiSeedExperimentRunner:
                     low_influence_attack['fault_timeline'],
                     agent_i,
                     low_influence_attack['attack_timesteps'],
-                    directional_derivatives_history,
+                    low_influence_attack['directional_derivatives_history'],
                     low_influence_attack['taylor_errors_history'],
                     ref_vals,
-                    action_influences_history,
+                    low_influence_attack['action_influences_history'],
                     seed,
                     (agent_i, agent_j)
                 )
@@ -267,6 +267,8 @@ class MultiSeedExperimentRunner:
                 pair_result = {
                     'agent_i': agent_i,
                     'agent_j': agent_j,
+                    'high_patient_zero': high_patient_zero,
+                    'low_patient_zero': low_patient_zero,
                     'high_influence_attack_timesteps': max_influence_t,
                     'low_influence_attack_timesteps': min_influence_t,
                     'high_influence_detection_times': high_influenced_fault_times,

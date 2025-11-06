@@ -17,7 +17,7 @@ from modules.constants import torch_device, DEVICE
 from modules.metrics import compute_taylor_delta_policy
 
 
-REF_TAYLOR_EPISODE_COUNT = 1
+REF_TAYLOR_EPISODE_COUNT = 1000
 
 
 class SmacReferenceTaylorManager:
@@ -61,6 +61,7 @@ class SmacReferenceTaylorManager:
         
         total_episodes = REF_TAYLOR_EPISODE_COUNT
         result_dataset = [{} for _ in range(self.nagents)]
+        epsilon = getattr(self.config, 'taylor_epsilon', 0.01)
         
         for episode in tqdm(range(total_episodes), desc=f"Reference episodes (seed {seed})"):
             # Create new environment for SMAC
@@ -87,7 +88,7 @@ class SmacReferenceTaylorManager:
                 
                 # Compute Taylor delta policy
                 results = compute_taylor_delta_policy(
-                    self.runner, obs_noisy, list(actions.values()), env.action_space, 0.01
+                    self.runner.agent_n, obs_noisy, epsilon
                 )
                 
                 # Store results for each agent at this timestep

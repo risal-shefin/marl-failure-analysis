@@ -27,7 +27,7 @@ from modules.results import AccuracyComputer, ResultsSaver
 from modules.traceback import PatientZeroAnalyzer
 from modules.visualization.utils import save_frames_as_gif
 
-ATTACK_TS_FRACTION = 0.75
+ATTACK_TS_FRACTION = 0.5
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -35,7 +35,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--model_dir', type=str, required=True, help='Path to saved MAPPO model (.pt)')
     parser.add_argument('--env_id', type=str, required=True, choices=['soccer', 'collect'], help='MultiGrid environment ID')
     parser.add_argument('--flatten_obs', action='store_true', help='Flatten observations from the grid environment')
-    parser.add_argument('--seed', type=int, default=42, help='Base random seed')
+    parser.add_argument('--seed', type=int, default=0, help='Base random seed')
     parser.add_argument('--total_experiments', type=int, default=5, help='Number of seeds to evaluate')
     parser.add_argument('--single_seed', action='store_true', help='Run a single-seed analysis with visualizations')
     parser.add_argument('--taylor_epsilon', type=float, default=0.01, help='Perturbation magnitude for Taylor analysis')
@@ -71,6 +71,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--use_rnn', type=bool, default=False)
     parser.add_argument('--add_agent_id', type=bool, default=False)
     parser.add_argument('--use_value_clip', type=bool, default=False)
+    parser.add_argument('--use_central_q', action='store_true', help='Use centralized Q-network')
     return parser
 
 
@@ -188,7 +189,7 @@ class MultiSeedExperimentRunner:
                     ref_vals=ref_vals,
                     ref_std_devs=ref_std_devs,
                     observe_agent=agent_j,
-                    collect_frames=False,
+                    collect_frames=self.config.single_seed,
                 )
                 
                 # Save low influence attack GIF in single-seed mode
@@ -253,10 +254,10 @@ class MultiSeedExperimentRunner:
                     high_attack_results['fault_timeline'],
                     attacked_agent=agent_i,
                     attack_timesteps=high_attack_results['attack_timesteps'],
-                    directional_derivative_history=normal_episode['directional_derivatives_history'],
+                    directional_derivative_history=high_attack_results['directional_derivatives_history'],
                     taylor_errors_history=high_attack_results['taylor_errors_history'],
                     ref_vals=ref_vals,
-                    action_influences_history=normal_episode['action_influences_history'],
+                    action_influences_history=high_attack_results['action_influences_history'],
                     seed=seed,
                     agent_pair=(agent_i, agent_j)
                 )
@@ -266,10 +267,10 @@ class MultiSeedExperimentRunner:
                     low_attack_results['fault_timeline'],
                     attacked_agent=agent_i,
                     attack_timesteps=low_attack_results['attack_timesteps'],
-                    directional_derivative_history=normal_episode['directional_derivatives_history'],
+                    directional_derivative_history=low_attack_results['directional_derivatives_history'],
                     taylor_errors_history=low_attack_results['taylor_errors_history'],
                     ref_vals=ref_vals,
-                    action_influences_history=normal_episode['action_influences_history'],
+                    action_influences_history=low_attack_results['action_influences_history'],
                     seed=seed,
                     agent_pair=(agent_i, agent_j)
                 )
@@ -294,6 +295,8 @@ class MultiSeedExperimentRunner:
                 pair_result = {
                     'agent_i': agent_i,
                     'agent_j': agent_j,
+                    'high_patient_zero': high_patient_zero,
+                    'low_patient_zero': low_patient_zero,
                     'high_influence_attack_timesteps': max_ts,
                     'low_influence_attack_timesteps': min_ts,
                     'high_influence_detection_times': high_influenced_fault_times,

@@ -1,5 +1,11 @@
 """
 Metrics module initialization.
+
+NOTE: All metrics functions have been updated to work with MAPPO.
+- Functions that compute gradients with respect to actions or Q-values now use MAPPO's centralized Q network
+- Most functions now require a 'state' parameter (global state) in addition to observations
+- The 'action_spaces' parameter is kept for API compatibility but is no longer used
+- Functions will raise RuntimeError if centralized Q network is not enabled (use_central_q=True)
 """
 from .basic_metrics import (
     compute_taylor_delta_policy,

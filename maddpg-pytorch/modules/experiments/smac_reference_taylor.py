@@ -17,7 +17,7 @@ from modules.constants import torch_device, DEVICE
 from modules.metrics import compute_taylor_delta_policy
 
 
-REF_TAYLOR_EPISODE_COUNT = 1
+REF_TAYLOR_EPISODE_COUNT = 100
 
 
 class SmacReferenceTaylorManager:
