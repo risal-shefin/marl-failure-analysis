@@ -3,6 +3,8 @@ Accuracy computation for attack detection and metrics validation.
 """
 import numpy as np
 
+from modules.detection.fault_detection import get_patient_zero_detection
+
 
 class AccuracyComputer:
     """
@@ -69,6 +71,8 @@ class AccuracyComputer:
                 low_detection_times = pair_result['low_influence_detection_times']
                 high_attack_timesteps = pair_result['high_influence_attack_timesteps']
                 low_attack_timesteps = pair_result['low_influence_attack_timesteps']
+                _, high_pz_detection_time = get_patient_zero_detection(pair_result['high_fault_timeline'])
+                _, low_pz_detection_time = get_patient_zero_detection(pair_result['low_fault_timeline'])
                 
                 total_pairs += 1
                 
@@ -77,19 +81,19 @@ class AccuracyComputer:
                 low_metrics_list.append(low_metrics)
                 
                 # Patient zero detection accuracy for high influence attacks
-                if high_detection_times:
+                if high_pz_detection_time is not None:
                     high_total_with_detection += 1
                     total_with_detection += 1
-                    first_detection = min(high_detection_times)
+                    first_detection = high_pz_detection_time
                     if high_attack_timesteps and agent_i in high_patient_zero and first_detection >= min(high_attack_timesteps):
                         high_correct_patient_zero += 1
                         correct_patient_zero += 1
                 
                 # Patient zero detection accuracy for low influence attacks
-                if low_detection_times:
+                if low_pz_detection_time is not None:
                     low_total_with_detection += 1
                     total_with_detection += 1
-                    first_detection = min(low_detection_times)
+                    first_detection = low_pz_detection_time
                     
                     if low_attack_timesteps and agent_i in low_patient_zero and first_detection >= min(low_attack_timesteps):
                         low_correct_patient_zero += 1

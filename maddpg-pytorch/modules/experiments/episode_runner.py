@@ -265,17 +265,18 @@ class EpisodeRunner:
                 # Inject fault
                 if self.maddpg.discrete_action:
                     # Worst action attack for discrete action space
-                    # action_logits = self.maddpg.get_action_logits(torch_obs)
-                    # worst_action = torch.argmin(action_logits[attack_agent_i]).item()
-                    worst_action = 0
-                    worst_q_value = float('inf')
-                    for action in range(self.env.action_space[attack_agent_i].n):
-                        temp_actions = actions.copy()
-                        temp_actions[self.env.possible_agents[attack_agent_i]] = action
-                        observe_agent_q_val = collect_agent_q_value(self.maddpg, observe_agent_id, obs, list(temp_actions.values()), self.env.action_space)
-                        if observe_agent_q_val < worst_q_value:
-                            worst_q_value = observe_agent_q_val
-                            worst_action = action
+                    action_logits = self.maddpg.get_action_logits(torch_obs)
+                    worst_action = torch.argmin(action_logits[attack_agent_i]).item()
+
+                    # worst_action = 0
+                    # worst_q_value = float('inf')
+                    # for action in range(self.env.action_space[attack_agent_i].n):
+                    #     temp_actions = actions.copy()
+                    #     temp_actions[self.env.possible_agents[attack_agent_i]] = action
+                    #     observe_agent_q_val = collect_agent_q_value(self.maddpg, observe_agent_id, obs, list(temp_actions.values()), self.env.action_space)
+                    #     if observe_agent_q_val < worst_q_value:
+                    #         worst_q_value = observe_agent_q_val
+                    #         worst_action = action
                     actions[self.env.possible_agents[attack_agent_i]] = worst_action
                 else:
                     # # For continuous actions, negate the action

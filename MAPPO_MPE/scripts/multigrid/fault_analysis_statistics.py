@@ -303,6 +303,8 @@ class MultiSeedExperimentRunner:
                     'low_influence_detection_times': low_influenced_fault_times,
                     'high_influence_metrics': high_metrics,
                     'low_influence_metrics': low_metrics,
+                    'low_fault_timeline': low_attack_results['fault_timeline'],
+                    'high_fault_timeline': high_attack_results['fault_timeline'],
                 }
                 
                 all_pair_results.append(pair_result)

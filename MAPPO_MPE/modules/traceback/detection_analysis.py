@@ -128,7 +128,8 @@ class PatientZeroAnalyzer:
         
         # Case 2: Check if detection is correct initially
         start_attack_timestep = min(attack_timesteps) if attack_timesteps else float('inf')
-        is_initially_correct = attacked_agent in detected_agents
+        is_initially_correct = (attacked_agent in detected_agents and 
+                                detection_time >= start_attack_timestep)
         
         if is_initially_correct:
             self.detection_stats_influence['correct_detections'] += 1
