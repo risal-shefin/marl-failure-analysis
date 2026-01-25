@@ -1,8 +1,8 @@
 ## Environment Setup
 ```sh
-$module load apps/anaconda3/2024.02
-$conda create --name adversary_loss python=3.10
-$conda activate adversary_loss
+$conda create --name xmarl python=3.10
+$conda activate xmarl
+$pip install -r requirements.txt
 $conda install -c conda-forge mesa glfw glew patchelf
 $conda install -c menpo osmesa
 $pip install "Cython<3"
@@ -12,41 +12,37 @@ $tar -xvzf mujoco210-linux-x86_64.tar.gz -C ~/.mujoco/
 $pip install -U 'mujoco-py<2.2,>=2.1' gym torch opencv-python matplotlib plotly
 # Set Environment Variables
 $export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/.mujoco/mujoco210/bin:/usr/lib/nvidia
-# Load CUDA Modules
-$module load nvidia/cuda11/cuda/11.8.0
-$module load nvidia/cuda11/cudnn/8.7.0.84
 ```
 
-## Example Run:
+## MADDPG
+### Model Training
+Simple Spread: <br>
 ```sh
-$python run.py --configure-env nav2 --exp-data-dir ExperimentalData
+$python train_pettingzoo.py simple_spread_v3 maddpg_discrete --discrete_action True
 ```
-
-## Branches
-- Debashis: ``git checkout develop-debashis``
-- Risal: ``git checkout develop-risal``
-
-## Additional Notes
-Delete lines regarding env.seed to avoid errors.
-
-You may need to run the training inside job. Head node might give errors.
-
-# SheepRL Setup:
-Follow the upper **Environment Setup** section at first. After that,
+SMAC: <br>
 ```sh
-$git clone https://github.com/Eclectic-Sheep/sheeprl.git
-$cd sheeprl
-$pip install .[atari,dev,mujoco]
+$python train_smac.py 3s_vs_3z maddpg
+```
+### Failure Analysis
+Simple Spread: <br>
+```sh
+$python -m scripts.pettingzoo.multi_seed_statistics simple_spread_v3 <model_path> --total_experiments 500
+```
+SMAC: <br>
+```sh
+$python -m scripts.smac.multi_seed_statistics 3s_vs_3z <model_path> --total_experiments 100
 ```
 
-## SheepRL Example Run:
-To run a [PPO](https://openai.com/index/openai-baselines-ppo/) agent on [RiverRaid](https://ale.farama.org/environments/riverraid/) environment:
-```sh
-$python sheeprl.py exp=ppo env=atari env.id=RiverraidNoFrameskip-v4 algo.cnn_keys.encoder=[rgb] fabric.accelerator=gpu fabric.strategy=ddp fabric.devices=1 algo.mlp_keys.encoder=[]
-$python sheeprl_eval.py checkpoint_path=logs/runs/ppo/RiverraidNoFrameskip-v4/2025-02-15_21-51-00_ppo_RiverraidNoFrameskip-v4_42/version_0/checkpoint/ckpt_6166016_0.ckpt fabric.accelerator=cpu env.capture_video=True
-```
-How to docs: https://github.com/Eclectic-Sheep/sheeprl/tree/main/howto
+## ENVs
+- MPE: https://pettingzoo.farama.org/environments/mpe/
+- Multigrid: https://github.com/ArnaudFickinger/gym-multigrid
+- VMAS: https://vmas.readthedocs.io/
+- SMAC: https://github.com/oxwhirl/smac/tree/master
 
 ## Acknowledgements
+- MADDPG: https://github.com/shariqiqbal2810/maddpg-pytorch
+- MAPPO: https://github.com/Lizhi-sjtu/MARL-code-pytorch/tree/main/1.MAPPO_MPE
 - AdvExRL (https://github.com/asifurrahman1/AdvEx-RL.git)
 - SheepRL (https://github.com/Eclectic-Sheep/sheeprl)
+- Stable Baselines 3 (https://github.com/DLR-RM/stable-baselines3)

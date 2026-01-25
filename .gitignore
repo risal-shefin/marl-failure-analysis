@@ -333,3 +333,21 @@ sheeprl/examples/models
 sheeprl/session_*
 sheeprl/bin/
 # SheepRL gitignore ends
+
+
+AgileRL/logs
+
+
+# MADDPG_NEW_CODE gitignore
+.mypy_cache/
+**/models/
+**/results/
+!**/modules/results/
+**/slurm_files/
+**/baselines/
+**/assets/
+**/MADDPG_Simple_Ref_V3_results/
+
+maddpg-pytorch/runs/
+MAPPO_MPE/runs/
+MAPPO_MPE/model/

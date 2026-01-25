@@ -1,0 +1,2 @@
+from .collect_game import CollectGame4HEnv10x10N2
+from .soccer_game import SoccerGame4HEnv10x15N2

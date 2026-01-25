@@ -1,0 +1,62 @@
+ [!!!] Anomaly detected for agent 1 at timestep: 10. Taylor Appx. Error: 0.0687412429600954
+
+ --- Timestep: 10 ------
+ --- Frob norm ranking: [(0, 9.37195873260498), (2, 4.341427803039551)]
+ >> Cascading anomaly detected for agent 0. 2nd Dir Derivative: -3.923802614212036
+
+ --- Timestep: 11 ------
+ --- Frob norm ranking: [(2, 9.955414772033691), (0, 9.349265098571777)]
+
+ --- Timestep: 12 ------
+ --- Frob norm ranking: [(0, 9.10779857635498), (2, 8.597367286682129)]
+
+ --- Timestep: 13 ------
+ --- Frob norm ranking: [(2, 7.554719924926758), (0, 5.8269734382629395)]
+
+ --- Timestep: 14 ------
+ --- Frob norm ranking: [(2, 7.466205596923828), (0, 4.758428573608398)]
+ >> Cascading anomaly detected for agent 2. 2nd Dir Derivative: -1.1451542377471924
+
+ --- Timestep: 15 ------
+ --- Frob norm ranking: [(2, 7.082022190093994), (0, 4.611406326293945)]
+ >> Cascading anomaly detected for agent 2. 2nd Dir Derivative: -0.1496419608592987
+
+ --- Timestep: 16 ------
+ --- Frob norm ranking: [(2, 5.957256317138672), (0, 4.5523881912231445)]
+
+ --- Timestep: 17 ------
+ --- Frob norm ranking: [(0, 5.315178871154785), (2, 4.7618489265441895)]
+ >> Cascading anomaly detected for agent 0. 2nd Dir Derivative: -1.5918552875518799
+
+ --- Timestep: 18 ------
+ --- Frob norm ranking: [(0, 5.305053234100342), (2, 4.255266189575195)]
+ >> Cascading anomaly detected for agent 0. 2nd Dir Derivative: -0.8200739622116089
+
+ --- Timestep: 19 ------
+ --- Frob norm ranking: [(0, 6.0196533203125), (2, 3.4632680416107178)]
+ >> Cascading anomaly detected for agent 2. 2nd Dir Derivative: -0.5948901176452637
+
+ --- Timestep: 20 ------
+ --- Frob norm ranking: [(0, 6.623783111572266), (2, 3.113600969314575)]
+ >> Cascading anomaly detected for agent 2. 2nd Dir Derivative: -0.6185002326965332
+
+ --- Timestep: 21 ------
+ --- Frob norm ranking: [(0, 6.437716960906982), (2, 2.74421763420105)]
+ >> Cascading anomaly detected for agent 2. 2nd Dir Derivative: -0.7588013410568237
+
+ --- Timestep: 22 ------
+ --- Frob norm ranking: [(0, 5.967893600463867), (2, 2.887786388397217)]
+ >> Cascading anomaly detected for agent 0. 2nd Dir Derivative: -0.5059702396392822
+
+ --- Timestep: 23 ------
+ --- Frob norm ranking: [(0, 5.826029300689697), (2, 2.7966694831848145)]
+ >> Cascading anomaly detected for agent 0. 2nd Dir Derivative: -0.8473063707351685
+ >> Cascading anomaly detected for agent 2. 2nd Dir Derivative: -0.48468977212905884
+
+ --- Timestep: 24 ------
+ --- Frob norm ranking: [(0, 5.085639476776123), (2, 2.7228989601135254)]
+ >> Cascading anomaly detected for agent 0. 2nd Dir Derivative: -1.8641730546951294
+Episode reward: -44.83707153056634
+Episode rewards: [-14.945690510188783, -14.945690510188783, -14.945690510188783]
+Saved 25 timestep matrices to /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/maddpg-pytorch/runs/simple_spread_v3_discrete/20250724-032812/maddpg_h_data_atk_1.csv
+Saved analysis plot to /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/maddpg-pytorch/runs/simple_spread_v3_discrete/20250724-032812

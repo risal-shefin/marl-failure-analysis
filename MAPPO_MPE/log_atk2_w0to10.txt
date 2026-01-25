@@ -1,0 +1,96 @@
+observation_space= [Box(-inf, inf, (18,), float32), Box(-inf, inf, (18,), float32), Box(-inf, inf, (18,), float32)]
+obs_dim_n=[18, 18, 18]
+action_space= [Discrete(5), Discrete(5), Discrete(5)]
+action_dim_n=[5, 5, 5]
+------use_orthogonal_init------
+------use_orthogonal_init------
+------set adam eps------
+------use reward norm------
+Logging directory: /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE/runs/simple_spread_v3_discrete/20250725-031427
+ >> attacked
+ >> attacked
+ >> attacked
+ >> attacked
+ >> attacked
+ >> attacked
+ >> attacked
+ [!!!] Anomaly detected for agent 2 at timestep: 6. Taylor Appx. Error: 0.041812913864851
+
+ --- Timestep: 6 ------
+ --- Frob norm ranking: [(0, 0.17452800273895264), (1, 0.1631883829832077)]
+	 >> Potential Vulnerability for agent 0. 2nd Dir Derivative: -0.01727141998708248
+ >> attacked
+
+ --- Timestep: 7 ------
+ --- Frob norm ranking: [(0, 0.17232440412044525), (1, 0.16175192594528198)]
+	 >> Potential Vulnerability for agent 0. 2nd Dir Derivative: -0.020708315074443817
+ >> attacked
+
+ --- Timestep: 8 ------
+ --- Frob norm ranking: [(0, 0.16559037566184998), (1, 0.15259848535060883)]
+	 >> Potential Vulnerability for agent 0. 2nd Dir Derivative: -0.024273782968521118
+ >> attacked
+
+ --- Timestep: 9 ------
+ --- Frob norm ranking: [(0, 0.163129523396492), (1, 0.14880488812923431)]
+	 >> Potential Vulnerability for agent 0. 2nd Dir Derivative: -0.02100607194006443
+ >> attacked
+
+ --- Timestep: 10 ------
+ --- Frob norm ranking: [(0, 0.15938641130924225), (1, 0.14323222637176514)]
+	 >> Potential Vulnerability for agent 0. 2nd Dir Derivative: -0.015606891363859177
+
+ --- Timestep: 11 ------
+ --- Frob norm ranking: [(0, 0.15810535848140717), (1, 0.13968542218208313)]
+	 >> Potential Vulnerability for agent 0. 2nd Dir Derivative: -0.011127673089504242
+
+ --- Timestep: 12 ------
+ --- Frob norm ranking: [(0, 0.1541275531053543), (1, 0.14131976664066315)]
+	 >> Potential Vulnerability for agent 0. 2nd Dir Derivative: -0.0037174129392951727
+
+ --- Timestep: 13 ------
+ --- Frob norm ranking: [(0, 0.14770987629890442), (1, 0.1369926631450653)]
+	 >> Potential Vulnerability for agent 0. 2nd Dir Derivative: -6.497092545032501e-05
+	 >> Potential Vulnerability for agent 1. 2nd Dir Derivative: -0.00013491744175553322
+
+ --- Timestep: 14 ------
+ --- Frob norm ranking: [(0, 0.14302150905132294), (1, 0.13868272304534912)]
+	 >> Potential Vulnerability for agent 1. 2nd Dir Derivative: -0.0010491902939975262
+
+ --- Timestep: 15 ------
+ --- Frob norm ranking: [(0, 0.1406015306711197), (1, 0.14009493589401245)]
+	 >> Potential Vulnerability for agent 1. 2nd Dir Derivative: -0.0004025944508612156
+
+ --- Timestep: 16 ------
+ --- Frob norm ranking: [(0, 0.14067195355892181), (1, 0.13921821117401123)]
+	 >> Potential Vulnerability for agent 1. 2nd Dir Derivative: -0.0007330928929150105
+
+ --- Timestep: 17 ------
+ --- Frob norm ranking: [(1, 0.13458769023418427), (0, 0.1325838565826416)]
+
+ --- Timestep: 18 ------
+ --- Frob norm ranking: [(1, 0.1335766762495041), (0, 0.12952113151550293)]
+
+ --- Timestep: 19 ------
+ --- Frob norm ranking: [(1, 0.13723914325237274), (0, 0.1363452672958374)]
+
+ --- Timestep: 20 ------
+ --- Frob norm ranking: [(0, 0.1422504484653473), (1, 0.1370018571615219)]
+
+ --- Timestep: 21 ------
+ --- Frob norm ranking: [(0, 0.1507941633462906), (1, 0.14221502840518951)]
+
+ --- Timestep: 22 ------
+ --- Frob norm ranking: [(0, 0.15306052565574646), (1, 0.15046219527721405)]
+
+ --- Timestep: 23 ------
+ --- Frob norm ranking: [(1, 0.1534046232700348), (0, 0.15098951756954193)]
+	 >> Potential Vulnerability for agent 0. 2nd Dir Derivative: -0.00043452344834804535
+	 >> Potential Vulnerability for agent 1. 2nd Dir Derivative: -0.003813371993601322
+
+ --- Timestep: 24 ------
+ --- Frob norm ranking: [(1, 0.15341681241989136), (0, 0.15292039513587952)]
+	 >> Potential Vulnerability for agent 1. 2nd Dir Derivative: -0.006166772451251745
+Episode finished. Rewards: {0: -28.758780237757435, 1: -28.758780237757435, 2: -27.258780237757435}  Steps: 25
+Saved 25 timestep matrices to /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE/runs/simple_spread_v3_discrete/20250725-031427/maddpg_h_data_atk_2.csv
+Saved analysis plot to /deac/csc/alqahtaniGrp/shefrs24/AdversaryLoss-Container/AdversaryLoss/MAPPO_MPE/runs/simple_spread_v3_discrete/20250725-031427
