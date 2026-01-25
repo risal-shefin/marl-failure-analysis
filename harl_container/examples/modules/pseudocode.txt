@@ -1,0 +1,41 @@
+
+def select_agent_max_taylor_deviation(initial_patient_zero):
+	#select the agent that has maximum taylor deviation
+	
+Step 1: Initialization
+initial_patient_zero = detect_patient_zero()
+If len(initial_patient_zero) > 1: // need tie break
+	Initial_patient_zero = select_agent_max_taylor_deviation(initial_patient_zero)
+detection_time = get_detection_time(initial_patient_zero)
+
+# Begin traceback from the detected agent
+trace_back_influence_chain(initial_patient_zero, [initial_patient_zero])
+
+
+Step 2: Recursive Traceback Function
+def trace_back_influence_chain(current_agent, chain):
+    most_influential = None
+
+    for other_agent in all_agents:
+        if other_agent == current_agent:
+            continue  # Skip self-comparison
+
+        # Compute influence from other_agent to current_agent
+        Dij_rate = compute_positive_Dij_rate(other_agent, current_agent, timestep_window)
+
+        # Select the most influential agent so far
+        # Use Dij_rate as primary metric; break ties using G_ij norm
+        most_influential = update_most_influential(most_influential, other_agent, Dij_rate)
+
+    # Stop if cycle is detected
+    if most_influential in chain:
+        return
+
+    # Add to influence chain and continue tracing
+    chain.append(most_influential)
+    trace_back_influence_chain(most_influential, chain)
+
+Step 3: Finalize the True Patient Zero
+	# Reverse the chain to get influence from the source to initially detected agent
+influence_chain = list(reversed(chain))
+true_patient_zero = influence_chain[0]
