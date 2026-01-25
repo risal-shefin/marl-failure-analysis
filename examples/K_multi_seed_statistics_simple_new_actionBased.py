@@ -34,7 +34,7 @@ from modules.detection import get_patient_zero_detection
 from harl.utils.envs_tools import (
     make_eval_env
 )
-
+from modules.traceback import PatientZeroAnalyzer
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -95,10 +95,12 @@ class MultiSeedExperimentRunner:
         self.runner_args = None
         self.runner_algo_args = None
         self.runner_env_args = None
+        self.folder_name = self.config.folder_name if hasattr(self.config, 'folder_name') else "test-run-K-New"
         # Results storage
         self.experiment_results = []
         self.failed_seeds = []
         self.cumulative_influences_data = []  # Store cumulative influence data for all seeds
+        self.patient_zero_analyzer = None
         
     def log_directional_derivatives(self, directional_derivatives_history, seed, episode_length):
         """
@@ -574,7 +576,7 @@ class MultiSeedExperimentRunner:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         env_type = 'discrete'
         # the recent run before sun oct 5 12 save to test-Run-K
-        self.logdir = os.path.join(cwd, 'Prev-Influence-Run-K', str(self.total_experiments), f"{args['env']}",
+        self.logdir = os.path.join(cwd, self.folder_name,f"Agent_{self.config.N}" ,str(self.total_experiments), f"{args['env']}",
                                   f"{timestamp}_multi_seed_stats_sigma_{self.K_SIGMA}")
         os.makedirs(self.logdir, exist_ok=True)
         
@@ -584,7 +586,7 @@ class MultiSeedExperimentRunner:
         # Prepare runner for training mode
         device_str = 'gpu' if DEVICE == 'gpu' else 'cpu'
         # self.runner.prep_training(device=device_str)
-        
+        self.patient_zero_analyzer = PatientZeroAnalyzer(self.runner.num_agents)
         print(f"Multi-seed experiment setup complete. Log directory: {self.logdir}")
         print(f"Will run {self.total_experiments} experiments")
         # for env in self.runner.envs:
@@ -1263,6 +1265,7 @@ class MultiSeedExperimentRunner:
             'episode_length': cnt,
             'episode_reward': reward_ep,
             'attack_timestep': min_window,
+            'attack_timesteps':[min_window],
             'attacked_agent': attack_agent_id,
             'observed_agent': observe_agent_id,
             'stepwise_rewards': total_rewards,
@@ -1276,83 +1279,806 @@ class MultiSeedExperimentRunner:
             'stepwise_rewards': total_rewards,
         }
     
-    def find_influence_timesteps(self, action_influences_history, agent_i, agent_j, first_quarter_steps):
-        """
-        Find max and min influence timesteps of agent i on agent j in first 25% of episode.
-        
-        Args:
-            action_influences_history: List of action influence matrices
-            agent_i: Index of influencing agent
-            agent_j: Index of influenced agent (where action_influences_matrix[t][j][i] = influence of i on j)
-            first_quarter_steps: Number of steps in first quarter
-            
-        Returns:
-            Tuple of (max_influence_timestep, min_influence_timestep)
-        """
-        influences = []
-        for t in range(min(first_quarter_steps, len(action_influences_history))):
-            # Correct indexing: action_influences_matrix[t][j][i] = influence of i on j
-            influence = abs(action_influences_history[t][agent_j][agent_i])
-            influences.append((influence, t))
-        
-        # Sort by influence magnitude
-        influences.sort(key=lambda x: x[0])
-        
-        min_influence_t = influences[0][1]  # Lowest influence
-        max_influence_t = influences[-1][1]  # Highest influence
-        
-        return max_influence_t, min_influence_t
-    # def find_influence_timesteps(self, action_influences_history, directional_derivatives_history, agent_i, agent_j, atk_steps_limit, k_steps):
+    # def find_influence_timesteps(self, action_influences_history, agent_i, agent_j, first_quarter_steps):
     #     """
     #     Find max and min influence timesteps of agent i on agent j in first 25% of episode.
-    #     Uses directional second derivatives to filter timesteps:
-    #     - High influence: positive directional second derivative + maximum action influence
-    #     - Low influence: negative directional second derivative + minimum action influence
         
     #     Args:
     #         action_influences_history: List of action influence matrices
-    #         directional_derivatives_history: List of directional second derivative matrices
     #         agent_i: Index of influencing agent
     #         agent_j: Index of influenced agent (where action_influences_matrix[t][j][i] = influence of i on j)
-    #         atk_steps_limit: Last step that can be attacked
-    #         k_steps: Number of timesteps to return (currently expecting 1)
+    #         first_quarter_steps: Number of steps in first quarter
             
     #     Returns:
     #         Tuple of (max_influence_timestep, min_influence_timestep)
     #     """
-    #     positive_derivative_timesteps = []  # For high influence selection
-    #     negative_derivative_timesteps = []  # For low influence selection
-        
-    #     for t in range(min(atk_steps_limit, len(action_influences_history), len(directional_derivatives_history))):
-    #         # Get action influence of agent_i on agent_j at timestep t
+    #     influences = []
+    #     for t in range(min(first_quarter_steps, len(action_influences_history))):
+    #         # Correct indexing: action_influences_matrix[t][j][i] = influence of i on j
     #         influence = abs(action_influences_history[t][agent_j][agent_i])
+    #         influences.append((influence, t))
+        
+    #     # Sort by influence magnitude
+    #     influences.sort(key=lambda x: x[0])
+        
+    #     min_influence_t = influences[0][1]  # Lowest influence
+    #     max_influence_t = influences[-1][1]  # Highest influence
+        
+    #     return max_influence_t, min_influence_t
+    def find_influence_timesteps(self, action_influences_history, directional_derivatives_history, agent_i, agent_j, atk_steps_limit, k_steps):
+        """
+        Find max and min influence timesteps of agent i on agent j in first 25% of episode.
+        Uses directional second derivatives to filter timesteps:
+        - High influence: positive directional second derivative + maximum action influence
+        - Low influence: negative directional second derivative + minimum action influence
+        
+        Args:
+            action_influences_history: List of action influence matrices
+            directional_derivatives_history: List of directional second derivative matrices
+            agent_i: Index of influencing agent
+            agent_j: Index of influenced agent (where action_influences_matrix[t][j][i] = influence of i on j)
+            atk_steps_limit: Last step that can be attacked
+            k_steps: Number of timesteps to return (currently expecting 1)
             
-    #         # Get directional second derivative of agent_i on agent_j at timestep t
-    #         directional_derivative = directional_derivatives_history[t][agent_j][agent_i]
+        Returns:
+            Tuple of (max_influence_timestep, min_influence_timestep)
+        """
+        positive_derivative_timesteps = []  # For high influence selection
+        negative_derivative_timesteps = []  # For low influence selection
+        # print(f"Directional Derivaties History : {directional_derivatives_history}")
+        for t in range(min(atk_steps_limit, len(action_influences_history), len(directional_derivatives_history))):
+            # Get action influence of agent_i on agent_j at timestep t
+            influence = abs(action_influences_history[t][agent_j][agent_i])
             
-    #         if directional_derivative > 0:
-    #             positive_derivative_timesteps.append((influence, t))
-    #         elif directional_derivative < 0:
-    #             negative_derivative_timesteps.append((influence, t))
+            # Get directional second derivative of agent_i on agent_j at timestep t
+            directional_derivative = directional_derivatives_history[t][agent_j][agent_i]
+            
+            if directional_derivative > 0:
+                positive_derivative_timesteps.append((influence, t))
+            elif directional_derivative < 0:
+                negative_derivative_timesteps.append((influence, t))
         
-    #     # For high influence: among positive derivative timesteps, choose maximum action influence
-    #     max_influences_t = []
-    #     if positive_derivative_timesteps:
-    #         positive_derivative_timesteps.sort(key=lambda x: x[0], reverse=True)  # Sort by influence, descending
-    #         max_influences_t = [t for _, t in positive_derivative_timesteps[:k_steps]]
+            print(" >>> ", directional_derivative)
+        print(f"--- Positive derivative timesteps (influence, t): {positive_derivative_timesteps}")
+        print(f"--- Negative derivative timesteps (influence, t): {negative_derivative_timesteps}")
+        # For high influence: among positive derivative timesteps, choose maximum action influence
+        max_influences_t = []
+        if positive_derivative_timesteps:
+            positive_derivative_timesteps.sort(key=lambda x: x[0], reverse=True)  # Sort by influence, descending
+            max_influences_t = [t for _, t in positive_derivative_timesteps[:k_steps]]
         
-    #     # For low influence: among negative derivative timesteps, choose minimum action influence
-    #     min_influences_t = []
-    #     if negative_derivative_timesteps:
-    #         negative_derivative_timesteps.sort(key=lambda x: x[0])  # Sort by influence, ascending
-    #         min_influences_t = [t for _, t in negative_derivative_timesteps[:k_steps]]
+        # For low influence: among negative derivative timesteps, choose minimum action influence
+        min_influences_t = []
+        if negative_derivative_timesteps:
+            negative_derivative_timesteps.sort(key=lambda x: x[0])  # Sort by influence, ascending
+            min_influences_t = [t for _, t in negative_derivative_timesteps[:k_steps]]
         
-    #     max_influences_t.sort()
-    #     min_influences_t.sort()
+        max_influences_t.sort()
+        min_influences_t.sort()
 
-    #     return max_influences_t, min_influences_t
+        return max_influences_t, min_influences_t
 
 
+    def select_agent_max_taylor_deviation(self, initial_patient_zero_list, fault_timeline, taylor_errors_history, ref_vals, seed=None):
+        """
+        Select the agent that has maximum taylor deviation from the initial patient zero candidates.
+        
+        Args:
+            initial_patient_zero_list: List of candidate patient zero agent IDs
+            fault_timeline: List of fault detection events
+            taylor_errors_history: List of taylor errors per agent per timestep
+            ref_vals: Reference Taylor error values (mean values)
+            seed: Current seed (for logging purposes)
+            
+        Returns:
+            Agent ID with maximum taylor deviation at detection timestep
+        """
+        if not initial_patient_zero_list or len(initial_patient_zero_list) == 1:
+            return initial_patient_zero_list[0] if initial_patient_zero_list else None
+            
+        # Log tie-breaker usage
+        if not hasattr(self, 'tie_breaker_stats'):
+            self.tie_breaker_stats = {
+                'total_tie_breakers': 0,
+                'seeds_with_tie_breakers': [],
+                'tie_breaker_details': []
+            }
+        
+        self.tie_breaker_stats['total_tie_breakers'] += 1
+        if seed is not None and seed not in self.tie_breaker_stats['seeds_with_tie_breakers']:
+            self.tie_breaker_stats['seeds_with_tie_breakers'].append(seed)
+            
+        max_deviation = -1.0
+        selected_agent = initial_patient_zero_list[0]
+        
+        print(f"Breaking tie among patient zero candidates: {initial_patient_zero_list} (Seed: {seed})")
+        
+        tie_breaker_detail = {
+            'seed': seed,
+            'candidates': initial_patient_zero_list.copy(),
+            'candidate_deviations': {}
+        }
+        
+        for agent_id in initial_patient_zero_list:
+            # Find the detection timestep for this agent
+            detection_timestep = None
+            for event in fault_timeline:
+                if event.get('agent') == agent_id:
+                    detection_timestep = event.get('t')
+                    break
+            
+            if detection_timestep is None or detection_timestep >= len(taylor_errors_history):
+                continue
+                
+            # Get taylor error at detection timestep
+            taylor_error = taylor_errors_history[detection_timestep][agent_id]
+            
+            # Get reference mean value at detection timestep
+            if detection_timestep < len(ref_vals[agent_id]):
+                ref_mean = ref_vals[agent_id][detection_timestep]
+                deviation = abs(taylor_error - ref_mean)
+                
+                tie_breaker_detail['candidate_deviations'][agent_id] = {
+                    'taylor_error': taylor_error,
+                    'ref_mean': ref_mean,
+                    'deviation': deviation
+                }
+                
+                print(f"Agent {agent_id}: Taylor error = {taylor_error:.6f}, Ref mean = {ref_mean:.6f}, Deviation = {deviation:.6f}")
+                
+                if deviation > max_deviation:
+                    max_deviation = deviation
+                    selected_agent = agent_id
+        
+        tie_breaker_detail['selected_agent'] = selected_agent
+        tie_breaker_detail['max_deviation'] = max_deviation
+        self.tie_breaker_stats['tie_breaker_details'].append(tie_breaker_detail)
+        
+        print(f"Selected agent {selected_agent} with maximum deviation {max_deviation:.6f}")
+        return selected_agent
+
+    def compute_positive_Dij_rate(self, agent_i, agent_j, directional_derivatives_history, timestep_window):
+        """
+        Compute the rate of positive directional second derivatives from agent_i to agent_j
+        within the specified timestep window.
+        
+        Args:
+            agent_i: Influencing agent ID
+            agent_j: Influenced agent ID (current agent in traceback)
+            directional_derivatives_history: List of directional second derivative matrices
+            timestep_window: Tuple of (start_timestep, end_timestep) to analyze
+            
+        Returns:
+            Rate of positive directional derivatives (between 0 and 1)
+        """
+        start_t, end_t = timestep_window
+        positive_count = 0
+        total_count = 0
+        
+        for t in range(start_t, min(end_t + 1, len(directional_derivatives_history))):
+            if t < len(directional_derivatives_history):
+                # directional_derivatives_history[t][j][i] = influence of i on j
+                derivative = directional_derivatives_history[t][agent_j][agent_i]
+                if derivative > 0:
+                    positive_count += 1
+                total_count += 1
+        
+        return positive_count / total_count if total_count > 0 else 0.0
+
+    def update_most_influential(self, current_most_influential, candidate_agent, candidate_Dij_rate, action_influences_history, timestep_window, detection_time=None, seed=None):
+        """
+        Update the most influential agent based on Dij_rate as primary metric,
+        G_ij norm as first tie-breaker, and action influence at detection time as second tie-breaker.
+        
+        Args:
+            current_most_influential: Dict with current most influential agent info or None
+            candidate_agent: ID of candidate agent to compare
+            candidate_Dij_rate: Dij rate for candidate agent
+            action_influences_history: List of action influence matrices
+            timestep_window: Tuple of (start_timestep, end_timestep) to analyze
+            detection_time: Specific timestep for final tie-breaking
+            seed: Current seed (for logging purposes)
+            
+        Returns:
+            Dict with most influential agent info: {'agent_id', 'dij_rate', 'gij_norm', 'detection_influence'}
+        """
+        # Helper function to get action influence at detection time
+        def get_detection_time_influence(agent_i, target_agent, action_influences_history, detection_time):
+            if detection_time is not None and detection_time < len(action_influences_history):
+                return abs(action_influences_history[detection_time][target_agent][agent_i])
+            return 0.0
+        
+        if current_most_influential is None:
+            # First candidate
+            target_agent = 0  # Will be updated when we have a target
+            gij_norm = self.compute_average_gij_norm(candidate_agent, target_agent, action_influences_history, timestep_window)
+            detection_influence = get_detection_time_influence(candidate_agent, target_agent, action_influences_history, detection_time)
+            return {
+                'agent_id': candidate_agent,
+                'dij_rate': candidate_Dij_rate,
+                'gij_norm': gij_norm,
+                'detection_influence': detection_influence,
+                'target_agent': target_agent
+            }
+        
+        target_agent = current_most_influential['target_agent']
+        
+        # Compare with current most influential
+        if candidate_Dij_rate > current_most_influential['dij_rate']:
+            # Better Dij rate
+            gij_norm = self.compute_average_gij_norm(candidate_agent, target_agent, action_influences_history, timestep_window)
+            detection_influence = get_detection_time_influence(candidate_agent, target_agent, action_influences_history, detection_time)
+            return {
+                'agent_id': candidate_agent,
+                'dij_rate': candidate_Dij_rate,
+                'gij_norm': gij_norm,
+                'detection_influence': detection_influence,
+                'target_agent': target_agent
+            }
+        elif candidate_Dij_rate == current_most_influential['dij_rate']:
+            # Tie in Dij rate, use G_ij norm as first tie-breaker
+            candidate_gij_norm = self.compute_average_gij_norm(candidate_agent, target_agent, action_influences_history, timestep_window)
+            
+            if candidate_gij_norm > current_most_influential['gij_norm']:
+                # Better G_ij norm
+                detection_influence = get_detection_time_influence(candidate_agent, target_agent, action_influences_history, detection_time)
+                return {
+                    'agent_id': candidate_agent,
+                    'dij_rate': candidate_Dij_rate,
+                    'gij_norm': candidate_gij_norm,
+                    'detection_influence': detection_influence,
+                    'target_agent': target_agent
+                }
+            elif candidate_gij_norm == current_most_influential['gij_norm']:
+                # Second tie! Use action influence at detection time as final tie-breaker
+                candidate_detection_influence = get_detection_time_influence(candidate_agent, target_agent, action_influences_history, detection_time)
+                current_detection_influence = current_most_influential.get('detection_influence', 0.0)
+                
+                # Initialize second-level tie-breaker tracking
+                if not hasattr(self, 'second_level_tie_stats'):
+                    self.second_level_tie_stats = {
+                        'total_second_ties': 0,
+                        'seeds_with_second_ties': [],
+                        'second_tie_details': []
+                    }
+                
+                self.second_level_tie_stats['total_second_ties'] += 1
+                if seed is not None and seed not in self.second_level_tie_stats['seeds_with_second_ties']:
+                    self.second_level_tie_stats['seeds_with_second_ties'].append(seed)
+                
+                # Log the second-level tie-breaking
+                second_tie_detail = {
+                    'seed': seed,
+                    'target_agent': target_agent,
+                    'tied_agents': [current_most_influential['agent_id'], candidate_agent],
+                    'dij_rate': candidate_Dij_rate,
+                    'gij_norm': candidate_gij_norm,
+                    'detection_influences': {
+                        current_most_influential['agent_id']: current_detection_influence,
+                        candidate_agent: candidate_detection_influence
+                    },
+                    'winner': None
+                }
+                
+                print(f"[SECOND-LEVEL TIE] Seed {seed}: Agents {current_most_influential['agent_id']} vs {candidate_agent} "
+                      f"for target agent {target_agent}")
+                print(f"  Both have Dij_rate={candidate_Dij_rate:.4f}, Gij_norm={candidate_gij_norm:.6f}")
+                print(f"  Detection time influences: Agent {current_most_influential['agent_id']}={current_detection_influence:.6f}, "
+                      f"Agent {candidate_agent}={candidate_detection_influence:.6f}")
+                
+                if candidate_detection_influence > current_detection_influence:
+                    second_tie_detail['winner'] = candidate_agent
+                    print(f"  Winner: Agent {candidate_agent} (higher detection time influence)")
+                    self.second_level_tie_stats['second_tie_details'].append(second_tie_detail)
+                    return {
+                        'agent_id': candidate_agent,
+                        'dij_rate': candidate_Dij_rate,
+                        'gij_norm': candidate_gij_norm,
+                        'detection_influence': candidate_detection_influence,
+                        'target_agent': target_agent
+                    }
+                else:
+                    second_tie_detail['winner'] = current_most_influential['agent_id']
+                    print(f"  Winner: Agent {current_most_influential['agent_id']} (higher or equal detection time influence)")
+                    self.second_level_tie_stats['second_tie_details'].append(second_tie_detail)
+        
+        # Current most influential is still better (or tied but not better)
+        return current_most_influential
+
+    def compute_average_gij_norm(self, agent_i, agent_j, action_influences_history, timestep_window):
+        """
+        Compute the average G_ij (action influence) norm from agent_i to agent_j
+        within the specified timestep window.
+        
+        Args:
+            agent_i: Influencing agent ID
+            agent_j: Influenced agent ID
+            action_influences_history: List of action influence matrices
+            timestep_window: Tuple of (start_timestep, end_timestep) to analyze
+            
+        Returns:
+            Average G_ij norm in the timestep window
+        """
+        start_t, end_t = timestep_window
+        total_influence = 0.0
+        count = 0
+        
+        for t in range(start_t, min(end_t + 1, len(action_influences_history))):
+            if t < len(action_influences_history):
+                # action_influences_history[t][j][i] = influence of i on j
+                influence = abs(action_influences_history[t][agent_j][agent_i])
+                total_influence += influence
+                count += 1
+        
+        return total_influence / count if count > 0 else 0.0
+
+    def trace_back_influence_chain(self, current_agent, chain, directional_derivatives_history, action_influences_history, detection_time, episode_length, seed=None):
+        """
+        Recursive function to trace back the influence chain from current agent.
+        
+        Args:
+            current_agent: Current agent being analyzed
+            chain: Current influence chain (list of agent IDs)
+            directional_derivatives_history: List of directional second derivative matrices
+            action_influences_history: List of action influence matrices
+            detection_time: Timestep when patient zero was detected
+            episode_length: Total episode length
+            seed: Current seed (for logging purposes)
+            
+        Returns:
+            Complete influence chain (list of agent IDs)
+        """
+        print(f"Tracing back from agent {current_agent}, current chain: {chain}")
+        
+        # Define timestep window for analysis (from detection time backwards)
+        window_size = min(5, detection_time)  # Look back up to 5 timesteps
+        timestep_window = (max(0, detection_time - window_size+1), detection_time)
+        
+        most_influential = None
+        
+        for other_agent in range(self.runner.num_agents):
+            if other_agent == current_agent:
+                continue  # Skip self-comparison
+            
+            # Compute influence from other_agent to current_agent
+            Dij_rate = self.compute_positive_Dij_rate(other_agent, current_agent, 
+                                                    directional_derivatives_history, timestep_window)
+            
+            print(f"Agent {other_agent} -> Agent {current_agent}: Dij_rate = {Dij_rate:.4f}")
+            
+            # Update most influential agent
+            if most_influential is None:
+                detection_influence = abs(action_influences_history[detection_time][current_agent][other_agent]) if detection_time < len(action_influences_history) else 0.0
+                most_influential = {
+                    'agent_id': other_agent,
+                    'dij_rate': Dij_rate,
+                    'gij_norm': self.compute_average_gij_norm(other_agent, current_agent, 
+                                                            action_influences_history, timestep_window),
+                    'detection_influence': detection_influence,
+                    'target_agent': current_agent
+                }
+            else:
+                most_influential = self.update_most_influential(most_influential, other_agent, Dij_rate,
+                                                               action_influences_history, timestep_window, 
+                                                               detection_time, seed)
+        
+        # Stop if no influential agent found or if cycle is detected
+        if most_influential is None or most_influential['dij_rate'] == 0.0:
+            print(f"No influential agent found for {current_agent}. Stopping traceback.")
+            return chain
+            
+        most_influential_agent = most_influential['agent_id']
+        
+        if most_influential_agent in chain:
+            print(f"Cycle detected: Agent {most_influential_agent} already in chain {chain}")
+            return chain
+        
+        print(f"Most influential agent for {current_agent}: {most_influential_agent} (Dij_rate: {most_influential['dij_rate']:.4f}, Gij_norm: {most_influential['gij_norm']:.6f})")
+        
+        # Add to influence chain and continue tracing
+        new_chain = chain + [most_influential_agent]
+        return self.trace_back_influence_chain(most_influential_agent, new_chain, 
+                                             directional_derivatives_history, action_influences_history,
+                                             detection_time, episode_length, seed)
+
+    def detect_patient_zero_and_traceback(self, fault_timeline, taylor_errors_history, ref_vals, 
+                                         directional_derivatives_history, action_influences_history, episode_length, 
+                                         attack_timestep=None, seed=None):
+        """
+        Main function that implements the complete patient zero detection and traceback algorithm.
+        
+        Args:
+            fault_timeline: List of fault detection events
+            taylor_errors_history: List of taylor errors per agent per timestep
+            ref_vals: Reference Taylor error values
+            directional_derivatives_history: List of directional second derivative matrices
+            action_influences_history: List of action influence matrices
+            episode_length: Total episode length
+            attack_timestep: Actual attack timestep (for validation)
+            seed: Current seed (for logging purposes)
+            
+        Returns:
+            Dict containing:
+            - 'initial_patient_zero': Initially detected patient zero
+            - 'detection_time': Detection timestep
+            - 'influence_chain': Complete influence chain (from true patient zero to initially detected)
+            - 'true_patient_zero': True patient zero (source of influence chain)
+            - 'is_incorrect_detection': Boolean indicating if detection is incorrect
+            - 'detection_validation': Dict with validation details
+        """
+        print(f"\n{'='*60}")
+        print(f"PATIENT ZERO DETECTION AND TRACEBACK ANALYSIS (Seed: {seed})")
+        print(f"{'='*60}")
+        
+        # Initialize detection validation tracking
+        if not hasattr(self, 'detection_stats'):
+            self.detection_stats = {
+                'total_detections': 0,
+                'incorrect_detections': 0,
+                'thresholding_issues': 0,
+                'incorrect_detection_details': []
+            }
+        
+        self.detection_stats['total_detections'] += 1
+        
+        # Step 1: Detect initial patient zero
+        initial_patient_zero_list, detection_time = get_patient_zero_detection(fault_timeline)
+        
+        if not initial_patient_zero_list or detection_time is None:
+            print("No patient zero detected in fault timeline.")
+            return {
+                'initial_patient_zero': None,
+                'detection_time': None,
+                'influence_chain': [],
+                'true_patient_zero': None,
+                'is_incorrect_detection': False,
+                'detection_validation': {'no_detection': True}
+            }
+        
+        print(f"Initial patient zero candidates: {initial_patient_zero_list} at timestep {detection_time}")
+        
+        # Step 1.5: Check for incorrect detection (detection before attack)
+        is_incorrect_detection = False
+        detection_validation = {
+            'attack_timestep': attack_timestep,
+            'detection_time': detection_time,
+            'is_early_detection': False,
+            'is_thresholding_issue': False
+        }
+        
+        if attack_timestep is not None and detection_time < attack_timestep:
+            is_incorrect_detection = True
+            detection_validation['is_early_detection'] = True
+            detection_validation['is_thresholding_issue'] = True
+            
+            self.detection_stats['incorrect_detections'] += 1
+            self.detection_stats['thresholding_issues'] += 1
+            
+            incorrect_detail = {
+                'seed': seed,
+                'detection_time': detection_time,
+                'attack_timestep': attack_timestep,
+                'time_difference': attack_timestep - detection_time,
+                'detected_agents': initial_patient_zero_list.copy(),
+                'issue_type': 'thresholding_issue_normal_region'
+            }
+            self.detection_stats['incorrect_detection_details'].append(incorrect_detail)
+            
+            print(f"[WARNING] Incorrect detection detected!")
+            print(f"  Detection time: {detection_time}, Attack timestep: {attack_timestep}")
+            print(f"  This appears to be a thresholding issue in the normal region")
+            print(f"  Time difference: {attack_timestep - detection_time} timesteps early")
+        
+        # Step 2: Handle tie-breaking if multiple agents detected at same time
+        if len(initial_patient_zero_list) > 1:
+            initial_patient_zero = self.select_agent_max_taylor_deviation(
+                initial_patient_zero_list, fault_timeline, taylor_errors_history, ref_vals, seed)
+        else:
+            initial_patient_zero = initial_patient_zero_list[0]
+        
+        print(f"Selected initial patient zero: Agent {initial_patient_zero}")
+        
+        # Step 3: Begin traceback from the detected agent
+        influence_chain = self.trace_back_influence_chain(
+            current_agent=initial_patient_zero,
+            chain=[initial_patient_zero],
+            directional_derivatives_history=directional_derivatives_history,
+            action_influences_history=action_influences_history,
+            detection_time=detection_time,
+            episode_length=episode_length,
+            seed=seed
+        )
+        
+        # Step 4: Finalize the true patient zero
+        # Reverse the chain to get influence from the source to initially detected agent
+        influence_chain_reversed = list(reversed(influence_chain))
+        true_patient_zero = influence_chain_reversed[0] if influence_chain_reversed else initial_patient_zero
+        
+        print(f"\n{'='*60}")
+        print(f"TRACEBACK RESULTS:")
+        print(f"Initial Patient Zero: Agent {initial_patient_zero}")
+        print(f"Detection Time: {detection_time}")
+        print(f"Influence Chain (from detected to source): {influence_chain}")
+        print(f"Influence Chain (from source to detected): {influence_chain_reversed}")
+        print(f"True Patient Zero: Agent {true_patient_zero}")
+        if is_incorrect_detection:
+            print(f"[WARNING] Incorrect Detection: YES (Thresholding issue)")
+        print(f"{'='*60}")
+        
+        return {
+            'initial_patient_zero': initial_patient_zero,
+            'detection_time': detection_time,
+            'influence_chain': influence_chain_reversed,  # Source to detected
+            'true_patient_zero': true_patient_zero,
+            'is_incorrect_detection': is_incorrect_detection,
+            'detection_validation': detection_validation
+        }
+
+    def run_patient_zero_traceback_analysis(self, attack_results, normal_results, ref_vals, seed=None):
+        """
+        Example function showing how to use the patient zero detection and traceback functionality.
+        
+        Args:
+            attack_results: Results from an attack episode containing fault_timeline
+            normal_results: Results from normal episode containing influence histories
+            ref_vals: Reference Taylor error values
+            seed: Current seed (for logging purposes)
+            
+        Returns:
+            Traceback analysis results
+        """
+        # Extract required data
+        fault_timeline = attack_results.get('fault_timeline', [])
+        taylor_errors_history = attack_results.get('taylor_errors_history', [])
+        attack_timestep = attack_results.get('attack_timestep', None)
+        
+        # Use normal episode data for influence analysis
+        action_influences_history = normal_results.get('action_influences_history', [])
+        directional_derivatives_history = normal_results.get('directional_derivatives_history', [])
+        episode_length = normal_results.get('episode_length', 0)
+        
+        if not fault_timeline:
+            print("No faults detected in attack results. Cannot perform traceback analysis.")
+            return None
+        
+        # Run the complete patient zero detection and traceback analysis
+        traceback_results = self.detect_patient_zero_and_traceback(
+            fault_timeline=fault_timeline,
+            taylor_errors_history=taylor_errors_history,
+            ref_vals=ref_vals,
+            directional_derivatives_history=directional_derivatives_history,
+            action_influences_history=action_influences_history,
+            episode_length=episode_length,
+            attack_timestep=attack_timestep,
+            seed=seed
+        )
+        
+        return traceback_results
+
+    def print_detection_and_tie_breaker_stats(self):
+        """
+        Print comprehensive statistics about detection accuracy and tie-breaker usage.
+        """
+        print(f"\n{'='*80}")
+        print(f"PATIENT ZERO DETECTION AND TIE-BREAKER STATISTICS")
+        print(f"{'='*80}")
+        
+        # Detection statistics
+        if hasattr(self, 'detection_stats'):
+            stats = self.detection_stats
+            total = stats['total_detections']
+            incorrect = stats['incorrect_detections']
+            thresholding = stats['thresholding_issues']
+            
+            print(f"DETECTION ACCURACY:")
+            print(f"  Total detections attempted: {total}")
+            incorrect_pct = (incorrect/total*100) if total > 0 else 0.0
+            thresholding_pct = (thresholding/total*100) if total > 0 else 0.0
+            correct_pct = ((total-incorrect)/total*100) if total > 0 else 0.0
+            print(f"  Incorrect detections: {incorrect} ({incorrect_pct:.2f}%)")
+            print(f"  Thresholding issues (early detection): {thresholding} ({thresholding_pct:.2f}%)")
+            print(f"  Correct detections: {total - incorrect} ({correct_pct:.2f}%)")
+            
+            if stats['incorrect_detection_details']:
+                print(f"\nINCORRECT DETECTION DETAILS:")
+                for i, detail in enumerate(stats['incorrect_detection_details'][:10]):  # Show first 10
+                    print(f"  {i+1}. Seed {detail['seed']}: Detection at t={detail['detection_time']}, "
+                          f"Attack at t={detail['attack_timestep']}, "
+                          f"Early by {detail['time_difference']} timesteps")
+                if len(stats['incorrect_detection_details']) > 10:
+                    print(f"  ... and {len(stats['incorrect_detection_details']) - 10} more")
+        else:
+            print("No detection statistics available.")
+        
+        print(f"\n{'-'*80}")
+        
+        # Tie-breaker statistics
+        if hasattr(self, 'tie_breaker_stats'):
+            tb_stats = self.tie_breaker_stats
+            total_tb = tb_stats['total_tie_breakers']
+            unique_seeds = len(tb_stats['seeds_with_tie_breakers'])
+            
+            print(f"TIE-BREAKER USAGE:")
+            print(f"  Total tie-breakers performed: {total_tb}")
+            print(f"  Seeds that required tie-breaking: {unique_seeds}")
+            print(f"  Seeds with tie-breakers: {sorted(tb_stats['seeds_with_tie_breakers'])}")
+            
+            if tb_stats['tie_breaker_details']:
+                print(f"\nTIE-BREAKER DETAILS (First 5):")
+                for i, detail in enumerate(tb_stats['tie_breaker_details'][:5]):
+                    print(f"  {i+1}. Seed {detail['seed']}: Candidates {detail['candidates']} -> "
+                          f"Selected Agent {detail['selected_agent']} "
+                          f"(deviation: {detail['max_deviation']:.6f})")
+                if len(tb_stats['tie_breaker_details']) > 5:
+                    print(f"  ... and {len(tb_stats['tie_breaker_details']) - 5} more")
+        else:
+            print("No tie-breaker statistics available.")
+        
+        print(f"\n{'-'*80}")
+        
+        # Second-level tie-breaker statistics
+        if hasattr(self, 'second_level_tie_stats'):
+            stb_stats = self.second_level_tie_stats
+            total_stb = stb_stats['total_second_ties']
+            unique_seeds_stb = len(stb_stats['seeds_with_second_ties'])
+            
+            print(f"SECOND-LEVEL TIE-BREAKER USAGE (Action Influence at Detection Time):")
+            print(f"  Total second-level tie-breakers performed: {total_stb}")
+            print(f"  Seeds that required second-level tie-breaking: {unique_seeds_stb}")
+            print(f"  Seeds with second-level ties: {sorted(stb_stats['seeds_with_second_ties'])}")
+            
+            if stb_stats['second_tie_details']:
+                print(f"\nSECOND-LEVEL TIE-BREAKER DETAILS (First 5):")
+                for i, detail in enumerate(stb_stats['second_tie_details'][:5]):
+                    agents = detail['tied_agents']
+                    influences = detail['detection_influences']
+                    winner = detail['winner']
+                    print(f"  {i+1}. Seed {detail['seed']}: Target Agent {detail['target_agent']}")
+                    print(f"     Tied Agents: {agents} (Dij={detail['dij_rate']:.4f}, Gij={detail['gij_norm']:.6f})")
+                    print(f"     Detection influences: Agent {agents[0]}={influences[agents[0]]:.6f}, Agent {agents[1]}={influences[agents[1]]:.6f}")
+                    print(f"     Winner: Agent {winner}")
+                if len(stb_stats['second_tie_details']) > 5:
+                    print(f"  ... and {len(stb_stats['second_tie_details']) - 5} more")
+        else:
+            print("No second-level tie-breaker statistics available.")
+        
+        print(f"{'='*80}")
+
+    def save_detection_stats_to_csv(self):
+        """
+        Save patient zero detection and tie-breaker statistics to CSV files.
+        """
+        if not hasattr(self, 'logdir') or not self.logdir:
+            print("Warning: No log directory set. Cannot save detection statistics.")
+            return
+            
+        # Save detection statistics
+        if hasattr(self, 'detection_stats'):
+            detection_file = os.path.join(self.logdir, 'patient_zero_detection_stats.csv')
+            with open(detection_file, 'w', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                stats = self.detection_stats
+                
+                # Write summary statistics
+                writer.writerow(['Metric', 'Value'])
+                writer.writerow(['Total Detections', stats['total_detections']])
+                writer.writerow(['Incorrect Detections', stats['incorrect_detections']])
+                writer.writerow(['Thresholding Issues', stats['thresholding_issues']])
+                correct = stats['total_detections'] - stats['incorrect_detections']
+                writer.writerow(['Correct Detections', correct])
+                
+                if stats['total_detections'] > 0:
+                    writer.writerow(['Incorrect Detection Rate', f"{stats['incorrect_detections']/stats['total_detections']:.4f}"])
+                    writer.writerow(['Thresholding Issue Rate', f"{stats['thresholding_issues']/stats['total_detections']:.4f}"])
+                    writer.writerow(['Correct Detection Rate', f"{correct/stats['total_detections']:.4f}"])
+            
+            # Save detailed incorrect detection information
+            if stats['incorrect_detection_details']:
+                incorrect_file = os.path.join(self.logdir, 'incorrect_detection_details.csv')
+                with open(incorrect_file, 'w', newline='') as csvfile:
+                    fieldnames = ['seed', 'detection_time', 'attack_timestep', 'time_difference', 'detected_agents', 'issue_type']
+                    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(stats['incorrect_detection_details'])
+        
+        # Save tie-breaker statistics
+        if hasattr(self, 'tie_breaker_stats'):
+            tie_breaker_file = os.path.join(self.logdir, 'tie_breaker_stats.csv')
+            with open(tie_breaker_file, 'w', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                tb_stats = self.tie_breaker_stats
+                
+                # Write summary statistics
+                writer.writerow(['Metric', 'Value'])
+                writer.writerow(['Total Tie-breakers', tb_stats['total_tie_breakers']])
+                writer.writerow(['Seeds with Tie-breakers', len(tb_stats['seeds_with_tie_breakers'])])
+                writer.writerow(['Seeds List', str(sorted(tb_stats['seeds_with_tie_breakers']))])
+            
+            # Save detailed tie-breaker information
+            if tb_stats['tie_breaker_details']:
+                tie_breaker_details_file = os.path.join(self.logdir, 'tie_breaker_details.csv')
+                with open(tie_breaker_details_file, 'w', newline='') as csvfile:
+                    fieldnames = ['seed', 'candidates', 'selected_agent', 'max_deviation']
+                    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                    writer.writeheader()
+                    
+                    for detail in tb_stats['tie_breaker_details']:
+                        row = {
+                            'seed': detail['seed'],
+                            'candidates': str(detail['candidates']),
+                            'selected_agent': detail['selected_agent'],
+                            'max_deviation': detail['max_deviation']
+                        }
+                        writer.writerow(row)
+        
+        # Save second-level tie-breaker statistics
+        if hasattr(self, 'second_level_tie_stats'):
+            second_tie_file = os.path.join(self.logdir, 'second_level_tie_breaker_stats.csv')
+            with open(second_tie_file, 'w', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                stb_stats = self.second_level_tie_stats
+                
+                # Write summary statistics
+                writer.writerow(['Metric', 'Value'])
+                writer.writerow(['Total Second-level Tie-breakers', stb_stats['total_second_ties']])
+                writer.writerow(['Seeds with Second-level Tie-breakers', len(stb_stats['seeds_with_second_ties'])])
+                writer.writerow(['Seeds List', str(sorted(stb_stats['seeds_with_second_ties']))])
+            
+            # Save detailed second-level tie-breaker information
+            if stb_stats['second_tie_details']:
+                second_tie_details_file = os.path.join(self.logdir, 'second_level_tie_breaker_details.csv')
+                with open(second_tie_details_file, 'w', newline='') as csvfile:
+                    fieldnames = ['seed', 'target_agent', 'tied_agents', 'dij_rate', 'gij_norm', 'winner', 'detection_influences']
+                    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                    writer.writeheader()
+                    
+                    for detail in stb_stats['second_tie_details']:
+                        row = {
+                            'seed': detail['seed'],
+                            'target_agent': detail['target_agent'],
+                            'tied_agents': str(detail['tied_agents']),
+                            'dij_rate': detail['dij_rate'],
+                            'gij_norm': detail['gij_norm'],
+                            'winner': detail['winner'],
+                            'detection_influences': str(detail['detection_influences'])
+                        }
+                        writer.writerow(row)
+        
+        print(f"Detection and tie-breaker statistics saved to CSV files in {self.logdir}")
+
+    def print_traceback_summary(self):
+        """
+        Print a comprehensive summary of patient zero detection and traceback results.
+        """
+        print(f"\n{'='*80}")
+        print(f"PATIENT ZERO DETECTION AND TRACEBACK SUMMARY")
+        print(f"{'='*80}")
+        
+        # Detection accuracy summary
+        if hasattr(self, 'detection_stats'):
+            stats = self.detection_stats
+            total = stats['total_detections']
+            correct = total - stats['incorrect_detections']
+            
+            print(f"DETECTION SUMMARY:")
+            print(f"  Total experiments with patient zero detection: {total}")
+            print(f"  Correct detections: {correct} ({(correct/total*100):.2f}%)")
+            print(f"  Incorrect detections: {stats['incorrect_detections']} ({(stats['incorrect_detections']/total*100):.2f}%)")
+            print(f"  Thresholding issues: {stats['thresholding_issues']} ({(stats['thresholding_issues']/total*100):.2f}%)")
+        
+        # Tie-breaker summary
+        if hasattr(self, 'tie_breaker_stats'):
+            tb_stats = self.tie_breaker_stats
+            print(f"\nTIE-BREAKER SUMMARY:")
+            print(f"  Total tie-breakers used: {tb_stats['total_tie_breakers']}")
+            print(f"  Seeds requiring tie-breaking: {len(tb_stats['seeds_with_tie_breakers'])}")
+            
+            if hasattr(self, 'second_level_tie_stats'):
+                stb_stats = self.second_level_tie_stats
+                print(f"  Second-level tie-breakers used: {stb_stats['total_second_ties']}")
+                print(f"  Seeds requiring second-level tie-breaking: {len(stb_stats['seeds_with_second_ties'])}")
+        
+        print(f"{'='*80}")
 
     def compute_attack_metrics(self, attack_results, normal_q_values, normal_rewards_history, ref_vals, ref_std_devs, observe_agent_j):
         """
@@ -1487,20 +2213,20 @@ class MultiSeedExperimentRunner:
                 # print(f"\nAnalyzing pair: agent_{agent_i} influences agent_{agent_j}")
                 
                 # Step 4: Find max and min influence timesteps of agent_i on agent_j in first 25%
-                max_influence_t, min_influence_t = self.find_influence_timesteps(
-                    action_influences_history, agent_i, agent_j, first_quarter_steps
-                )
                 # max_influence_t, min_influence_t = self.find_influence_timesteps(
-                #     action_influences_history, directional_derivatives_history, agent_i, agent_j, first_quarter_steps, k_steps=1
+                #     action_influences_history, agent_i, agent_j, first_quarter_steps
                 # )
+                max_influence_t, min_influence_t = self.find_influence_timesteps(
+                    action_influences_history, directional_derivatives_history, agent_i, agent_j, first_quarter_steps, k_steps=1
+                )
                 if not max_influence_t or not min_influence_t:
                     print(f"  >> Skipping pair (agent_{agent_i}, agent_{agent_j}) due to lack of valid influence timesteps")
                     continue
                 # print(f"Max influence timestep: {max_influence_t}, Min influence timestep: {min_influence_t}")
                 
                 # Step 5: Run attacked episodes - attack agent_i (influencer), observe impact on agent_j (influenced)
-                high_influence_attack = self.eval(runner=self.runner, attack_status=True, attack_agent_id=agent_i, seed=current_seed, ref_vals=ref_vals, ref_std_devs=ref_std_devs, collect_q_flag=True, min_window=max_influence_t, max_window=max_influence_t+5, observe_agent=agent_j)
-                low_influence_attack = self.eval(runner=self.runner, attack_status=True, attack_agent_id=agent_i, seed=current_seed, ref_vals=ref_vals, ref_std_devs=ref_std_devs, collect_q_flag=True, min_window=min_influence_t, max_window=min_influence_t+5, observe_agent=agent_j)
+                high_influence_attack = self.eval(runner=self.runner, attack_status=True, attack_agent_id=agent_i, seed=current_seed, ref_vals=ref_vals, ref_std_devs=ref_std_devs, collect_q_flag=True, min_window=max_influence_t[0], max_window=max_influence_t[0]+5, observe_agent=agent_j)
+                low_influence_attack = self.eval(runner=self.runner, attack_status=True, attack_agent_id=agent_i, seed=current_seed, ref_vals=ref_vals, ref_std_devs=ref_std_devs, collect_q_flag=True, min_window=min_influence_t[0], max_window=min_influence_t[0]+5, observe_agent=agent_j)
                 # Get fault detection times for influencing and influenced agents
                 high_influencer_fault_times = get_agent_fault_detection_times(high_influence_attack['fault_timeline'], agent_i)
                 high_influenced_fault_times = get_agent_fault_detection_times(high_influence_attack['fault_timeline'], agent_j)
@@ -1519,6 +2245,38 @@ class MultiSeedExperimentRunner:
                 low_metrics = self.compute_attack_metrics(low_influence_attack, normal_q_values_history, normal_rewards_history, ref_vals, ref_std_devs, agent_j)
                 self.log_taylor_deviations(high_influence_attack, low_influence_attack, ref_vals, ref_std_devs, current_seed, agent_i, agent_j)
                 
+                # Step 6: Analyze patient zero detection accuracy with traceback
+                print(f"\n--- Patient Zero Analysis for pair agent_{agent_i} -> agent_{agent_j} ---")
+                
+                # Analyze high influence attack
+                print(f"Analyzing HIGH influence attack:")
+                high_pz_detection_analysis = self.patient_zero_analyzer.analyze_detection_accuracy(
+                    high_influence_attack['fault_timeline'],
+                    agent_i,  # The attacked agent is the influencer
+                    high_influence_attack['attack_timesteps'],
+                    directional_derivatives_history,
+                    high_influence_attack['taylor_errors_history'],
+                    ref_vals,
+                    action_influences_history,
+                    seed,
+                    (agent_i, agent_j)
+                )
+                
+                # Analyze low influence attack
+                print(f"Analyzing LOW influence attack:")
+                low_pz_detection_analysis = self.patient_zero_analyzer.analyze_detection_accuracy(
+                    low_influence_attack['fault_timeline'],
+                    agent_i,  # The attacked agent is the influencer
+                    low_influence_attack['attack_timesteps'],
+                    directional_derivatives_history,
+                    low_influence_attack['taylor_errors_history'],
+                    ref_vals,
+                    action_influences_history,
+                    seed,
+                    (agent_i, agent_j)
+                )
+                
+                
                 pair_result = {
                     'agent_i': agent_i,
                     'agent_j': agent_j,
@@ -1533,7 +2291,9 @@ class MultiSeedExperimentRunner:
                     'low_influencer_fault_detection_times': low_influencer_fault_times,
                     'low_influenced_fault_detection_times': low_influenced_fault_times,
                     'high_metrics': high_metrics,
-                    'low_metrics': low_metrics
+                    'low_metrics': low_metrics,
+                    'high_patient_zero_analysis': high_pz_detection_analysis,
+                    'low_patient_zero_analysis': low_pz_detection_analysis
                 }
                 
                 all_pair_results.append(pair_result)
@@ -1641,6 +2401,12 @@ class MultiSeedExperimentRunner:
         print(f"\nCompleted {len(self.experiment_results)} successful experiments out of {self.total_experiments}")
         print(f"Total successful pairs analyzed: {total_successful_pairs}")
         print(f"Failed experiments: {len(self.failed_seeds)}")
+        
+        # Print patient zero detection and tie-breaker statistics
+        self.print_detection_and_tie_breaker_stats()
+        
+        # Save detection statistics to CSV
+        self.save_detection_stats_to_csv()
     
     def compute_accuracies(self):
         """Compute accuracies and analyze results."""
@@ -2452,9 +3218,28 @@ class MultiSeedExperimentRunner:
         accuracy_results, failed_expectations = self.compute_accuracies()
         pair_specific_results = self.compute_pair_specific_accuracies()
         self.print_pair_specific_summary(pair_specific_results)
+        self.print_traceback_summary()
         self.save_results(accuracy_results, failed_expectations, pair_specific_results)
+        # Patient zero analysis summary and results saving
+        self.patient_zero_analyzer.print_summary_dual()
+        patient_zero_stats = self.patient_zero_analyzer.get_statistics_dual()
+        
+        # Save patient zero analysis results
+        pz_analysis_file = os.path.join(self.logdir, "patient_zero_analysis_detailed.csv")
+        pz_summary_file = os.path.join(self.logdir, "patient_zero_analysis_summary.json")
+        
+        self.patient_zero_analyzer.save_detailed_results(pz_analysis_file)
+        
+        # Save summary statistics as JSON
+        import json
+        with open(pz_summary_file, 'w') as f:
+            json.dump(patient_zero_stats, f, indent=2)
         print(f"\nMulti-seed experiment completed successfully!")
         print(f"Pair-specific analysis completed for {len(pair_specific_results)} agent pairs")
+        print(f"Patient zero detection and traceback analysis completed!")
+        print(f"Patient zero analysis saved to:")
+        print(f"  - Detailed results: {pz_analysis_file}")
+        print(f"  - Summary statistics: {pz_summary_file}")
         print(f"Results saved to: {self.logdir}")
         
         self.cleanup()
@@ -2471,6 +3256,7 @@ def create_config_from_args():
                         help="Path to save/load experiment data")
     parser.add_argument("--reward",type=float, default=None)
     parser.add_argument("--K_SIGMA",type=int, default=1)
+    parser.add_argument("--folder_name",type=str, help="Folder name to save results")
     # parser.add_argument("model_path", help="Model directory")
     # parser.add_argument("--total_experiments", type=int, default=100,
     #                     help="Total number of seed experiments to run")

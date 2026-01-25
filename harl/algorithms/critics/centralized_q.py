@@ -62,8 +62,12 @@ class CentralizedQFunction:
         if gradNeed:
             return self.q_net(cent_obs, actions)
         with torch.no_grad():
-            return self.q_net(cent_obs, actions)
-
+            return self.q_net(cent_obs, actions)    
+        
+    def get_q_values_onehot(self,cent_obs,torch_actions):
+        return self.q_net(cent_obs, torch_actions, isonehot=True)
+        
+        
     def _mini_batch_generator(self, share_obs, actions, returns, active_masks):
         batch_size = share_obs.shape[0]
         if batch_size == 0:

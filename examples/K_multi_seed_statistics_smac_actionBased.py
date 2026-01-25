@@ -35,6 +35,7 @@ from harl.utils.envs_tools import (
     make_eval_env
 )
 
+from modules.traceback import PatientZeroAnalyzer
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -96,10 +97,12 @@ class MultiSeedExperimentRunner:
         self.runner_args = None
         self.runner_algo_args = None
         self.runner_env_args = None
+        self.folder_name = self.config.folder_name if hasattr(self.config, 'folder_name') else "test-run-K-New"
         # Results storage
         self.experiment_results = []
         self.failed_seeds = []
         self.cumulative_influences_data = []  # Store cumulative influence data for all seeds
+        self.patient_zero_analyzer = None
         
     def log_directional_derivatives(self, directional_derivatives_history, seed, episode_length):
         """
@@ -114,7 +117,7 @@ class MultiSeedExperimentRunner:
         if not hasattr(self, 'directional_derivatives_data'):
             self.directional_derivatives_data = []
             
-        print(f"Storing directional derivatives for seed {seed}...")
+        # print(f"Storing directional derivatives for seed {seed}...")
         
         # For each agent pair (i, j), store directional derivatives at each timestep
         for agent_i in range(self.runner.num_agents):
@@ -142,7 +145,7 @@ class MultiSeedExperimentRunner:
                 
                 self.directional_derivatives_data.append(pair_data)
         
-        print(f"Stored directional derivatives for seed {seed} ({self.runner.num_agents * (self.runner.num_agents - 1)} agent pairs)")
+        # print(f"Stored directional derivatives for seed {seed} ({self.runner.num_agents * (self.runner.num_agents - 1)} agent pairs)")
     
     def log_taylor_deviations(self, high_attack_results, low_attack_results, ref_vals, ref_std_devs, seed, agent_i, agent_j):
         """
@@ -572,7 +575,7 @@ class MultiSeedExperimentRunner:
         cwd = os.getcwd()
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         env_type = 'discrete'
-        self.logdir = os.path.join(cwd, 'test-Run-K', str(self.total_experiments), f"{args['env']}",
+        self.logdir = os.path.join(cwd, self.folder_name, str(self.total_experiments), f"{args['env']}",
                                   f"{timestamp}_multi_seed_stats_sigma_{self.K_SIGMA}")
         os.makedirs(self.logdir, exist_ok=True)
         
@@ -582,7 +585,7 @@ class MultiSeedExperimentRunner:
         # Prepare runner for training mode
         device_str = 'gpu' if DEVICE == 'gpu' else 'cpu'
         # self.runner.prep_training(device=device_str)
-        
+        self.patient_zero_analyzer = PatientZeroAnalyzer(self.runner.num_agents)
         print(f"Multi-seed experiment setup complete. Log directory: {self.logdir}")
         print(f"Will run {self.total_experiments} experiments")
         # for env in self.runner.envs:
@@ -1269,6 +1272,7 @@ class MultiSeedExperimentRunner:
             'episode_length': cnt,
             'episode_reward': reward_ep,
             'attack_timestep': min_window,
+            'attack_timesteps':[min_window],
             'attacked_agent': attack_agent_id,
             'observed_agent': observe_agent_id,
             'stepwise_rewards': total_rewards,
@@ -1341,9 +1345,9 @@ class MultiSeedExperimentRunner:
             elif directional_derivative < 0:
                 negative_derivative_timesteps.append((influence, t))
         
-            print(" >>> ", directional_derivative)
-        print(f"--- Positive derivative timesteps (influence, t): {positive_derivative_timesteps}")
-        print(f"--- Negative derivative timesteps (influence, t): {negative_derivative_timesteps}")
+            # print(" >>> ", directional_derivative)
+        print(f"--- Positive derivative timesteps (influence, t): {positive_derivative_timesteps}", flush=True)
+        print(f"--- Negative derivative timesteps (influence, t): {negative_derivative_timesteps}", flush=True)
         # For high influence: among positive derivative timesteps, choose maximum action influence
         max_influences_t = []
         if positive_derivative_timesteps:
@@ -1490,18 +1494,18 @@ class MultiSeedExperimentRunner:
             for agent_j in range(self.runner.num_agents):  # influenced agent
                 if agent_i == agent_j:
                     continue  # Skip self
-                if agent_i != 0 or agent_j != 1:
-                    continue  # TEMP: Only analyze pair (1, 2) for faster testing
+                # if agent_i != 0 or agent_j != 1:
+                #     continue  # TEMP: Only analyze pair (1, 2) for faster testing
                 
                 # print(f"\nAnalyzing pair: agent_{agent_i} influences agent_{agent_j}")
                 
                 # Step 4: Find max and min influence timesteps of agent_i on agent_j in first 25%
-                max_influence_t, min_influence_t = self.find_influence_timesteps(
-                    action_influences_history, agent_i, agent_j, first_quarter_steps
-                )
                 # max_influence_t, min_influence_t = self.find_influence_timesteps(
-                #     action_influences_history, directional_derivatives_history, agent_i, agent_j, first_quarter_steps, k_steps=1
+                #     action_influences_history, agent_i, agent_j, first_quarter_steps
                 # )
+                max_influence_t, min_influence_t = self.find_influence_timesteps(
+                    action_influences_history, directional_derivatives_history, agent_i, agent_j, first_quarter_steps, k_steps=1
+                )
                 
                 # print(f"Max influence timestep: {max_influence_t}, Min influence timestep: {min_influence_t}")
                 if not max_influence_t or not min_influence_t:
@@ -1509,8 +1513,8 @@ class MultiSeedExperimentRunner:
                     continue
                 
                 # Step 5: Run attacked episodes - attack agent_i (influencer), observe impact on agent_j (influenced)
-                high_influence_attack = self.eval(runner=self.runner, attack_status=True, attack_agent_id=agent_i, seed=current_seed, ref_vals=ref_vals, ref_std_devs=ref_std_devs, collect_q_flag=True, min_window=max_influence_t, max_window=max_influence_t+5, observe_agent=agent_j)
-                low_influence_attack = self.eval(runner=self.runner, attack_status=True, attack_agent_id=agent_i, seed=current_seed, ref_vals=ref_vals, ref_std_devs=ref_std_devs, collect_q_flag=True, min_window=min_influence_t, max_window=min_influence_t+5, observe_agent=agent_j)
+                high_influence_attack = self.eval(runner=self.runner, attack_status=True, attack_agent_id=agent_i, seed=current_seed, ref_vals=ref_vals, ref_std_devs=ref_std_devs, collect_q_flag=True, min_window=max_influence_t[0], max_window=max_influence_t[0]+5, observe_agent=agent_j)
+                low_influence_attack = self.eval(runner=self.runner, attack_status=True, attack_agent_id=agent_i, seed=current_seed, ref_vals=ref_vals, ref_std_devs=ref_std_devs, collect_q_flag=True, min_window=min_influence_t[0], max_window=min_influence_t[0]+5, observe_agent=agent_j)
                 # Get fault detection times for influencing and influenced agents
                 high_influencer_fault_times = get_agent_fault_detection_times(high_influence_attack['fault_timeline'], agent_i)
                 high_influenced_fault_times = get_agent_fault_detection_times(high_influence_attack['fault_timeline'], agent_j)
@@ -1528,7 +1532,35 @@ class MultiSeedExperimentRunner:
                 high_metrics = self.compute_attack_metrics(high_influence_attack, normal_q_values_history, normal_rewards_history,ref_vals, ref_std_devs, agent_j)
                 low_metrics = self.compute_attack_metrics(low_influence_attack, normal_q_values_history, normal_rewards_history, ref_vals, ref_std_devs, agent_j)
                 self.log_taylor_deviations(high_influence_attack, low_influence_attack, ref_vals, ref_std_devs, current_seed, agent_i, agent_j)
+                print(f"\n--- Patient Zero Analysis for pair agent_{agent_i} -> agent_{agent_j} ---")
                 
+                # Analyze high influence attack
+                print(f"Analyzing HIGH influence attack:")
+                high_pz_detection_analysis = self.patient_zero_analyzer.analyze_detection_accuracy(
+                    high_influence_attack['fault_timeline'],
+                    agent_i,  # The attacked agent is the influencer
+                    high_influence_attack['attack_timesteps'],
+                    directional_derivatives_history,
+                    high_influence_attack['taylor_errors_history'],
+                    ref_vals,
+                    action_influences_history,
+                    seed,
+                    (agent_i, agent_j)
+                )
+                
+                # Analyze low influence attack
+                print(f"Analyzing LOW influence attack:")
+                low_pz_detection_analysis = self.patient_zero_analyzer.analyze_detection_accuracy(
+                    low_influence_attack['fault_timeline'],
+                    agent_i,  # The attacked agent is the influencer
+                    low_influence_attack['attack_timesteps'],
+                    directional_derivatives_history,
+                    low_influence_attack['taylor_errors_history'],
+                    ref_vals,
+                    action_influences_history,
+                    seed,
+                    (agent_i, agent_j)
+                )
                 pair_result = {
                     'agent_i': agent_i,
                     'agent_j': agent_j,
@@ -1543,7 +1575,9 @@ class MultiSeedExperimentRunner:
                     'low_influencer_fault_detection_times': low_influencer_fault_times,
                     'low_influenced_fault_detection_times': low_influenced_fault_times,
                     'high_metrics': high_metrics,
-                    'low_metrics': low_metrics
+                    'low_metrics': low_metrics,
+                    'high_patient_zero_analysis': high_pz_detection_analysis,
+                    'low_patient_zero_analysis': low_pz_detection_analysis
                 }
                 
                 all_pair_results.append(pair_result)
@@ -2468,7 +2502,27 @@ class MultiSeedExperimentRunner:
         print(f"\nMulti-seed experiment completed successfully!")
         print(f"Pair-specific analysis completed for {len(pair_specific_results)} agent pairs")
         print(f"Results saved to: {self.logdir}")
+        # Patient zero analysis summary and results saving
+        self.patient_zero_analyzer.print_summary_dual()
+        patient_zero_stats = self.patient_zero_analyzer.get_statistics_dual()
         
+        # Save patient zero analysis results
+        pz_analysis_file = os.path.join(self.logdir, "patient_zero_analysis_detailed.csv")
+        pz_summary_file = os.path.join(self.logdir, "patient_zero_analysis_summary.json")
+        
+        self.patient_zero_analyzer.save_detailed_results(pz_analysis_file)
+        
+        # Save summary statistics as JSON
+        import json
+        with open(pz_summary_file, 'w') as f:
+            json.dump(patient_zero_stats, f, indent=2)
+        print(f"\nMulti-seed experiment completed successfully!")
+        print(f"Pair-specific analysis completed for {len(pair_specific_results)} agent pairs")
+        print(f"Patient zero detection and traceback analysis completed!")
+        print(f"Patient zero analysis saved to:")
+        print(f"  - Detailed results: {pz_analysis_file}")
+        print(f"  - Summary statistics: {pz_summary_file}")
+        print(f"Results saved to: {self.logdir}")
         self.cleanup()
 
 
@@ -2483,6 +2537,7 @@ def create_config_from_args():
                         help="Path to save/load experiment data")
     parser.add_argument("--reward",type=float, default=None)
     parser.add_argument("--K_SIGMA",type=int, default=1)
+    parser.add_argument("--folder_name",type=str, help="Folder name to save results")
     # parser.add_argument("model_path", help="Model directory")
     # parser.add_argument("--total_experiments", type=int, default=100,
     #                     help="Total number of seed experiments to run")

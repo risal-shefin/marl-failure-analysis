@@ -230,7 +230,7 @@ class StarCraft2Env(MultiAgentEnv):
         # Observations and state
         self.obs_own_health = obs_own_health
         self.obs_all_health = obs_all_health
-        self.obs_instead_of_state = state_config["use_obs_instead_of_state"]
+        self.obs_instead_of_state = True #state_config["use_obs_instead_of_state"]
         self.obs_last_action = obs_last_action
         self.use_global_state = state_config["use_global_state"]
         self.global_state_include_info = state_config["global_state_include_info"]
@@ -398,7 +398,7 @@ class StarCraft2Env(MultiAgentEnv):
                         [(b >> i) & 1 for b in row for i in range(7, -1, -1)]
                         for row in vals
                     ],
-                    dtype=np.bool,
+                    dtype=np.bool_,
                 )
             )
         else:
@@ -406,7 +406,7 @@ class StarCraft2Env(MultiAgentEnv):
                 np.flip(
                     np.transpose(
                         np.array(
-                            list(map_info.pathing_grid.data), dtype=np.bool
+                            list(map_info.pathing_grid.data), dtype=np.bool_
                         ).reshape(self.map_x, self.map_y)
                     ),
                     axis=1,
@@ -2121,7 +2121,7 @@ class StarCraft2Env(MultiAgentEnv):
         (n_agents, n_agents + n_enemies) indicating which units
         are visible to each agent.
         """
-        arr = np.zeros((self.n_agents, self.n_agents + self.n_enemies), dtype=np.bool)
+        arr = np.zeros((self.n_agents, self.n_agents + self.n_enemies), dtype=np.bool_)
 
         for agent_id in range(self.n_agents):
             current_agent = self.get_unit_by_id(agent_id)

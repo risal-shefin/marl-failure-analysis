@@ -151,7 +151,8 @@ def make_eval_env(env_name, seed, n_threads, env_args):
             else:
                 print("Can not support the " + env_name + "environment.")
                 raise NotImplementedError
-            env.seed(seed * 50000 + rank * 10000)
+            # env.seed(seed * 50000 + rank * 10000)
+            env.seed(seed)
             return env
 
         return init_env

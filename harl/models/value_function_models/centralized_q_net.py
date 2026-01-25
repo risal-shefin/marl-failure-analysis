@@ -21,11 +21,12 @@ class CentralizedQNet(nn.Module):
         self.hidden_sizes = args["hidden_sizes"]
         self.initialization_method = args["initialization_method"]
         self.activation_func = args["activation_func"]
+        print("CentralizedQNet activation_func:", self.activation_func)
         self.tpdv = dict(dtype=torch.float32, device=device)
 
         cent_obs_shape = get_shape_from_obs_space(cent_obs_space)
         base_cls = CNNBase if len(cent_obs_shape) == 3 else MLPBase
-        self.base = base_cls(args, cent_obs_shape)
+        # self.base = base_cls(args, cent_obs_shape)
 
         if isinstance(act_space, (list, tuple)):
             self.action_spaces: List = list(act_space)
@@ -64,42 +65,48 @@ class CentralizedQNet(nn.Module):
 
             self.total_raw_action_dim += self.action_info[-1]["raw_dim"]
             self.total_encoded_action_dim += self.action_info[-1]["encoded_dim"]
+        
+        self.base = base_cls(args, (cent_obs_shape[0] + self.total_encoded_action_dim,))
 
         init_method = get_init_method(self.initialization_method)
 
         def init_(module):
             return init(module, init_method, lambda x: nn.init.constant_(x, 0))
 
-        self.activation = get_active_func(self.activation_func)
-        self.q_fc = init_(
-            nn.Linear(
-                self.hidden_sizes[-1] + self.total_encoded_action_dim,
-                self.hidden_sizes[-1],
-            )
-        )
+        # self.activation = get_active_func(self.activation_func)
+        # self.q_fc = init_(
+        #     nn.Linear(
+        #         self.hidden_sizes[-1] + self.total_encoded_action_dim,
+        #         self.hidden_sizes[-1],
+        #     )
+        # )
         self.q_out = init_(nn.Linear(self.hidden_sizes[-1], 1))
 
         self.to(device)
 
-    def forward(self, cent_obs, actions):
+    def forward(self, cent_obs, actions,isonehot=False):
         """Forward pass of the centralized Q network."""
-
-        cent_obs = check(cent_obs).to(**self.tpdv)
+        
+        cent_obs = check(cent_obs).to(**self.tpdv) 
         actions = check(actions).to(**self.tpdv)
-
-        if actions.shape[-1] != self.total_raw_action_dim:
-            raise ValueError(
-                "Joint action tensor has incompatible shape: "
-                f"expected last dimension {self.total_raw_action_dim}, "
-                f"got {actions.shape[-1]}"
-            )
-
-        features = self.base(cent_obs)
-        action_features = self._process_actions(actions)
-
-        concat = torch.cat([features, action_features], dim=-1)
-        hidden = self.activation(self.q_fc(concat))
-        q_values = self.q_out(hidden)
+        
+        if not isonehot:
+            if actions.shape[-1] != self.total_raw_action_dim:
+                raise ValueError(
+                    "Joint action tensor has incompatible shape: "
+                    f"expected last dimension {self.total_raw_action_dim}, "
+                    f"got {actions.shape[-1]}"
+                )
+            action_features = self._process_actions(actions)
+        else:
+            action_features = actions
+        
+        concat = torch.cat([cent_obs, action_features], dim=-1)
+        features = self.base(concat)
+        q_values = self.q_out(features)
+        # concat = torch.cat([features, action_features], dim=-1)
+        # hidden = self.activation(self.q_fc(concat))
+        # q_values = self.q_out(hidden)
 
         return q_values
 

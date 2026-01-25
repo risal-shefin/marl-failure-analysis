@@ -26,7 +26,14 @@ class PettingZooMPEEnv:
         else:
             self.max_cycles = 25
             self.args["max_cycles"] = 26
-        # self.args["N"] = 5 # for simple spread
+
+        # Ensure N parameter is passed correctly for simple spread
+        # self.args["N"] should already be set from env_args
+        # print(f"Environment initialized with N={self.args.get('N', 'NOT SET')} agents")
+        # Remove agentNo from args before passing to PettingZoo
+        # if 'agentNo' in self.args:
+        #     del self.args['agentNo']
+        # self.args["N"] = 2  # Set N to 2 for simple_spread
         self.cur_step = 0
         # Normalize scenario to available module without try/except
         from importlib.util import find_spec
@@ -49,6 +56,7 @@ class PettingZooMPEEnv:
             obs_init = out
         self.n_agents = self.env.num_agents
         self.agents = self.env.agents
+        print(f"Number of agents: {self.agents}",flush=True)
         # Share/global observation space (prefer env.state_space if available)
         if hasattr(self.env, "state_space"):
             self.share_observation_space = self.repeat(self.env.state_space)

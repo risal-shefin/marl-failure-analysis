@@ -12,7 +12,7 @@ def main():
     parser.add_argument(
         "--algo",
         type=str,
-        default="happo",
+        default="hatrpo",
         choices=[
             "happo",
             "hatrpo",
@@ -30,7 +30,7 @@ def main():
     parser.add_argument(
         "--env",
         type=str,
-        default="pettingzoo_mpe",
+        default="smac",
         choices=[
             "smac",
             "mamujoco",
