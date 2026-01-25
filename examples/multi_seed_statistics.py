@@ -2619,7 +2619,7 @@ class MultiSeedExperimentRunner:
 def create_config_from_args():
     """Create configuration from command line arguments."""
     parser = argparse.ArgumentParser(description="Multi-seed statistics experiment")
-    parser.add_argument("-N",type=int ,help="Number of agents")
+    parser.add_argument("-N",type=int ,default=2,help="Number of agents")
     parser.add_argument("--total_experiments", type=int, default=400,
                         help="Total number of seed experiments to run")
     parser.add_argument("--total_episodes", type=int, default=100,)

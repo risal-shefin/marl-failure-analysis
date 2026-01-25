@@ -138,7 +138,7 @@ def compute_taylor_policy(runner, eval_obs, eval_available_actions, eval_rnn_sta
 def eval(runner, attack_status=False, attack_agent_id=0,seed=23,randomness=0.25):
     """Evaluate the model."""
     
-    print(f"Seeding eval with seed {seed}")
+    # print(f"Seeding eval with seed {seed}")
     eval_episode = 0
 
     eval_obs, eval_share_obs, eval_available_actions = runner.eval_envs.reset(seed=seed)
