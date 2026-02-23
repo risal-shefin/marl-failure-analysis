@@ -60,7 +60,7 @@ class SVDCouplingAnalysisRunner:
         self.epsilon = config.epsilon
         
         # Storage for results across all seeds
-        # List of tuples: (seed, timestep, agent_i, agent_j, frob_norm, delta_g_norm, delta_critic)
+        # List of tuples: (seed, timestep, agent_i, agent_j, frob_norm, grad_norm, delta_g_norm, delta_critic1, delta_critic2)
         self.coupling_data = []
 
         
@@ -154,8 +154,12 @@ class SVDCouplingAnalysisRunner:
                     agent_i,
                     agent_j,
                     metrics['frob_norm'],
+                    metrics['grad_norm'],
                     metrics['delta_g_norm'],
-                    metrics['delta_critic']
+                    metrics['perturbed_grad_norm'],
+                    metrics['delta_critic_j_only'],
+                    metrics['delta_critic1'],
+                    metrics['delta_critic2']
                 ))
             
             # Environment step
@@ -191,9 +195,38 @@ class SVDCouplingAnalysisRunner:
         """
         print("\nGenerating scatter plots...")
         
-        # Generate plots for both delta_g_norm and delta_critic
+        # Create subfolders for organized output
+        self.plots_dir = os.path.join(self.logdir, 'plots')
+        os.makedirs(self.plots_dir, exist_ok=True)
+        
+        # Generate plots for different metrics
         self._generate_metric_plots(df, 'delta_g_norm', '||Δg||_2 (Gradient Shift)', 'delta_g')
-        self._generate_metric_plots(df, 'delta_critic', 'ΔQ (Critic Value Shift)', 'delta_critic')
+        self._generate_metric_plots(df, 'delta_critic1', 'ΔQ₁ (Only Agent i Perturbed)', 'delta_critic1')
+        self._generate_metric_plots(df, 'delta_critic2', 'ΔQ₂ (Both Agents Perturbed)', 'delta_critic2')
+        
+        # Generate adversarial assist plots
+        df['delta_critic_diff'] = df['delta_critic2'] - df['delta_critic1']
+        self._generate_metric_plots(df, 'delta_critic_diff', 'ΔQ₂ - ΔQ₁ (Adversarial Assist)', 'adversarial_assist')
+                # Plot 1: Verify orthogonal projection — delta_critic_j_only vs ||H||_F
+        # If orthogonalisation works, perturbations along d_orthogonal should cause
+        # near-zero first-order change in Q_i, so points should cluster around y=0.
+        self._generate_metric_plots(
+            df, 'delta_critic_j_only',
+            '\u0394Q (Only j Perturbed, Ortho Direction)',
+            'ortho_verification'
+        )
+        
+        # Plot 2: delta_critic2 vs perturbed gradient norm ||g'||_2
+        self._generate_xy_metric_plots(
+            df,
+            x_col='perturbed_grad_norm',
+            x_label='||g\'||_2 (Perturbed Gradient Norm)',
+            y_col='delta_critic2',
+            y_label='\u0394Q\u2082 (Both Agents Perturbed)',
+            metric_name='dc2_vs_perturbed_grad'
+        )
+                # Generate 3D plots
+        self._generate_3d_plots(df)
     
     def _generate_metric_plots(self, df, metric_col, metric_label, metric_name):
         """
@@ -267,8 +300,12 @@ class SVDCouplingAnalysisRunner:
         
         plt.tight_layout()
         
+        # Create subfolder for this metric
+        metric_dir = os.path.join(self.plots_dir, metric_name)
+        os.makedirs(metric_dir, exist_ok=True)
+        
         # Save combined figure
-        combined_path = os.path.join(self.logdir, f"coupling_analysis_{metric_name}_all_pairs.png")
+        combined_path = os.path.join(metric_dir, f"coupling_analysis_{metric_name}_all_pairs.png")
         plt.savefig(combined_path, dpi=150, bbox_inches='tight')
         print(f"  Saved combined {metric_name} plot to: {combined_path}")
         plt.close()
@@ -311,11 +348,277 @@ class SVDCouplingAnalysisRunner:
             ax.grid(True, alpha=0.3)
             
             plt.tight_layout()
-            individual_path = os.path.join(self.logdir, f"coupling_{metric_name}_pair_{agent_i}_to_{agent_j}.png")
+            individual_path = os.path.join(metric_dir, f"coupling_{metric_name}_pair_{agent_i}_to_{agent_j}.png")
             plt.savefig(individual_path, dpi=150, bbox_inches='tight')
             plt.close()
         
-        print(f"  Saved {len(agent_pairs)} individual {metric_name} plots")
+        print(f"  Saved {len(agent_pairs)} individual {metric_name} plots to {metric_dir}")
+    
+    def _generate_xy_metric_plots(self, df, x_col, x_label, y_col, y_label, metric_name):
+        """
+        Generate scatter plots for an arbitrary x vs y metric pair per agent pair.
+
+        Args:
+            df: DataFrame containing coupling data
+            x_col: Column name for the x-axis metric
+            x_label: Display label for the x-axis
+            y_col: Column name for the y-axis metric
+            y_label: Display label for the y-axis
+            metric_name: Short name used for file/folder naming
+        """
+        print(f"  Generating {x_col} vs {y_col} plots...")
+
+        agent_pairs = df[['agent_i', 'agent_j']].drop_duplicates().values
+        n_pairs = len(agent_pairs)
+        n_cols = min(3, int(np.ceil(np.sqrt(n_pairs))))
+        n_rows = int(np.ceil(n_pairs / n_cols))
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows))
+        if n_pairs == 1:
+            axes = np.array([axes])
+        axes = axes.flatten()
+
+        for idx, (agent_i, agent_j) in enumerate(agent_pairs):
+            ax = axes[idx]
+            pair_data = df[(df['agent_i'] == agent_i) & (df['agent_j'] == agent_j)]
+            pair_data = pair_data.dropna(subset=[x_col, y_col])
+
+            if len(pair_data) == 0:
+                ax.text(0.5, 0.5, f'No valid data\nfor pair ({agent_i}, {agent_j})',
+                        ha='center', va='center', transform=ax.transAxes)
+                ax.set_xlabel(x_label)
+                ax.set_ylabel(y_label)
+                continue
+
+            x = pair_data[x_col].values
+            y = pair_data[y_col].values
+
+            ax.scatter(x, y, alpha=0.3, s=10, c='steelblue')
+
+            if len(x) > 1:
+                try:
+                    z = np.polyfit(x, y, 1)
+                    p = np.poly1d(z)
+                    x_fit = np.linspace(x.min(), x.max(), 100)
+                    ax.plot(x_fit, p(x_fit), 'r--', linewidth=2,
+                            label=f'y={z[0]:.3f}x+{z[1]:.3f}')
+                    pearson_r, pearson_p = stats.pearsonr(x, y)
+                    ax.text(0.05, 0.95, f'r = {pearson_r:.3f}\np = {pearson_p:.3e}',
+                            transform=ax.transAxes, verticalalignment='top',
+                            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+                    ax.legend()
+                except Exception:
+                    pass
+
+            ax.set_xlabel(x_label)
+            ax.set_ylabel(y_label)
+            ax.set_title(f'Agent {agent_i} \u2192 Agent {agent_j}')
+            ax.grid(True, alpha=0.3)
+
+        for idx in range(n_pairs, len(axes)):
+            axes[idx].axis('off')
+
+        plt.tight_layout()
+
+        metric_dir = os.path.join(self.plots_dir, metric_name)
+        os.makedirs(metric_dir, exist_ok=True)
+
+        combined_path = os.path.join(metric_dir, f"coupling_analysis_{metric_name}_all_pairs.png")
+        plt.savefig(combined_path, dpi=150, bbox_inches='tight')
+        print(f"  Saved combined {metric_name} plot to: {combined_path}")
+        plt.close()
+
+        # Individual plots
+        for agent_i, agent_j in agent_pairs:
+            fig, ax = plt.subplots(figsize=(8, 6))
+            pair_data = df[(df['agent_i'] == agent_i) & (df['agent_j'] == agent_j)]
+            pair_data = pair_data.dropna(subset=[x_col, y_col])
+
+            if len(pair_data) == 0:
+                plt.close()
+                continue
+
+            x = pair_data[x_col].values
+            y = pair_data[y_col].values
+
+            ax.scatter(x, y, alpha=0.3, s=20, c='steelblue')
+
+            if len(x) > 1:
+                try:
+                    z = np.polyfit(x, y, 1)
+                    p = np.poly1d(z)
+                    x_fit = np.linspace(x.min(), x.max(), 100)
+                    ax.plot(x_fit, p(x_fit), 'r--', linewidth=2,
+                            label=f'y={z[0]:.3f}x+{z[1]:.3f}')
+                    pearson_r, pearson_p = stats.pearsonr(x, y)
+                    ax.text(0.05, 0.95, f'Pearson r = {pearson_r:.3f}\np-value = {pearson_p:.3e}',
+                            transform=ax.transAxes, verticalalignment='top',
+                            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+                            fontsize=12)
+                    ax.legend(fontsize=11)
+                except Exception:
+                    pass
+
+            ax.set_xlabel(x_label, fontsize=12)
+            ax.set_ylabel(y_label, fontsize=12)
+            ax.set_title(f'{y_label} vs {x_label}: Agent {agent_i} \u2192 Agent {agent_j}', fontsize=14)
+            ax.grid(True, alpha=0.3)
+
+            plt.tight_layout()
+            individual_path = os.path.join(metric_dir,
+                f"coupling_{metric_name}_pair_{agent_i}_to_{agent_j}.png")
+            plt.savefig(individual_path, dpi=150, bbox_inches='tight')
+            plt.close()
+
+        print(f"  Saved {len(agent_pairs)} individual {metric_name} plots to {metric_dir}")
+
+    def _generate_3d_plots(self, df):
+        """
+        Generate 3D scatter plots of frob_norm vs grad_norm vs delta_critic2.
+        
+        Args:
+            df: DataFrame containing coupling data
+        """
+        print(f"  Generating 3D plots...")
+        
+        # Import 3D plotting
+        from mpl_toolkits.mplot3d import Axes3D
+        
+        # Create subfolder for 3D plots
+        plots_3d_dir = os.path.join(self.plots_dir, '3d_plots')
+        os.makedirs(plots_3d_dir, exist_ok=True)
+        
+        # Get unique agent pairs
+        agent_pairs = df[['agent_i', 'agent_j']].drop_duplicates().values
+        
+        # Combined 3D plot for all pairs
+        n_pairs = len(agent_pairs)
+        n_cols = min(3, int(np.ceil(np.sqrt(n_pairs))))
+        n_rows = int(np.ceil(n_pairs / n_cols))
+        
+        fig = plt.figure(figsize=(7*n_cols, 6*n_rows))
+        
+        for idx, (agent_i, agent_j) in enumerate(agent_pairs):
+            ax = fig.add_subplot(n_rows, n_cols, idx + 1, projection='3d')
+            
+            # Filter data for this agent pair
+            pair_data = df[(df['agent_i'] == agent_i) & (df['agent_j'] == agent_j)]
+            pair_data = pair_data.dropna(subset=['frob_norm', 'grad_norm', 'delta_critic2'])
+            
+            if len(pair_data) == 0:
+                ax.text2D(0.5, 0.5, f'No valid data\nfor pair ({agent_i}, {agent_j})',
+                         ha='center', va='center', transform=ax.transAxes)
+                continue
+            
+            x = pair_data['frob_norm'].values
+            y = pair_data['grad_norm'].values
+            z = pair_data['delta_critic2'].values
+            
+            # Set explicit axis limits with padding to avoid illusions
+            x_min, x_max = x.min(), x.max()
+            y_min, y_max = y.min(), y.max()
+            z_min, z_max = z.min(), z.max()
+            
+            x_padding = (x_max - x_min) * 0.05 if x_max > x_min else 0.1
+            y_padding = (y_max - y_min) * 0.05 if y_max > y_min else 0.1
+            z_padding = (z_max - z_min) * 0.05 if z_max > z_min else 0.1
+            
+            ax.set_xlim([max(0, x_min - x_padding), x_max + x_padding])
+            ax.set_ylim([max(0, y_min - y_padding), y_max + y_padding])
+            ax.set_zlim([z_min - z_padding, z_max + z_padding])
+            
+            # Scatter plot with color gradient based on z-value
+            scatter = ax.scatter(x, y, z, c=z, cmap='viridis', alpha=0.6, s=20, edgecolors='k', linewidth=0.3)
+            
+            # Set better viewing angle (elev=20, azim=45 reduces illusions)
+            ax.view_init(elev=20, azim=45)
+            
+            # Use orthographic projection to eliminate perspective distortion
+            ax.set_proj_type('ortho')
+            
+            # Add clearer grid
+            ax.grid(True, alpha=0.3, linestyle='--')
+            
+            ax.set_xlabel('||H||_F (Frobenius Norm)', fontsize=10, labelpad=5)
+            ax.set_ylabel('||g|| (Gradient Magnitude)', fontsize=10, labelpad=5)
+            ax.set_zlabel('ΔQ₂ (Critic Shift)', fontsize=10, labelpad=5)
+            ax.set_title(f'Agent {agent_i} → Agent {agent_j}', fontsize=11)
+            
+            # Add colorbar
+            plt.colorbar(scatter, ax=ax, shrink=0.5, aspect=5)
+        
+        plt.tight_layout()
+        combined_3d_path = os.path.join(plots_3d_dir, "3d_coupling_all_pairs.png")
+        plt.savefig(combined_3d_path, dpi=150, bbox_inches='tight')
+        print(f"  Saved combined 3D plot to: {combined_3d_path}")
+        plt.close()
+        
+        # Generate individual 3D plots for each pair
+        for agent_i, agent_j in agent_pairs:
+            fig = plt.figure(figsize=(10, 8))
+            ax = fig.add_subplot(111, projection='3d')
+            
+            pair_data = df[(df['agent_i'] == agent_i) & (df['agent_j'] == agent_j)]
+            pair_data = pair_data.dropna(subset=['frob_norm', 'grad_norm', 'delta_critic2'])
+            
+            if len(pair_data) == 0:
+                plt.close()
+                continue
+            
+            x = pair_data['frob_norm'].values
+            y = pair_data['grad_norm'].values
+            z = pair_data['delta_critic2'].values
+            
+            # Set explicit axis limits with padding
+            x_min, x_max = x.min(), x.max()
+            y_min, y_max = y.min(), y.max()
+            z_min, z_max = z.min(), z.max()
+            
+            x_padding = (x_max - x_min) * 0.05 if x_max > x_min else 0.1
+            y_padding = (y_max - y_min) * 0.05 if y_max > y_min else 0.1
+            z_padding = (z_max - z_min) * 0.05 if z_max > z_min else 0.1
+            
+            ax.set_xlim([max(0, x_min - x_padding), x_max + x_padding])
+            ax.set_ylim([max(0, y_min - y_padding), y_max + y_padding])
+            ax.set_zlim([z_min - z_padding, z_max + z_padding])
+            
+            scatter = ax.scatter(x, y, z, c=z, cmap='viridis', alpha=0.6, s=40, edgecolors='k', linewidth=0.5)
+            
+            # Set better viewing angle
+            ax.view_init(elev=20, azim=45)
+            
+            # Use orthographic projection to eliminate perspective distortion
+            ax.set_proj_type('ortho')
+            
+            # Add clearer grid
+            ax.grid(True, alpha=0.3, linestyle='--')
+            
+            # Make panes slightly transparent
+            ax.xaxis.pane.fill = False
+            ax.yaxis.pane.fill = False
+            ax.zaxis.pane.fill = False
+            ax.xaxis.pane.set_edgecolor('gray')
+            ax.yaxis.pane.set_edgecolor('gray')
+            ax.zaxis.pane.set_edgecolor('gray')
+            ax.xaxis.pane.set_alpha(0.3)
+            ax.yaxis.pane.set_alpha(0.3)
+            ax.zaxis.pane.set_alpha(0.3)
+            
+            ax.set_xlabel('||H||_F (Frobenius Norm)', fontsize=12, labelpad=8)
+            ax.set_ylabel('||g|| (Gradient Magnitude)', fontsize=12, labelpad=8)
+            ax.set_zlabel('ΔQ₂ (Critic Value Shift)', fontsize=12, labelpad=8)
+            ax.set_title(f'3D Coupling Analysis: Agent {agent_i} → Agent {agent_j}', fontsize=14, pad=20)
+            
+            # Add colorbar
+            cbar = plt.colorbar(scatter, ax=ax, shrink=0.6, aspect=10, pad=0.1)
+            cbar.set_label('ΔQ₂', fontsize=11)
+            
+            plt.tight_layout()
+            individual_3d_path = os.path.join(plots_3d_dir, f"3d_coupling_pair_{agent_i}_to_{agent_j}.png")
+            plt.savefig(individual_3d_path, dpi=150, bbox_inches='tight')
+            plt.close()
+        
+        print(f"  Saved {len(agent_pairs)} individual 3D plots to {plots_3d_dir}")
     
     def save_results(self):
         """Save all results to CSV files and generate plots."""
@@ -325,19 +628,32 @@ class SVDCouplingAnalysisRunner:
         
         # Create DataFrame from collected data
         df = pd.DataFrame(self.coupling_data, columns=[
-            'seed', 'timestep', 'agent_i', 'agent_j', 'frob_norm', 'delta_g_norm', 'delta_critic'
+            'seed', 'timestep', 'agent_i', 'agent_j', 'frob_norm', 'grad_norm',
+            'delta_g_norm', 'perturbed_grad_norm', 'delta_critic_j_only', 'delta_critic1', 'delta_critic2'
         ])
         
+        # Compute adversarial assist metric
+        df['delta_critic_diff'] = df['delta_critic2'] - df['delta_critic1']
+        
+        # Create CSV subfolder
+        csv_dir = os.path.join(self.logdir, 'csv_data')
+        os.makedirs(csv_dir, exist_ok=True)
+        
         # Save raw data
-        raw_csv_path = os.path.join(self.logdir, "raw_coupling_data.csv")
+        raw_csv_path = os.path.join(csv_dir, "raw_coupling_data.csv")
         df.to_csv(raw_csv_path, index=False)
         print(f"\nSaved raw coupling data to: {raw_csv_path}")
         
         # Compute statistics grouped by agent pair
         grouped = df.groupby(['agent_i', 'agent_j']).agg({
             'frob_norm': ['mean', 'std', 'count'],
+            'grad_norm': ['mean', 'std', 'count'],
             'delta_g_norm': ['mean', 'std', 'count'],
-            'delta_critic': ['mean', 'std', 'count']
+            'perturbed_grad_norm': ['mean', 'std', 'count'],
+            'delta_critic_j_only': ['mean', 'std', 'count'],
+            'delta_critic1': ['mean', 'std', 'count'],
+            'delta_critic2': ['mean', 'std', 'count'],
+            'delta_critic_diff': ['mean', 'std', 'count']
         }).reset_index()
         
         # Flatten column names
@@ -345,7 +661,7 @@ class SVDCouplingAnalysisRunner:
                           for col in grouped.columns.values]
         
         # Save aggregated stats
-        stats_csv_path = os.path.join(self.logdir, "mean_coupling_by_pair.csv")
+        stats_csv_path = os.path.join(csv_dir, "mean_coupling_by_pair.csv")
         grouped.to_csv(stats_csv_path, index=False)
         print(f"Saved aggregated statistics to: {stats_csv_path}")
         

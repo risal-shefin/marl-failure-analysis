@@ -266,31 +266,40 @@ def collect_agent_q_value(maddpg, agent_id, obs, actions, action_spaces):
     return maddpg.agents[agent_id].critic(vf_in).mean().item()
 
 
-def compute_pairwise_frob_svd_coupling_analysis(maddpg, obs, actions, action_spaces, epsilon=0.01, lam=1.0):
+def compute_pairwise_frob_svd_coupling_analysis(maddpg, obs, actions, action_spaces, epsilon=0.01):
     """
     Compute SVD-based gradient coupling analysis for all agent pairs.
 
-    Uses a composite perturbation direction to avoid the objective misalignment
-    (damping effect) that arises when the gradient-boost direction for agent i
-    conflicts with the direct gradient direction for agent j.  The composite
-    direction is:
+    Uses an orthogonally-projected perturbation direction to isolate the
+    pure second-order (cross-Hessian) effect of a_j on ∇_{a_i} Q_i, while
+    eliminating any first-order influence of a_j on Q_i.
 
-        d_optimal = ĝ_{v2} + λ * (H^T g / ||H^T g||)
+    The assist direction induced by the cross-Hessian is:
 
-    where ĝ_{v2} = ∇_{a_j} Q_i / ||∇_{a_j} Q_i|| is the normalised direct
-    gradient of Q_i w.r.t. a_j and H^T g is the assist direction that boosts
-    ∇_{a_i} Q_i.  The final perturbation is:
+        d_assist = H^T (∇_{a_i} Q_i)
 
-        a_j' = a_j + ε * d_optimal / ||d_optimal||
+    where H = ∇_{a_j} ∇_{a_i} Q_i.  To discard the direct first-order
+    effect of a_j on Q_i, d_assist is projected onto the subspace orthogonal
+    to g_{v2} = ∇_{a_j} Q_i:
+
+        d_orthogonal = d_assist - (d_assist^T g_{v2} / ||g_{v2}||^2) * g_{v2}
+
+    By construction d_orthogonal^T g_{v2} = 0, so perturbations along
+    d_orthogonal cause no first-order change in Q_i via a_j, and any
+    observed effect on ∇_{a_i} Q_i is attributable solely to the
+    cross-Hessian coupling.  The final perturbation is:
+
+        a_j' = a_j + ε * d_orthogonal / ||d_orthogonal||
 
     For each pair (i, j):
     1. Compute cross-Hessian H = ∇_{a_j} ∇_{a_i} Q_i
     2. Compute Frobenius norm ||H||_F
-    3. Compute composite direction: d_optimal = ĝ_{v2} + λ * (H^T g / ||H^T g||)
-    4. Perturb a_j along d_optimal: a_j' = a_j + ε * d_optimal / ||d_optimal||
-    5. Compute gradient shift: Δg = ||∇_{a_i} Q_i(a_j') - ∇_{a_i} Q_i(a_j)||_2
-    6. Perturb a_i along sign of original gradient: a_i' = a_i - ε * sign(g)
-    7. Compute critic value shift: ΔQ = Q_i(a_i', a_j') - Q_i(a_i, a_j)
+    3. Compute assist direction: d_assist = H^T g,  g = ∇_{a_i} Q_i
+    4. Project out the first-order component: d_orthogonal = d_assist - proj_{g_{v2}} d_assist
+    5. Perturb a_j along d_orthogonal: a_j' = a_j + ε * d_orthogonal / ||d_orthogonal||
+    6. Compute gradient shift: Δg = ||∇_{a_i} Q_i(a_j') - ∇_{a_i} Q_i(a_j)||_2
+    7. Perturb a_i along sign of original gradient: a_i' = a_i - ε * sign(g)
+    8. Compute critic value shift: ΔQ = Q_i(a_i', a_j') - Q_i(a_i, a_j)
 
     Args:
         maddpg: MADDPG agent
@@ -298,10 +307,6 @@ def compute_pairwise_frob_svd_coupling_analysis(maddpg, obs, actions, action_spa
         actions: List of actions
         action_spaces: List of action spaces
         epsilon: Perturbation magnitude (default: 0.01)
-        lam: Trade-off coefficient λ between the direct function-increase term
-             (ĝ_{v2}) and the adversarial gradient-assist term (H^T g direction).
-             lam=0 reduces to a pure FGSM step on a_j; lam→∞ recovers the
-             original sign(H^T g) boost direction. (default: 1.0)
 
     Returns:
         Dictionary mapping (agent_i, agent_j) -> {'frob_norm': float,
@@ -374,13 +379,12 @@ def compute_pairwise_frob_svd_coupling_analysis(maddpg, obs, actions, action_spa
             H_T_g = H.T @ grad_i.T  # Shape: [action_dim_j, 1]
             H_T_g = H_T_g.squeeze()  # Shape: [action_dim_j]
 
-            # --- Composite Objective (Issue 2: Objective Misalignment fix) ---
-            # Compute the direct gradient g_{v2} = ∇_{a_j} Q_i.  When the pure
-            # boost direction sign(H^T g) is negatively correlated with ∇_{a_j} Q_i
-            # it steepens the hill for agent i while pushing the system down with
-            # respect to agent j (damping effect).  The composite direction balances
-            # the two objectives:
-            #   d_optimal = ĝ_{v2} + λ * (H^T g / ||H^T g||)
+            # --- Orthogonal Projection (discard first-order effect of a_j) ---
+            # Compute the direct gradient g_{v2} = ∇_{a_j} Q_i and project
+            # d_assist = H^T g onto the subspace orthogonal to g_{v2}.  This
+            # ensures that perturbations along the resulting direction cause no
+            # first-order change in Q_i via a_j, so any observed shift in
+            # ∇_{a_i} Q_i is attributable solely to the cross-Hessian coupling.
             grad_j = torch.autograd.grad(
                 critic_val_i,
                 torch_actions[j],
@@ -388,17 +392,21 @@ def compute_pairwise_frob_svd_coupling_analysis(maddpg, obs, actions, action_spa
                 allow_unused=True
             )[0]
 
-            # Normalise the direct gradient: ĝ_{v2}
-            g_v2 = grad_j.flatten()
-            g_v2_hat = g_v2 / torch.clamp(g_v2.norm(p=2), min=1e-8)
+            # d_assist = H^T g  (already computed as H_T_g)
+            d_assist = H_T_g  # Shape: [action_dim_j]
 
-            # Normalise the assist direction: H^T g / ||H^T g||
-            H_T_g_hat = H_T_g / torch.clamp(H_T_g.norm(p=2), min=1e-8)
+            # g_{v2} = ∇_{a_j} Q_i
+            g_v2 = grad_j.flatten()  # Shape: [action_dim_j]
 
-            # Composite direction and unit-normalise before applying perturbation
-            d_optimal = -g_v2_hat + lam * H_T_g_hat
-            d_optimal_unit = d_optimal / torch.clamp(d_optimal.norm(p=2), min=1e-8)
-            perturbed_action_j = torch_actions[j] + epsilon * d_optimal_unit.unsqueeze(0)
+            # Project d_assist onto subspace orthogonal to g_{v2}:
+            #   d_orthogonal = d_assist - (d_assist · g_{v2} / ||g_{v2}||^2) * g_{v2}
+            g_v2_norm_sq = torch.clamp((g_v2 * g_v2).sum(), min=1e-16)
+            projection_coeff = (d_assist * g_v2).sum() / g_v2_norm_sq
+            d_orthogonal = d_assist - projection_coeff * g_v2
+
+            # Unit-normalise and apply perturbation
+            d_orthogonal_unit = d_orthogonal / torch.clamp(d_orthogonal.norm(p=2), min=1e-8)
+            perturbed_action_j = torch_actions[j] + epsilon * d_orthogonal_unit.unsqueeze(0)
             # Clamp to action space bounds if continuous
             if not maddpg.discrete_action:
                 action_low = torch.tensor(
@@ -432,10 +440,14 @@ def compute_pairwise_frob_svd_coupling_analysis(maddpg, obs, actions, action_spa
             # Compute ||Δg||_2
             delta_g = grad_i_perturbed - grad_i.detach()
             delta_g_norm = delta_g.norm(p=2).item()
+
+            # Compute ||g'||_2 (perturbed gradient norm)
+            perturbed_grad_norm = grad_i_perturbed.norm(p=2).item()
             
             # FGSM-style perturbation for action_i using the original gradient sign.
             # Since sign(H^T g) only boosts grad_i without changing its sign direction,
             # sign(g') == sign(g) and recomputing the gradient is unnecessary.
+            # perturbed_action_i = torch_actions[i].detach() - epsilon * grad_i.detach().sign()
             perturbed_action_i = torch_actions[i].detach() - epsilon * grad_i.detach().sign()
             
             # Clamp to action space bounds if continuous
@@ -458,6 +470,16 @@ def compute_pairwise_frob_svd_coupling_analysis(maddpg, obs, actions, action_spa
                 vf_in_original = torch.cat((*torch_obs, *[a.detach() for a in torch_actions]), dim=1)
                 critic_original = maddpg.agents[i].critic(vf_in_original).mean().item()
                 
+                # delta_critic_j_only: Only agent j perturbed along orthogonal direction (verify ortho projection)
+                torch_actions_j_only_perturbed = [
+                    perturbed_action_j.detach() if idx == j
+                    else torch_actions[idx].detach()
+                    for idx in range(N)
+                ]
+                vf_in_j_only = torch.cat((*torch_obs, *torch_actions_j_only_perturbed), dim=1)
+                critic_j_only = maddpg.agents[i].critic(vf_in_j_only).mean().item()
+                delta_critic_j_only = critic_j_only - critic_original
+
                 # delta_critic1: Only agent i perturbed with ORIGINAL gradient (no j perturbation)
                 torch_actions_i_only_perturbed = [
                     perturbed_action_i if idx == i 
@@ -483,6 +505,8 @@ def compute_pairwise_frob_svd_coupling_analysis(maddpg, obs, actions, action_spa
                 'frob_norm': frob_norm,
                 'grad_norm': grad_norm,
                 'delta_g_norm': delta_g_norm,
+                'perturbed_grad_norm': perturbed_grad_norm,
+                'delta_critic_j_only': delta_critic_j_only,
                 'delta_critic1': delta_critic1,
                 'delta_critic2': delta_critic2
             }
