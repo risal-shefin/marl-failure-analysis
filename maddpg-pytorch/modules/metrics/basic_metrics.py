@@ -448,7 +448,8 @@ def compute_pairwise_frob_svd_coupling_analysis(maddpg, obs, actions, action_spa
             # Since sign(H^T g) only boosts grad_i without changing its sign direction,
             # sign(g') == sign(g) and recomputing the gradient is unnecessary.
             # perturbed_action_i = torch_actions[i].detach() - epsilon * grad_i.detach().sign()
-            perturbed_action_i = torch_actions[i].detach() - epsilon * grad_i.detach().sign()
+            perturbed_action_i = torch_actions[i].detach() - epsilon * grad_i.detach()
+            perturbed_action_i2 = torch_actions[i].detach() - epsilon * grad_i_perturbed.detach()
             
             # Clamp to action space bounds if continuous
             if not maddpg.discrete_action:
@@ -463,6 +464,7 @@ def compute_pairwise_frob_svd_coupling_analysis(maddpg, obs, actions, action_spa
                     dtype=perturbed_action_i.dtype
                 )
                 perturbed_action_i = perturbed_action_i.clamp(action_low_i, action_high_i)
+                perturbed_action_i2 = perturbed_action_i2.clamp(action_low_i, action_high_i)
             
             # Compute critic values for delta_critic calculation
             # Original critic value: Q_i(a_i, a_j)
@@ -492,7 +494,7 @@ def compute_pairwise_frob_svd_coupling_analysis(maddpg, obs, actions, action_spa
                 
                 # delta_critic2: Both i and j perturbed
                 torch_actions_fully_perturbed = [
-                    perturbed_action_i if idx == i 
+                    perturbed_action_i2 if idx == i 
                     else perturbed_action_j.detach() if idx == j 
                     else torch_actions[idx].detach()
                     for idx in range(N)
@@ -500,6 +502,25 @@ def compute_pairwise_frob_svd_coupling_analysis(maddpg, obs, actions, action_spa
                 vf_in_fully_perturbed = torch.cat((*torch_obs, *torch_actions_fully_perturbed), dim=1)
                 critic_perturbed = maddpg.agents[i].critic(vf_in_fully_perturbed).mean().item()
                 delta_critic2 = critic_perturbed - critic_original
+
+                # if delta_critic2 >= delta_critic1 and delta_g_norm > 0.1 and i != j:
+                #     print(" Delta grad norm ", delta_g_norm)
+                #     print(" Perturb Grad Norm: ", perturbed_grad_norm)
+                #     print("\n Grad I: ", grad_i.detach().cpu().numpy())
+                #     print(" Grad I Perturbed: ", grad_i_perturbed.detach().cpu().numpy())
+                #     print("\n Torch Action I: ", torch_actions[i].detach().cpu().numpy())
+                #     print(" Perturbed Torch Action I: ", perturbed_action_i.detach().cpu().numpy())
+                #     print("\n Torch Action J: ", torch_actions[j].detach().cpu().numpy())
+                #     print(" Perturbed Torch Action J: ", perturbed_action_j.detach().cpu().numpy())
+                #     print("\n Delta Critic 1 ", delta_critic1)
+                #     print(" Delta Critic 2 ", delta_critic2)
+                #     print(" Delta Critic J only ", delta_critic_j_only)
+
+                #     cos_sim = torch.nn.functional.cosine_similarity(
+                #         grad_i.flatten(), grad_i_perturbed.flatten(), dim=0
+                #     ).item()
+                #     print("cos_sim(g, g_perturbed):", cos_sim)
+                #     print("\n")
             
             results[(i, j)] = {
                 'frob_norm': frob_norm,
