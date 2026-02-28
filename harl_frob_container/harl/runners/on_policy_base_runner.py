@@ -10,7 +10,8 @@ from harl.common.buffers.on_policy_critic_buffer_ep import OnPolicyCriticBufferE
 from harl.common.buffers.on_policy_critic_buffer_fp import OnPolicyCriticBufferFP
 from harl.algorithms.actors import ALGO_REGISTRY
 from harl.algorithms.critics.v_critic import VCritic
-from harl.algorithms.critics.centralized_v_critic import CentralizedVCritic
+from harl.algorithms.critics.centralized_q_critic import CentralizedQCritic
+from harl.common.buffers.on_policy_central_q_buffer import OnPolicyCentralQBuffer
 from harl.utils.trans_tools import _t2n
 from harl.utils.envs_tools import (
     make_eval_env,
@@ -124,9 +125,7 @@ class OnPolicyBaseRunner:
                 )
                 self.actor.append(agent)
 
-        self.use_centralized_critic = algo_args["algo"].get(
-            "use_centralized_critic", False
-        )
+        self.enable_central_q = algo_args["algo"].get("enable_central_q", False)
 
         if self.algo_args["render"]["use_render"] is False:  # train, not render
             self.actor_buffer = []
@@ -167,24 +166,32 @@ class OnPolicyBaseRunner:
             else:
                 self.value_normalizer = None
 
-            # per-agent centralized critics (optional)
-            if self.use_centralized_critic:
+            # per-agent centralized Q critics (optional)
+            if self.enable_central_q:
+                from harl.utils.envs_tools import get_shape_from_act_space
+
+                total_act_dim = sum(
+                    get_shape_from_act_space(self.envs.action_space[i])
+                    for i in range(self.num_agents)
+                )
                 self.centralized_critics = []
                 self.centralized_critic_buffers = []
                 for agent_id in range(self.num_agents):
-                    cent_critic = CentralizedVCritic(
+                    cent_critic = CentralizedQCritic(
                         {**algo_args["model"], **algo_args["algo"]},
                         share_observation_space,
+                        total_act_dim,
                         device=self.device,
                     )
                     self.centralized_critics.append(cent_critic)
-                    cent_buffer = OnPolicyCriticBufferEP(
+                    cent_buffer = OnPolicyCentralQBuffer(
                         {
                             **algo_args["train"],
                             **algo_args["model"],
                             **algo_args["algo"],
                         },
                         share_observation_space,
+                        total_act_dim,
                     )
                     self.centralized_critic_buffers.append(cent_buffer)
                 if algo_args["train"]["use_valuenorm"] is True:
@@ -228,7 +235,7 @@ class OnPolicyBaseRunner:
                     for agent_id in range(self.num_agents):
                         self.actor[agent_id].lr_decay(episode, episodes)
                 self.critic.lr_decay(episode, episodes)
-                if self.use_centralized_critic:
+                if self.enable_central_q:
                     for agent_id in range(self.num_agents):
                         self.centralized_critics[agent_id].lr_decay(episode, episodes)
 
@@ -322,7 +329,7 @@ class OnPolicyBaseRunner:
             self.critic_buffer.share_obs[0] = share_obs[:, 0].copy()
         elif self.state_type == "FP":
             self.critic_buffer.share_obs[0] = share_obs.copy()
-        if self.use_centralized_critic:
+        if self.enable_central_q:
             for agent_id in range(self.num_agents):
                 if self.state_type == "EP":
                     self.centralized_critic_buffers[agent_id].share_obs[0] = (
@@ -388,28 +395,32 @@ class OnPolicyBaseRunner:
                 )
             )
 
-        if self.use_centralized_critic:
-            self._collect_centralized_critic_values(step)
+        if self.enable_central_q:
+            self._collect_central_q_values(step, actions)
 
         return values, actions, action_log_probs, rnn_states, rnn_states_critic
 
-    def _collect_centralized_critic_values(self, step):
-        """Collect values from per-agent centralized critics.
+    def _collect_central_q_values(self, step, actions):
+        """Collect Q-values from per-agent centralized Q critics.
         Args:
-            step: step in the episode.
-        Stores results in self._centralized_values and self._centralized_rnn_states_critic.
+            step: (int) step in the episode.
+            actions: (np.ndarray) all agents' actions, shape (n_threads, n_agents, act_dim).
+        Stores results in self._centralized_q_values and self._centralized_rnn_states.
         """
-        centralized_values = []
+        # Concatenate all agents' actions: (n_threads, n_agents * act_dim)
+        all_actions = actions.reshape(actions.shape[0], -1)
+        centralized_q_values = []
         centralized_rnn_states = []
         for agent_id in range(self.num_agents):
-            cent_value, cent_rnn_state = self.centralized_critics[agent_id].get_values(
+            cent_q, cent_rnn_state = self.centralized_critics[agent_id].get_values(
                 self.centralized_critic_buffers[agent_id].share_obs[step],
+                all_actions,
                 self.centralized_critic_buffers[agent_id].rnn_states_critic[step],
                 self.centralized_critic_buffers[agent_id].masks[step],
             )
-            centralized_values.append(_t2n(cent_value))
+            centralized_q_values.append(_t2n(cent_q))
             centralized_rnn_states.append(_t2n(cent_rnn_state))
-        self._centralized_values = centralized_values
+        self._centralized_q_values = centralized_q_values
         self._centralized_rnn_states = centralized_rnn_states
 
     def insert(self, data):
@@ -532,7 +543,8 @@ class OnPolicyBaseRunner:
                 share_obs, rnn_states_critic, values, rewards, masks, bad_masks
             )
 
-        if self.use_centralized_critic:
+        if self.enable_central_q:
+            all_actions = actions.reshape(actions.shape[0], -1)
             for agent_id in range(self.num_agents):
                 cent_rnn_states = self._centralized_rnn_states[agent_id].copy()
                 cent_rnn_states[dones_env == True] = np.zeros(
@@ -546,8 +558,9 @@ class OnPolicyBaseRunner:
                 if self.state_type == "EP":
                     self.centralized_critic_buffers[agent_id].insert(
                         share_obs[:, 0],
+                        all_actions,
                         cent_rnn_states,
-                        self._centralized_values[agent_id],
+                        self._centralized_q_values[agent_id],
                         rewards[:, 0],
                         masks[:, 0],
                         bad_masks,
@@ -555,8 +568,9 @@ class OnPolicyBaseRunner:
                 elif self.state_type == "FP":
                     self.centralized_critic_buffers[agent_id].insert(
                         share_obs[:, agent_id],
+                        all_actions,
                         cent_rnn_states,
-                        self._centralized_values[agent_id],
+                        self._centralized_q_values[agent_id],
                         rewards[:, agent_id],
                         masks[:, agent_id],
                         bad_masks[:, agent_id],
@@ -586,16 +600,33 @@ class OnPolicyBaseRunner:
             )
         self.critic_buffer.compute_returns(next_value, self.value_normalizer)
 
-        if self.use_centralized_critic:
+        if self.enable_central_q:
+            # Run actors on the terminal observation to obtain next actions,
+            # then bootstrap Q(s_T, a_T) for return computation.
+            next_actions_collector = []
             for agent_id in range(self.num_agents):
-                next_cent_value, _ = self.centralized_critics[agent_id].get_values(
+                next_action, _, _ = self.actor[agent_id].get_actions(
+                    self.actor_buffer[agent_id].obs[-1],
+                    self.actor_buffer[agent_id].rnn_states[-1],
+                    self.actor_buffer[agent_id].masks[-1],
+                    self.actor_buffer[agent_id].available_actions[-1]
+                    if self.actor_buffer[agent_id].available_actions is not None
+                    else None,
+                )
+                next_actions_collector.append(_t2n(next_action))
+            # Concatenate per-agent actions: list of (n_threads, act_dim) -> (n_threads, n_agents * act_dim)
+            next_all_actions = np.concatenate(next_actions_collector, axis=-1)
+
+            for agent_id in range(self.num_agents):
+                next_cent_q, _ = self.centralized_critics[agent_id].get_values(
                     self.centralized_critic_buffers[agent_id].share_obs[-1],
+                    next_all_actions,
                     self.centralized_critic_buffers[agent_id].rnn_states_critic[-1],
                     self.centralized_critic_buffers[agent_id].masks[-1],
                 )
-                next_cent_value = _t2n(next_cent_value)
+                next_cent_q = _t2n(next_cent_q)
                 self.centralized_critic_buffers[agent_id].compute_returns(
-                    next_cent_value, self.centralized_value_normalizers[agent_id]
+                    next_cent_q, self.centralized_value_normalizers[agent_id]
                 )
 
     def train(self):
@@ -610,7 +641,7 @@ class OnPolicyBaseRunner:
         for agent_id in range(self.num_agents):
             self.actor_buffer[agent_id].after_update()
         self.critic_buffer.after_update()
-        if self.use_centralized_critic:
+        if self.enable_central_q:
             for agent_id in range(self.num_agents):
                 self.centralized_critic_buffers[agent_id].after_update()
 
@@ -832,7 +863,7 @@ class OnPolicyBaseRunner:
         for agent_id in range(self.num_agents):
             self.actor[agent_id].prep_rollout()
         self.critic.prep_rollout()
-        if self.use_centralized_critic:
+        if self.enable_central_q:
             for agent_id in range(self.num_agents):
                 self.centralized_critics[agent_id].prep_rollout()
 
@@ -841,7 +872,7 @@ class OnPolicyBaseRunner:
         for agent_id in range(self.num_agents):
             self.actor[agent_id].prep_training()
         self.critic.prep_training()
-        if self.use_centralized_critic:
+        if self.enable_central_q:
             for agent_id in range(self.num_agents):
                 self.centralized_critics[agent_id].prep_training()
 
@@ -864,18 +895,18 @@ class OnPolicyBaseRunner:
                 self.value_normalizer.state_dict(),
                 str(self.save_dir) + f"/value_normalizer{suffix}.pt",
             )
-        if self.use_centralized_critic:
+        if self.enable_central_q:
             for agent_id in range(self.num_agents):
                 torch.save(
                     self.centralized_critics[agent_id].critic.state_dict(),
                     str(self.save_dir)
-                    + f"/centralized_critic_agent{agent_id}{suffix}.pt",
+                    + f"/central_q_critic_agent{agent_id}{suffix}.pt",
                 )
                 if self.centralized_value_normalizers[agent_id] is not None:
                     torch.save(
                         self.centralized_value_normalizers[agent_id].state_dict(),
                         str(self.save_dir)
-                        + f"/centralized_value_normalizer_agent{agent_id}{suffix}.pt",
+                        + f"/central_q_value_normalizer_agent{agent_id}{suffix}.pt",
                     )
 
     def restore(self):
@@ -892,12 +923,12 @@ class OnPolicyBaseRunner:
                 self.value_normalizer.load_state_dict(
                     torch.load(find_checkpoint(model_dir, "value_normalizer"))
                 )
-            if self.use_centralized_critic:
+            if self.enable_central_q:
                 for agent_id in range(self.num_agents):
                     self.centralized_critics[agent_id].critic.load_state_dict(
                         torch.load(
                             find_checkpoint(
-                                model_dir, f"centralized_critic_agent{agent_id}"
+                                model_dir, f"central_q_critic_agent{agent_id}"
                             )
                         )
                     )
@@ -906,7 +937,7 @@ class OnPolicyBaseRunner:
                             torch.load(
                                 find_checkpoint(
                                     model_dir,
-                                    f"centralized_value_normalizer_agent{agent_id}",
+                                    f"central_q_value_normalizer_agent{agent_id}",
                                 )
                             )
                         )

@@ -127,7 +127,7 @@ class OnPolicyHARunner(OnPolicyBaseRunner):
         # update critic
         critic_train_info = self.critic.train(self.critic_buffer, self.value_normalizer)
 
-        if self.use_centralized_critic:
+        if self.enable_central_q:
             for agent_id in range(self.num_agents):
                 cent_train_info = self.centralized_critics[agent_id].train(
                     self.centralized_critic_buffers[agent_id],
