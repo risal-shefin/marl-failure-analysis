@@ -340,7 +340,7 @@ AgileRL/logs
 
 # MADDPG_NEW_CODE gitignore
 .mypy_cache/
-**/models/
+maddpg-pytorch/models/
 **/results/
 !**/modules/results/
 **/slurm_files/
