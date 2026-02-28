@@ -167,3 +167,4 @@ class SMACLogger(BaseLogger):
             + "\n"
         )
         self.log_file.flush()
+        return eval_avg_rew

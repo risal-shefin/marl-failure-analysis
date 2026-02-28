@@ -1,8 +1,44 @@
 """Tools for HARL."""
 import copy
+import glob
 import math
+import os
 import torch
 import torch.nn as nn
+
+
+def find_checkpoint(model_dir, stem):
+    """Resolve a checkpoint path, supporting reward-suffixed filenames.
+
+    Looks for ``{model_dir}/{stem}.pt`` first. If not found, searches for
+    ``{model_dir}/{stem}_rew*.pt`` and returns the one with the highest reward.
+
+    Args:
+        model_dir: directory containing checkpoint files.
+        stem: base filename without extension (e.g. ``actor_agent0``).
+    Returns:
+        Absolute path to the checkpoint file.
+    Raises:
+        FileNotFoundError: if no matching checkpoint is found.
+    """
+    plain = os.path.join(str(model_dir), f"{stem}.pt")
+    if os.path.isfile(plain):
+        return plain
+    matches = glob.glob(os.path.join(str(model_dir), f"{stem}_rew*.pt"))
+    if not matches:
+        raise FileNotFoundError(
+            f"No checkpoint found for '{stem}' in '{model_dir}'. "
+            f"Expected '{plain}' or a reward-suffixed variant."
+        )
+
+    def _extract_reward(path):
+        name = os.path.basename(path)  # e.g. actor_agent0_rew12.3456.pt
+        try:
+            return float(name[len(stem) + len("_rew") : -len(".pt")])
+        except ValueError:
+            return float("-inf")
+
+    return max(matches, key=_extract_reward)
 
 
 def init_device(args):

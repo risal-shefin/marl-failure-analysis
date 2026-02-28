@@ -3,7 +3,7 @@ from copy import deepcopy
 import torch
 from harl.models.value_function_models.continuous_q_net import ContinuousQNet
 from harl.utils.envs_tools import check
-from harl.utils.models_tools import update_linear_schedule
+from harl.utils.models_tools import update_linear_schedule, find_checkpoint
 
 
 class ContinuousQCritic:
@@ -115,22 +115,22 @@ class ContinuousQCritic:
         critic_loss.backward()
         self.critic_optimizer.step()
 
-    def save(self, save_dir):
+    def save(self, save_dir, suffix=""):
         """Save the model."""
-        torch.save(self.critic.state_dict(), str(save_dir) + "/critic_agent" + ".pt")
+        torch.save(self.critic.state_dict(), str(save_dir) + f"/critic_agent{suffix}.pt")
         torch.save(
             self.target_critic.state_dict(),
-            str(save_dir) + "/target_critic_agent" + ".pt",
+            str(save_dir) + f"/target_critic_agent{suffix}.pt",
         )
 
     def restore(self, model_dir):
         """Restore the model."""
-        critic_state_dict = torch.load(str(model_dir) + "/critic_agent" + ".pt")
-        self.critic.load_state_dict(critic_state_dict)
-        target_critic_state_dict = torch.load(
-            str(model_dir) + "/target_critic_agent" + ".pt"
+        self.critic.load_state_dict(
+            torch.load(find_checkpoint(model_dir, "critic_agent"))
         )
-        self.target_critic.load_state_dict(target_critic_state_dict)
+        self.target_critic.load_state_dict(
+            torch.load(find_checkpoint(model_dir, "target_critic_agent"))
+        )
 
     def turn_on_grad(self):
         """Turn on the gradient for the critic."""

@@ -159,8 +159,9 @@ class BaseLogger:
         self.log_file.write(
             ",".join(map(str, [self.total_num_steps, eval_avg_rew])) + "\n"
         )
-        self.log_file.flush()
-
+        self.log_file.flush()        
+        return eval_avg_rew
+    
     def log_train(self, actor_train_infos, critic_train_info):
         """Log training information."""
         # log actor

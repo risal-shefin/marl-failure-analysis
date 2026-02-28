@@ -14,7 +14,7 @@ from harl.utils.envs_tools import (
     set_seed,
     get_num_agents,
 )
-from harl.utils.models_tools import init_device
+from harl.utils.models_tools import init_device, find_checkpoint
 from harl.utils.configs_tools import init_dir, save_config, get_task_name
 from harl.algorithms.actors import ALGO_REGISTRY
 from harl.algorithms.critics import CRITIC_REGISTRY
@@ -173,6 +173,7 @@ class OffPolicyBaseRunner:
             self.restore()
 
         self.total_it = 0  # total iteration
+        self.best_eval_reward = -np.inf
 
         if (
             "auto_alpha" in self.algo_args["algo"].keys()
@@ -285,7 +286,10 @@ class OffPolicyBaseRunner:
                     print(
                         f"Env {self.args['env']} Task {self.task_name} Algo {self.args['algo']} Exp {self.args['exp_name']} Evaluation at step {cur_step} / {self.algo_args['train']['num_env_steps']}:"
                     )
-                    self.eval(cur_step)
+                    eval_reward = self.eval(cur_step)
+                    if eval_reward >= self.best_eval_reward:
+                        self.best_eval_reward = eval_reward
+                        self.save(eval_reward)
                 else:
                     print(
                         f"Env {self.args['env']} Task {self.task_name} Algo {self.args['algo']} Exp {self.args['exp_name']} Step {cur_step} / {self.algo_args['train']['num_env_steps']}, average step reward in buffer: {self.buffer.get_mean_rewards()}.\n"
@@ -302,7 +306,7 @@ class OffPolicyBaseRunner:
                         )
                         self.log_file.flush()
                         self.done_episodes_rewards = []
-                self.save()
+                    self.save()
 
     def warmup(self):
         """Warmup the replay buffer with random actions"""
@@ -636,7 +640,7 @@ class OffPolicyBaseRunner:
                 self.writter.add_scalar(
                     "eval_average_episode_length", eval_avg_len, step
                 )
-                break
+                return eval_avg_rew
 
     @torch.no_grad()
     def render(self):
@@ -709,27 +713,26 @@ class OffPolicyBaseRunner:
 
     def restore(self):
         """Restore the model"""
+        model_dir = self.algo_args["train"]["model_dir"]
         for agent_id in range(self.num_agents):
-            self.actor[agent_id].restore(self.algo_args["train"]["model_dir"], agent_id)
+            self.actor[agent_id].restore(model_dir, agent_id)
         if not self.algo_args["render"]["use_render"]:
-            self.critic.restore(self.algo_args["train"]["model_dir"])
+            self.critic.restore(model_dir)
             if self.value_normalizer is not None:
-                value_normalizer_state_dict = torch.load(
-                    str(self.algo_args["train"]["model_dir"])
-                    + "/value_normalizer"
-                    + ".pt"
+                self.value_normalizer.load_state_dict(
+                    torch.load(find_checkpoint(model_dir, "value_normalizer"))
                 )
-                self.value_normalizer.load_state_dict(value_normalizer_state_dict)
 
-    def save(self):
+    def save(self, mean_reward=None):
         """Save the model"""
+        suffix = f"_rew{mean_reward:.4f}" if mean_reward is not None else ""
         for agent_id in range(self.num_agents):
-            self.actor[agent_id].save(self.save_dir, agent_id)
-        self.critic.save(self.save_dir)
+            self.actor[agent_id].save(self.save_dir, agent_id, suffix)
+        self.critic.save(self.save_dir, suffix)
         if self.value_normalizer is not None:
             torch.save(
                 self.value_normalizer.state_dict(),
-                str(self.save_dir) + "/value_normalizer" + ".pt",
+                str(self.save_dir) + f"/value_normalizer{suffix}.pt",
             )
 
     def close(self):

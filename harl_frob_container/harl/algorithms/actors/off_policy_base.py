@@ -4,7 +4,7 @@ from copy import deepcopy
 import numpy as np
 import torch
 from harl.utils.envs_tools import check
-from harl.utils.models_tools import update_linear_schedule
+from harl.utils.models_tools import update_linear_schedule, find_checkpoint
 
 
 class OffPolicyBase:
@@ -34,24 +34,24 @@ class OffPolicyBase:
                 param_target.data * (1.0 - self.polyak) + param.data * self.polyak
             )
 
-    def save(self, save_dir, id):
+    def save(self, save_dir, id, suffix=""):
         """Save the actor and target actor."""
         torch.save(
-            self.actor.state_dict(), str(save_dir) + "/actor_agent" + str(id) + ".pt"
+            self.actor.state_dict(), str(save_dir) + f"/actor_agent{id}{suffix}.pt"
         )
         torch.save(
             self.target_actor.state_dict(),
-            str(save_dir) + "/target_actor_agent" + str(id) + ".pt",
+            str(save_dir) + f"/target_actor_agent{id}{suffix}.pt",
         )
 
     def restore(self, model_dir, id):
         """Restore the actor and target actor."""
-        actor_state_dict = torch.load(str(model_dir) + "/actor_agent" + str(id) + ".pt")
-        self.actor.load_state_dict(actor_state_dict)
-        target_actor_state_dict = torch.load(
-            str(model_dir) + "/target_actor_agent" + str(id) + ".pt"
+        self.actor.load_state_dict(
+            torch.load(find_checkpoint(model_dir, f"actor_agent{id}"))
         )
-        self.target_actor.load_state_dict(target_actor_state_dict)
+        self.target_actor.load_state_dict(
+            torch.load(find_checkpoint(model_dir, f"target_actor_agent{id}"))
+        )
 
     def turn_on_grad(self):
         """Turn on grad for actor parameters."""

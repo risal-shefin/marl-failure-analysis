@@ -18,7 +18,7 @@ from harl.utils.envs_tools import (
     set_seed,
     get_num_agents,
 )
-from harl.utils.models_tools import init_device
+from harl.utils.models_tools import init_device, find_checkpoint
 from harl.utils.configs_tools import init_dir, save_config
 from harl.envs import LOGGER_REGISTRY
 
@@ -165,6 +165,7 @@ class OnPolicyBaseRunner:
             self.logger = LOGGER_REGISTRY[args["env"]](
                 args, algo_args, env_args, self.num_agents, self.writter, self.run_dir
             )
+            self.best_eval_reward = -np.inf
         if self.algo_args["train"]["model_dir"] is not None:  # restore model
             self.restore()
 
@@ -261,8 +262,12 @@ class OnPolicyBaseRunner:
             if episode % self.algo_args["train"]["eval_interval"] == 0:
                 if self.algo_args["eval"]["use_eval"]:
                     self.prep_rollout()
-                    self.eval()
-                self.save()
+                    eval_reward = self.eval()
+                    if eval_reward >= self.best_eval_reward:
+                        self.best_eval_reward = eval_reward
+                        self.save(eval_reward)
+                else:
+                    self.save()
 
             self.after_update()
 
@@ -585,10 +590,10 @@ class OnPolicyBaseRunner:
                     )  # logger callback when an episode is done
 
             if eval_episode >= self.algo_args["eval"]["eval_episodes"]:
-                self.logger.eval_log(
+                eval_avg_rew = self.logger.eval_log(
                     eval_episode
                 )  # logger callback at the end of evaluation
-                break
+                return eval_avg_rew
 
     @torch.no_grad()
     def render(self):
@@ -721,46 +726,40 @@ class OnPolicyBaseRunner:
             self.actor[agent_id].prep_training()
         self.critic.prep_training()
 
-    def save(self):
+    def save(self, mean_reward=None):
         """Save model parameters."""
+        suffix = f"_rew{mean_reward:.4f}" if mean_reward is not None else ""
         for agent_id in range(self.num_agents):
             policy_actor = self.actor[agent_id].actor
             torch.save(
                 policy_actor.state_dict(),
-                str(self.save_dir) + "/actor_agent" + str(agent_id) + ".pt",
+                str(self.save_dir) + f"/actor_agent{agent_id}{suffix}.pt",
             )
         policy_critic = self.critic.critic
         torch.save(
-            policy_critic.state_dict(), str(self.save_dir) + "/critic_agent" + ".pt"
+            policy_critic.state_dict(),
+            str(self.save_dir) + f"/critic_agent{suffix}.pt",
         )
         if self.value_normalizer is not None:
             torch.save(
                 self.value_normalizer.state_dict(),
-                str(self.save_dir) + "/value_normalizer" + ".pt",
+                str(self.save_dir) + f"/value_normalizer{suffix}.pt",
             )
 
     def restore(self):
         """Restore model parameters."""
+        model_dir = self.algo_args["train"]["model_dir"]
         for agent_id in range(self.num_agents):
-            policy_actor_state_dict = torch.load(
-                str(self.algo_args["train"]["model_dir"])
-                + "/actor_agent"
-                + str(agent_id)
-                + ".pt"
-            )
-            self.actor[agent_id].actor.load_state_dict(policy_actor_state_dict)
+            path = find_checkpoint(model_dir, f"actor_agent{agent_id}")
+            self.actor[agent_id].actor.load_state_dict(torch.load(path))
         if not self.algo_args["render"]["use_render"]:
-            policy_critic_state_dict = torch.load(
-                str(self.algo_args["train"]["model_dir"]) + "/critic_agent" + ".pt"
+            self.critic.critic.load_state_dict(
+                torch.load(find_checkpoint(model_dir, "critic_agent"))
             )
-            self.critic.critic.load_state_dict(policy_critic_state_dict)
             if self.value_normalizer is not None:
-                value_normalizer_state_dict = torch.load(
-                    str(self.algo_args["train"]["model_dir"])
-                    + "/value_normalizer"
-                    + ".pt"
+                self.value_normalizer.load_state_dict(
+                    torch.load(find_checkpoint(model_dir, "value_normalizer"))
                 )
-                self.value_normalizer.load_state_dict(value_normalizer_state_dict)
 
     def close(self):
         """Close environment, writter, and logger."""
