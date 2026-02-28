@@ -120,7 +120,7 @@ def compute_pairwise_frob_norms(maddpg, obs, actions, action_spaces):
         action_spaces: List of action spaces
         
     Returns:
-        N x N list where entry [i][j] approximates || ∂²v_i / (∂obs_i ∂obs_j) ||_F
+        N x N list where entry [i][j] approximates || ∂²v_i / (∂a_i ∂a_j) ||_F
     """
     # Convert discrete actions to one-hot encoding
     if maddpg.discrete_action:
@@ -532,4 +532,94 @@ def compute_pairwise_frob_svd_coupling_analysis(maddpg, obs, actions, action_spa
                 'delta_critic2': delta_critic2
             }
     
+    return results
+
+
+def compute_pairwise_svd_gradient_shift(maddpg, obs, actions, epsilon=0.01):
+    """
+    Compute cross-Hessian Frobenius norm and SVD-directed gradient shift for
+    every agent pair (i, j).
+
+    For each pair:
+      1. Build cross-Hessian  H = ∇_{a_j} ∇_{a_i} Q_i  (shape: dim_i × dim_j)
+      2. Compute Frobenius norm  ||H||_F
+      3. Take top right singular vector v_max of H — the direction in a_j space
+         that maximally rotates ∇_{a_i} Q_i
+      4. Perturb  a_j' = a_j + ε * v_max
+      5. Measure  ||Δg||_2 = ||∇_{a_i} Q_i(a_j') - ∇_{a_i} Q_i(a_j)||_2
+
+    Continuous action spaces only.
+
+    Args:
+        maddpg:   MADDPG agent
+        obs:      list of per-agent observations
+        actions:  list of per-agent actions (numpy arrays)
+        epsilon:  perturbation magnitude along v_max (default: 0.01)
+
+    Returns:
+        dict mapping (agent_i, agent_j) -> {'frob_norm': float, 'delta_g_norm': float}
+    """
+    N = maddpg.nagents
+
+    torch_obs = [
+        Variable(torch.Tensor([obs[i]]).to(torch_device), requires_grad=True)
+        for i in range(N)
+    ]
+    torch_actions = [
+        Variable(torch.Tensor([actions[i]]).to(torch_device), requires_grad=True)
+        for i in range(N)
+    ]
+
+    results = {}
+
+    for i in range(N):
+        vf_in = torch.cat((*torch_obs, *torch_actions), dim=1)
+        critic_val_i = maddpg.agents[i].critic(vf_in).mean()
+
+        # Base gradient  g = ∇_{a_i} Q_i
+        grad_i = torch.autograd.grad(
+            critic_val_i, torch_actions[i],
+            create_graph=True, retain_graph=True
+        )[0]  # shape: [1, dim_i]
+
+        for j in range(N):
+            # Cross-Hessian  H[k, :] = ∂(grad_i[k]) / ∂a_j
+            rows = []
+            for k in range(grad_i.shape[1]):
+                row = torch.autograd.grad(
+                    grad_i[0, k], torch_actions[j],
+                    retain_graph=True, allow_unused=True, create_graph=False
+                )[0]
+                rows.append(row.flatten())
+
+            H = torch.stack(rows)  # [dim_i, dim_j]
+            frob_norm = H.norm(p='fro').item()
+
+            # Top right singular vector: direction in a_j space that most shifts g_i
+            _, _, Vt = torch.linalg.svd(H.detach(), full_matrices=False)
+            v_max = Vt[0].unsqueeze(0)  # [1, dim_j]
+
+            # Perturbed action j
+            perturbed_aj = (torch_actions[j].detach() + epsilon * v_max).requires_grad_(True)
+
+            torch_actions_p = [
+                torch_actions[idx].clone().detach().requires_grad_(True) if idx != j
+                else perturbed_aj
+                for idx in range(N)
+            ]
+
+            vf_in_p = torch.cat((*torch_obs, *torch_actions_p), dim=1)
+            grad_i_p = torch.autograd.grad(
+                maddpg.agents[i].critic(vf_in_p).mean(),
+                torch_actions_p[i],
+                retain_graph=False
+            )[0]
+
+            delta_g_norm = (grad_i_p - grad_i.detach()).norm(p=2).item()
+
+            results[(i, j)] = {
+                'frob_norm': frob_norm,
+                'delta_g_norm': delta_g_norm,
+            }
+
     return results

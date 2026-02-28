@@ -2,24 +2,22 @@
 Frobenius Norm Experiments for PettingZoo Environments.
 
 Houses multiple experiment initiators, each as a separate function called from main.
-
-Current experiment:
-    frob_norm_episode_experiment — runs a single seeded episode, saves a GIF,
-    and logs the cross-Hessian Frobenius norm for every agent pair at every
-    timestep to a text file in the same output folder.
 """
 import argparse
 import os
 import random
 import numpy as np
+import pandas as pd
 import torch
 from datetime import datetime
+from tqdm import tqdm
 from torch.autograd import Variable
 
 from algorithms.maddpg import MADDPG
 from modules.constants import DEVICE, torch_device
 from modules.environment import create_environment
 from modules.metrics import compute_pairwise_frob_norms
+from modules.metrics.basic_metrics import compute_pairwise_svd_gradient_shift
 from modules.visualization.utils import save_frames_as_gif
 
 
@@ -40,6 +38,16 @@ def _make_logdir(base_name, env_id, env_type, nagents, seed):
     logdir = os.path.join(
         os.getcwd(), 'runs', 'frob_norm_experiments', base_name,
         f"{env_id}_{env_type}_nagents{nagents}_seed{seed}_{timestamp}"
+    )
+    os.makedirs(logdir, exist_ok=True)
+    return logdir
+
+
+def _make_multiseed_logdir(base_name, env_id, env_type, nagents, n_seeds):
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    logdir = os.path.join(
+        os.getcwd(), 'runs', 'frob_norm_experiments', base_name,
+        f"{env_id}_{env_type}_nagents{nagents}_seeds{n_seeds}_{timestamp}"
     )
     os.makedirs(logdir, exist_ok=True)
     return logdir
@@ -89,7 +97,7 @@ def _run_episode_with_frob_norms(maddpg, env, seed, collect_frames=True):
         else:
             actions = {name: agent_actions[i].squeeze()
                        for i, name in enumerate(env.possible_agents)}
-            # actions['agent_1'] = np.zeros_like(actions['agent_1'])  # stall experiments to find out agents
+            # actions['agent_1'] = np.zeros_like(actions['agent_1'])  # freeze an agent to identify it in the video
 
         # Compute cross-Hessian Frobenius norms for all (i, j) pairs
         frob_matrix = compute_pairwise_frob_norms(
@@ -248,6 +256,215 @@ def _save_frob_norm_heatmap(frob_norms_history, nagents, logdir, seed, max_cols=
     return heatmap_path
 
 
+def _run_svd_coupling_episode(maddpg, env, seed, epsilon):
+    """
+    Run one episode and collect SVD-based gradient coupling data at each timestep.
+
+    For every agent pair (i, j) at every timestep, records the cross-Hessian
+    Frobenius norm and the resulting gradient shift after perturbing agent j's
+    action along the top right singular vector of H.
+
+    Returns:
+        list of dicts with keys:
+          seed, timestep, agent_i, agent_j, frob_norm, delta_g_norm
+    """
+    _set_seeds(seed)
+    with torch.no_grad():
+        maddpg.prep_rollouts(device=DEVICE)
+
+    obs = env.reset(seed=seed)
+    records = []
+    timestep = 0
+
+    while True:
+        torch_obs = [
+            Variable(torch.tensor([obs[i]], dtype=torch.float32).to(torch_device),
+                     requires_grad=False)
+            for i in range(maddpg.nagents)
+        ]
+        with torch.no_grad():
+            torch_agent_actions = maddpg.step(torch_obs, explore=False)
+            agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
+
+        actions = {name: agent_actions[i].squeeze()
+                   for i, name in enumerate(env.possible_agents)}
+
+        coupling = compute_pairwise_svd_gradient_shift(
+            maddpg, obs, list(actions.values()), epsilon
+        )
+
+        for (agent_i, agent_j), m in coupling.items():
+            records.append({
+                'seed': seed,
+                'timestep': timestep,
+                'agent_i': agent_i,
+                'agent_j': agent_j,
+                'frob_norm': m['frob_norm'],
+                'delta_g_norm': m['delta_g_norm'],
+            })
+
+        next_obs, _, dones, _ = env.step(actions)
+        obs = next_obs
+        timestep += 1
+
+        if dones.all():
+            break
+
+    return records
+
+
+def _save_svd_coupling_csv(df, logdir):
+    """
+    Save raw per-timestep coupling data and a per-pair summary CSV.
+
+    Summary columns: agent_j, agent_i, mean_frob_norm, std_frob_norm,
+                     mean_delta_g_norm, std_delta_g_norm, n_samples
+    """
+    csv_dir = os.path.join(logdir, 'csv_data')
+    os.makedirs(csv_dir, exist_ok=True)
+
+    raw_path = os.path.join(csv_dir, 'raw_coupling_data.csv')
+    df.to_csv(raw_path, index=False)
+    print(f"  Raw data saved      : {raw_path}")
+
+    summary = (
+        df.groupby(['agent_j', 'agent_i'])
+          .agg(
+              mean_frob_norm=('frob_norm', 'mean'),
+              std_frob_norm=('frob_norm', 'std'),
+              mean_delta_g_norm=('delta_g_norm', 'mean'),
+              std_delta_g_norm=('delta_g_norm', 'std'),
+              n_samples=('frob_norm', 'count')
+          )
+          .reset_index()
+    )
+    summary_path = os.path.join(csv_dir, 'mean_coupling_by_pair.csv')
+    summary.to_csv(summary_path, index=False)
+    print(f"  Summary CSV saved   : {summary_path}")
+    print(f"\n  Per-pair summary:")
+    print(summary.to_string(index=False))
+    return summary_path
+
+
+def _save_svd_coupling_plots(df, logdir):
+    """
+    Scatter plots of ||H||_F vs ||Δg||_2 per agent pair (combined + individual).
+
+    Each subplot shows a linear regression line and Pearson correlation.
+    Pair label convention: frob[i][j] means agent_j influences agent_i,
+    so the title reads "agent_j → agent_i".
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from scipy import stats
+
+    plots_dir = os.path.join(logdir, 'plots')
+    os.makedirs(plots_dir, exist_ok=True)
+
+    pairs = df[['agent_i', 'agent_j']].drop_duplicates().values
+    n_pairs = len(pairs)
+    n_cols = min(3, int(np.ceil(np.sqrt(n_pairs))))
+    n_rows = int(np.ceil(n_pairs / n_cols))
+
+    # --- Combined figure ---
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows))
+    if n_pairs == 1:
+        axes = np.array([axes])
+    axes = axes.flatten()
+
+    for idx, (agent_i, agent_j) in enumerate(pairs):
+        ax = axes[idx]
+        pair_data = df[
+            (df['agent_i'] == agent_i) & (df['agent_j'] == agent_j)
+        ].dropna(subset=['frob_norm', 'delta_g_norm'])
+
+        if len(pair_data) == 0:
+            ax.text(0.5, 0.5, f'No data for ({agent_i}, {agent_j})',
+                    ha='center', va='center', transform=ax.transAxes)
+            continue
+
+        x = pair_data['frob_norm'].values
+        y = pair_data['delta_g_norm'].values
+
+        ax.scatter(x, y, alpha=0.3, s=10, c='steelblue')
+
+        if len(x) > 1:
+            try:
+                z = np.polyfit(x, y, 1)
+                p = np.poly1d(z)
+                x_fit = np.linspace(x.min(), x.max(), 100)
+                ax.plot(x_fit, p(x_fit), 'r--', linewidth=2,
+                        label=f'y={z[0]:.3f}x+{z[1]:.3f}')
+                r, pval = stats.pearsonr(x, y)
+                ax.text(0.05, 0.95, f'r = {r:.3f}\np = {pval:.3e}',
+                        transform=ax.transAxes, verticalalignment='top',
+                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+                ax.legend(fontsize=9)
+            except Exception:
+                pass
+
+        ax.set_xlabel('||H||_F (Frobenius Norm)')
+        ax.set_ylabel('||\u0394g||\u2082 (Gradient Shift)')
+        ax.set_title(f'agent_{agent_j} \u2192 agent_{agent_i}')
+        ax.grid(True, alpha=0.3)
+
+    for idx in range(n_pairs, len(axes)):
+        axes[idx].axis('off')
+
+    plt.tight_layout()
+    combined_path = os.path.join(plots_dir, 'svd_coupling_frob_vs_deltag_all_pairs.png')
+    plt.savefig(combined_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Combined scatter plot: {combined_path}")
+
+    # --- Individual plots per pair ---
+    for agent_i, agent_j in pairs:
+        fig, ax = plt.subplots(figsize=(8, 6))
+        pair_data = df[
+            (df['agent_i'] == agent_i) & (df['agent_j'] == agent_j)
+        ].dropna(subset=['frob_norm', 'delta_g_norm'])
+
+        if len(pair_data) == 0:
+            plt.close()
+            continue
+
+        x = pair_data['frob_norm'].values
+        y = pair_data['delta_g_norm'].values
+
+        ax.scatter(x, y, alpha=0.3, s=20, c='steelblue')
+
+        if len(x) > 1:
+            try:
+                z = np.polyfit(x, y, 1)
+                p = np.poly1d(z)
+                x_fit = np.linspace(x.min(), x.max(), 100)
+                ax.plot(x_fit, p(x_fit), 'r--', linewidth=2,
+                        label=f'y={z[0]:.3f}x+{z[1]:.3f}')
+                r, pval = stats.pearsonr(x, y)
+                ax.text(0.05, 0.95,
+                        f'Pearson r = {r:.3f}\np-value = {pval:.3e}',
+                        transform=ax.transAxes, verticalalignment='top',
+                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+                        fontsize=12)
+                ax.legend(fontsize=11)
+            except Exception:
+                pass
+
+        ax.set_xlabel('||H||_F (Frobenius Norm)', fontsize=12)
+        ax.set_ylabel('||\u0394g||\u2082 (Gradient Shift)', fontsize=12)
+        ax.set_title(f'SVD Coupling: agent_{agent_j} \u2192 agent_{agent_i}', fontsize=14)
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        ind_path = os.path.join(plots_dir,
+                                f'svd_coupling_pair_{agent_j}_to_{agent_i}.png')
+        plt.savefig(ind_path, dpi=150, bbox_inches='tight')
+        plt.close()
+
+    print(f"  Individual pair plots: {plots_dir}")
+    return plots_dir
+
+
 # ---------------------------------------------------------------------------
 # Experiment 1: single seeded episode — GIF + frob norm log
 # ---------------------------------------------------------------------------
@@ -298,6 +515,75 @@ def frob_norm_episode_experiment(config):
 
 
 # ---------------------------------------------------------------------------
+# Experiment 2: multi-seed SVD coupling — frob norm vs gradient shift
+# ---------------------------------------------------------------------------
+
+def svd_coupling_experiment(config):
+    """
+    Run a multi-seed SVD-based gradient coupling experiment and report the
+    pointwise relationship between cross-Hessian Frobenius norm and the
+    induced gradient shift in agent i caused by an orthogonally-projected
+    perturbation of agent j.
+
+    For every (i, j) pair at every timestep of every seed episode:
+      - Computes H = ∇_{a_j} ∇_{a_i} Q_i  and its Frobenius norm ||H||_F
+      - Perturbs a_j along d_orthogonal = H^T g projected out of ∇_{a_j} Q_i
+        so that the perturbation has zero first-order effect on Q_i
+      - Measures gradient shift ||Δg||_2 = ||∇_{a_i} Q_i(a_j') - g||_2
+
+    Saves:
+      csv_data/raw_coupling_data.csv      — every (seed, timestep, pair) row
+      csv_data/mean_coupling_by_pair.csv  — mean frob norm and mean gradient
+                                            shift per (agent_j, agent_i) pair
+      plots/svd_coupling_frob_vs_deltag_all_pairs.png  — combined scatter
+      plots/svd_coupling_pair_<j>_to_<i>.png           — per-pair scatter
+
+    Args:
+        config: Namespace with fields:
+                  env_id, model_path, epsilon, total_experiments
+    """
+    maddpg = MADDPG.init_from_save(config.model_path)
+
+    if maddpg.discrete_action:
+        print("ERROR: svd_coupling_experiment requires continuous action spaces.")
+        print("SVD perturbation on one-hot vectors is not supported.")
+        return
+
+    env_type = 'continuous'
+    device_str = 'gpu' if DEVICE == 'gpu' else 'cpu'
+    maddpg.prep_training(device=device_str)
+
+    env = create_environment(config, maddpg)
+    logdir = _make_multiseed_logdir(
+        'grad_shift_svd_coupling', config.env_id, env_type,
+        maddpg.nagents, config.total_experiments
+    )
+
+    print(f"[grad_shift_svd_coupling_experiment]")
+    print(f"  env          : {config.env_id}  ({env_type})")
+    print(f"  agents       : {maddpg.nagents}")
+    print(f"  seeds        : {config.total_experiments}")
+    print(f"  epsilon      : {config.epsilon}")
+    print(f"  output       : {logdir}")
+
+    all_records = []
+    for seed in tqdm(range(config.total_experiments), desc="Seeds"):
+        records = _run_svd_coupling_episode(maddpg, env, seed, config.epsilon)
+        all_records.extend(records)
+
+    env.close()
+
+    n_points = len(all_records)
+    print(f"\n  Collected {n_points} data points across {config.total_experiments} seeds")
+
+    df = pd.DataFrame(all_records)
+    _save_svd_coupling_csv(df, logdir)
+    _save_svd_coupling_plots(df, logdir)
+
+    print("Done.")
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -314,6 +600,16 @@ def _build_parser():
     ep.add_argument('model_path', help="Path to saved MADDPG model")
     ep.add_argument('--seed', type=int, default=0, help="Random seed (default: 0)")
 
+    # --- svd_coupling ---
+    sc = sub.add_parser('grad_shift_svd_coupling',
+                        help='Multi-seed SVD coupling: frob norm vs gradient shift')
+    sc.add_argument('env_id', help="PettingZoo environment name (e.g. simple_spread)")
+    sc.add_argument('model_path', help="Path to saved MADDPG model")
+    sc.add_argument('--epsilon', type=float, default=0.01,
+                    help="Perturbation magnitude for SVD direction (default: 0.01)")
+    sc.add_argument('--total_experiments', type=int, default=100,
+                    help="Number of seed episodes to run (default: 100)")
+
     return parser
 
 
@@ -322,6 +618,8 @@ def main():
 
     if config.experiment == 'episode_gif_frob_norm':
         frob_norm_episode_experiment(config)
+    elif config.experiment == 'grad_shift_svd_coupling':
+        svd_coupling_experiment(config)
 
 
 if __name__ == '__main__':
