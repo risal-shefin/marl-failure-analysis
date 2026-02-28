@@ -127,4 +127,13 @@ class OnPolicyHARunner(OnPolicyBaseRunner):
         # update critic
         critic_train_info = self.critic.train(self.critic_buffer, self.value_normalizer)
 
+        if self.use_centralized_critic:
+            for agent_id in range(self.num_agents):
+                cent_train_info = self.centralized_critics[agent_id].train(
+                    self.centralized_critic_buffers[agent_id],
+                    self.centralized_value_normalizers[agent_id],
+                )
+                for k, v in cent_train_info.items():
+                    critic_train_info[f"centralized_agent{agent_id}/{k}"] = v
+
         return actor_train_infos, critic_train_info
