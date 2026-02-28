@@ -89,7 +89,7 @@ def _run_episode_with_frob_norms(maddpg, env, seed, collect_frames=True):
         else:
             actions = {name: agent_actions[i].squeeze()
                        for i, name in enumerate(env.possible_agents)}
-            # actions['agent_1'] = np.zeros_like(actions['agent_1'])  # experiments to find out agents
+            # actions['agent_1'] = np.zeros_like(actions['agent_1'])  # stall experiments to find out agents
 
         # Compute cross-Hessian Frobenius norms for all (i, j) pairs
         frob_matrix = compute_pairwise_frob_norms(
@@ -151,7 +151,7 @@ def _save_frob_norm_log(frob_norms_history, nagents, logdir, seed):
                 for j in range(nagents):
                     if i == j:
                         continue
-                    f.write(f"  agent_{i} -> agent_{j}: {frob_matrix[i][j]:.6f}\n")
+                    f.write(f"  agent_{j} -> agent_{i}: {frob_matrix[i][j]:.6f}\n")
             f.write("\n")
 
         # Per-pair max/min summary
@@ -161,7 +161,7 @@ def _save_frob_norm_log(frob_norms_history, nagents, logdir, seed):
                 if i == j:
                     continue
                 s = pair_stats[(i, j)]
-                f.write(f"  agent_{i} -> agent_{j}:\n")
+                f.write(f"  agent_{j} -> agent_{i}:\n")
                 f.write(f"    max: {s['max']:.6f}  at t={s['max_t']}\n")
                 f.write(f"    min: {s['min']:.6f}  at t={s['min_t']}\n")
         f.write("\n")
@@ -169,12 +169,83 @@ def _save_frob_norm_log(frob_norms_history, nagents, logdir, seed):
         # Overall max/min
         f.write("--- Overall Max / Min ---\n\n")
         om = overall_max
-        f.write(f"  max: {om['val']:.6f}  at t={om['t']}  pair: agent_{om['pair'][0]} -> agent_{om['pair'][1]}\n")
+        f.write(f"  max: {om['val']:.6f}  at t={om['t']}  pair: agent_{om['pair'][1]} -> agent_{om['pair'][0]}\n")
         on = overall_min
-        f.write(f"  min: {on['val']:.6f}  at t={on['t']}  pair: agent_{on['pair'][0]} -> agent_{on['pair'][1]}\n")
+        f.write(f"  min: {on['val']:.6f}  at t={on['t']}  pair: agent_{on['pair'][1]} -> agent_{on['pair'][0]}\n")
 
     print(f"  Frob norm log saved: {log_path}")
     return log_path
+
+
+def _save_frob_norm_heatmap(frob_norms_history, nagents, logdir, seed, max_cols=60):
+    """
+    Plot and save a heatmap of per-timestep Frobenius norms.
+
+    Rows  : agent pairs  (agent_i → agent_j, i ≠ j)
+    Cols  : timesteps, subsampled to at most *max_cols* evenly-spaced points
+            so each column represents a well-distributed slice of the episode.
+    Color : Frobenius norm value
+    """
+    import matplotlib
+    matplotlib.use('Agg')  # headless rendering on HPC
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    T = len(frob_norms_history)
+    pairs = [(i, j) for i in range(nagents) for j in range(nagents) if i != j]
+    n_pairs = len(pairs)
+
+    # Build full data matrix (n_pairs × T)
+    full_matrix = np.array(
+        [[frob_norms_history[t][i][j] for t in range(T)] for i, j in pairs]
+    )  # shape: (n_pairs, T)
+
+    # Subsample columns to at most max_cols, evenly distributed across [0, T-1]
+    if T > max_cols:
+        col_indices = np.round(np.linspace(0, T - 1, max_cols)).astype(int)
+    else:
+        col_indices = np.arange(T)
+
+    matrix = full_matrix[:, col_indices]          # (n_pairs, n_cols)
+    col_labels = col_indices.tolist()              # actual timestep numbers
+    row_labels = [f"agent_{j} → agent_{i}" for i, j in pairs]
+
+    n_cols = len(col_indices)
+
+    # Figure size scales with number of columns / pairs
+    fig_w = max(10, n_cols * 0.22)
+    fig_h = max(3, n_pairs * 0.75)
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    sns.heatmap(
+        matrix,
+        ax=ax,
+        cmap='viridis',
+        xticklabels=col_labels,
+        yticklabels=row_labels,
+        cbar_kws={'label': 'Frobenius Norm'},
+        linewidths=0.3,
+        linecolor='#444444',
+    )
+
+    # Show at most 15 x-tick labels to avoid crowding
+    show_every = max(1, n_cols // 15)
+    for idx, tick in enumerate(ax.get_xticklabels()):
+        tick.set_visible(idx % show_every == 0)
+        tick.set_rotation(45)
+        tick.set_ha('right')
+
+    ax.set_xlabel('Timestep', labelpad=8)
+    ax.set_ylabel('Agent Pair', labelpad=8)
+    ax.set_title(f'Cross-Hessian Frobenius Norms', pad=12)
+
+    plt.tight_layout()
+    heatmap_path = os.path.join(logdir, f"frob_norm_heatmap_seed{seed}.png")
+    fig.savefig(heatmap_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Heatmap saved  : {heatmap_path}")
+    return heatmap_path
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +289,9 @@ def frob_norm_episode_experiment(config):
 
     # Save frob norm log
     _save_frob_norm_log(frob_norms_history, maddpg.nagents, logdir, config.seed)
+
+    # Save frob norm heatmap (rows=agent pairs, cols=well-distributed timesteps)
+    _save_frob_norm_heatmap(frob_norms_history, maddpg.nagents, logdir, config.seed)
 
     env.close()
     print("Done.")
