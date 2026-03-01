@@ -47,7 +47,7 @@ model:
   # hidden sizes for mlp module in the network
   hidden_sizes: [128, 128]
   # activation function, choose from sigmoid, tanh, relu, leaky_relu, selu
-  activation_func: relu
+  activation_func: tanh
   # whether to use feature normalization
   use_feature_normalization: True
   # initialization method for network parameters, choose from xavier_uniform_, orthogonal_, ...

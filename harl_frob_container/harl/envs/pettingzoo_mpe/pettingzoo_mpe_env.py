@@ -90,7 +90,7 @@ class PettingZooMPEEnv:
         return [1] * self.action_space[agent_id].n
 
     def render(self):
-        self.env.render()
+        return self.env.render()
 
     def close(self):
         self.env.close()

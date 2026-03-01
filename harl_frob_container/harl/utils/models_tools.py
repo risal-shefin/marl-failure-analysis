@@ -38,6 +38,7 @@ def find_checkpoint(model_dir, stem):
         except ValueError:
             return float("-inf")
 
+    print("Loading from:", max(matches, key=_extract_reward))
     return max(matches, key=_extract_reward)
 
 
