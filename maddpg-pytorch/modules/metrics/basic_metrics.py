@@ -620,6 +620,8 @@ def compute_pairwise_svd_gradient_shift(maddpg, obs, actions, epsilon=0.01):
             results[(i, j)] = {
                 'frob_norm': frob_norm,
                 'delta_g_norm': delta_g_norm,
+                # numpy array shape [1, dim_j] — usable to replay perturbed episodes
+                'perturbed_action_j': perturbed_aj.detach().cpu().numpy(),
             }
 
     return results

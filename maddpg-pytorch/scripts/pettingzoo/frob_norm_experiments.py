@@ -265,8 +265,12 @@ def _run_svd_coupling_episode(maddpg, env, seed, epsilon):
     action along the top right singular vector of H.
 
     Returns:
-        list of dicts with keys:
-          seed, timestep, agent_i, agent_j, frob_norm, delta_g_norm
+        records                    : list of dicts with keys:
+                                       seed, timestep, agent_i, agent_j,
+                                       frob_norm, delta_g_norm
+        perturbed_actions_by_ts    : dict {timestep -> {(agent_i, agent_j) -> np.ndarray}}
+                                       perturbed action for agent_j (shape [1, dim_j])
+        normal_reward              : float  total team reward summed over the episode
     """
     _set_seeds(seed)
     with torch.no_grad():
@@ -274,6 +278,8 @@ def _run_svd_coupling_episode(maddpg, env, seed, epsilon):
 
     obs = env.reset(seed=seed)
     records = []
+    perturbed_actions_by_ts = {}   # {t: {(i, j): perturbed_action_j_numpy}}
+    normal_rewards = np.zeros(maddpg.nagents)  # per-agent cumulative reward
     timestep = 0
 
     while True:
@@ -293,6 +299,7 @@ def _run_svd_coupling_episode(maddpg, env, seed, epsilon):
             maddpg, obs, list(actions.values()), epsilon
         )
 
+        perturbed_at_t = {}
         for (agent_i, agent_j), m in coupling.items():
             records.append({
                 'seed': seed,
@@ -302,15 +309,19 @@ def _run_svd_coupling_episode(maddpg, env, seed, epsilon):
                 'frob_norm': m['frob_norm'],
                 'delta_g_norm': m['delta_g_norm'],
             })
+            # Store the SVD-perturbed action for agent_j (shape [1, dim_j])
+            perturbed_at_t[(agent_i, agent_j)] = m['perturbed_action_j']
+        perturbed_actions_by_ts[timestep] = perturbed_at_t
 
-        next_obs, _, dones, _ = env.step(actions)
+        next_obs, rewards, dones, _ = env.step(actions)
+        normal_rewards += rewards[0]   # shape [nagents], accumulate per agent
         obs = next_obs
         timestep += 1
 
         if dones.all():
             break
 
-    return records
+    return records, perturbed_actions_by_ts, normal_rewards
 
 
 def _save_svd_coupling_csv(df, logdir):
@@ -327,15 +338,22 @@ def _save_svd_coupling_csv(df, logdir):
     df.to_csv(raw_path, index=False)
     print(f"  Raw data saved      : {raw_path}")
 
+    agg_spec = {
+        'mean_frob_norm':    ('frob_norm',    'mean'),
+        'std_frob_norm':     ('frob_norm',    'std'),
+        'mean_delta_g_norm': ('delta_g_norm', 'mean'),
+        'std_delta_g_norm':  ('delta_g_norm', 'std'),
+        'n_samples':         ('frob_norm',    'count'),
+    }
+    if 'reward_drop_i' in df.columns:
+        agg_spec['mean_reward_drop_i']       = ('reward_drop_i',      'mean')
+        agg_spec['std_reward_drop_i']        = ('reward_drop_i',      'std')
+        agg_spec['mean_normal_reward_i']     = ('normal_reward_i',    'mean')
+        agg_spec['mean_perturbed_reward_i']  = ('perturbed_reward_i', 'mean')
+
     summary = (
         df.groupby(['agent_j', 'agent_i'])
-          .agg(
-              mean_frob_norm=('frob_norm', 'mean'),
-              std_frob_norm=('frob_norm', 'std'),
-              mean_delta_g_norm=('delta_g_norm', 'mean'),
-              std_delta_g_norm=('delta_g_norm', 'std'),
-              n_samples=('frob_norm', 'count')
-          )
+          .agg(**agg_spec)
           .reset_index()
     )
     summary_path = os.path.join(csv_dir, 'mean_coupling_by_pair.csv')
@@ -514,6 +532,67 @@ def frob_norm_episode_experiment(config):
     print("Done.")
 
 
+def _run_perturbed_episode(maddpg, env, seed, target_timestep, agent_i_idx, agent_j_idx, perturbed_action_j):
+    """
+    Replay an episode with the same seed and deterministic policy, but at
+    *target_timestep* agent j uses *perturbed_action_j* instead of the
+    policy's nominal action.  All other timesteps are unmodified.
+
+    Because env cloning is not supported, the full episode must be re-rolled
+    from the start with the same seed.  This is the only way to isolate the
+    effect of the perturbation at a single timestep on cumulative reward.
+
+    Only agent i's episodic reward is returned, since the experiment measures
+    how perturbing agent j's action at one timestep affects agent i's outcome.
+
+    Args:
+        maddpg             : MADDPG agent
+        env                : wrapped PettingZoo environment
+        seed               : episode seed (must reproduce the same trajectory)
+        target_timestep    : the single step at which agent j is perturbed
+        agent_i_idx        : integer index of the observed agent (whose reward is tracked)
+        agent_j_idx        : integer index of the perturbed agent
+        perturbed_action_j : numpy array shape [1, dim_j]  (from SVD coupling)
+
+    Returns:
+        total_reward_i : float  agent i's cumulative reward over the full episode
+    """
+    _set_seeds(seed)
+    with torch.no_grad():
+        maddpg.prep_rollouts(device=DEVICE)
+
+    obs = env.reset(seed=seed)
+    total_reward = 0.0
+    timestep = 0
+
+    while True:
+        torch_obs = [
+            Variable(torch.tensor([obs[i]], dtype=torch.float32).to(torch_device),
+                     requires_grad=False)
+            for i in range(maddpg.nagents)
+        ]
+        with torch.no_grad():
+            torch_agent_actions = maddpg.step(torch_obs, explore=False)
+            agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
+
+        # Swap in the pre-computed perturbed action at the target step only
+        if timestep == target_timestep:
+            agent_actions[agent_j_idx] = perturbed_action_j  # shape [1, dim_j]
+
+        actions = {name: agent_actions[i].squeeze()
+                   for i, name in enumerate(env.possible_agents)}
+
+        next_obs, rewards, dones, _ = env.step(actions)
+        total_reward += float(rewards[0][agent_i_idx])   # only agent i's reward
+        obs = next_obs
+        timestep += 1
+
+        if dones.all():
+            break
+
+    return total_reward
+
+
 # ---------------------------------------------------------------------------
 # Experiment 2: multi-seed SVD coupling — frob norm vs gradient shift
 # ---------------------------------------------------------------------------
@@ -566,9 +645,29 @@ def svd_coupling_experiment(config):
     print(f"  epsilon      : {config.epsilon}")
     print(f"  output       : {logdir}")
 
+    # Total perturbed episodes per seed ≈ episode_length × N×(N-1)
+    # Each one re-rolls the full episode with a single action swapped at one step.
     all_records = []
     for seed in tqdm(range(config.total_experiments), desc="Seeds"):
-        records = _run_svd_coupling_episode(maddpg, env, seed, config.epsilon)
+        records, perturbed_actions_by_ts, normal_rewards = _run_svd_coupling_episode(
+            maddpg, env, seed, config.epsilon
+        )
+
+        # For every (timestep, pair) replay a perturbed episode to measure agent i's reward drop
+        for record in records:
+            t   = record['timestep']
+            ai  = record['agent_i']
+            aj  = record['agent_j']
+
+            perturbed_action_j = perturbed_actions_by_ts[t][(ai, aj)]
+            perturbed_reward_i = _run_perturbed_episode(
+                maddpg, env, seed, t, ai, aj, perturbed_action_j
+            )
+
+            record['normal_reward_i']    = float(normal_rewards[ai])
+            record['perturbed_reward_i'] = perturbed_reward_i
+            record['reward_drop_i']      = float(normal_rewards[ai]) - perturbed_reward_i
+
         all_records.extend(records)
 
     env.close()

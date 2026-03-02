@@ -391,7 +391,12 @@ def _compute_pairwise_svd_gradient_shift(actors, get_Q, obs_list, s_obs, device,
 
             delta_g_norm = (grad_i_p - grad_i.detach()).norm(p=2).item()
 
-            results[(i, j)] = {'frob_norm': frob_norm, 'delta_g_norm': delta_g_norm}
+            results[(i, j)] = {
+                'frob_norm': frob_norm,
+                'delta_g_norm': delta_g_norm,
+                # numpy (1, action_dim_j) — reusable for perturbed episode replay
+                'perturbed_action_j': perturbed_aj.detach().cpu().numpy(),
+            }
 
     return results
 
@@ -451,19 +456,30 @@ def _run_svd_coupling_episode(actors, get_Q, env, seed, device, epsilon):
     Run one episode collecting SVD-based coupling data at every timestep.
 
     Returns:
-        list of dicts: seed, timestep, agent_i, agent_j, frob_norm, delta_g_norm
+        records                 : list of dicts:
+                                    seed, timestep, agent_i, agent_j,
+                                    frob_norm, delta_g_norm
+        perturbed_actions_by_ts : dict {timestep -> {(agent_i, agent_j) -> np.ndarray}}
+                                    SVD-perturbed action for agent_j  shape (1, action_dim_j)
+        normal_rewards          : np.ndarray (n_agents,)  per-agent cumulative reward
+                                    (all entries equal the shared team reward in HARL)
     """
     _set_seeds(seed)
     env.seed(seed)
     obs, s_obs, _ = env.reset()
 
+    n_agents = len(actors)
     records  = []
+    perturbed_actions_by_ts = {}   # {t: {(i, j): perturbed_action_j_numpy}}
+    normal_rewards = np.zeros(n_agents)
     timestep = 0
 
     while True:
         coupling = _compute_pairwise_svd_gradient_shift(
             actors, get_Q, obs, s_obs[0], device, epsilon
         )
+
+        perturbed_at_t = {}
         for (agent_i, agent_j), m in coupling.items():
             records.append({
                 'seed':         seed,
@@ -473,15 +489,19 @@ def _run_svd_coupling_episode(actors, get_Q, env, seed, device, epsilon):
                 'frob_norm':    m['frob_norm'],
                 'delta_g_norm': m['delta_g_norm'],
             })
+            perturbed_at_t[(agent_i, agent_j)] = m['perturbed_action_j']
+        perturbed_actions_by_ts[timestep] = perturbed_at_t
 
         actions = _get_actions(actors, obs, device)
-        obs, s_obs, _, dones, _, _ = env.step(actions)
+        obs, s_obs, rewards, dones, _, _ = env.step(actions)
+        # rewards[i] == [total_reward] for all i (shared cooperative reward)
+        normal_rewards += np.array([r[0] for r in rewards])
         timestep += 1
 
         if all(dones):
             break
 
-    return records
+    return records, perturbed_actions_by_ts, normal_rewards
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +625,58 @@ def _save_frob_norm_heatmap(frob_norms_history, nagents, logdir, seed, max_cols=
     return heatmap_path
 
 
+def _run_perturbed_episode(actors, env, seed, device, target_timestep, agent_i_idx, agent_j_idx, perturbed_action_j):
+    """
+    Replay an episode with the same seed and deterministic policy, but at
+    *target_timestep* agent j uses *perturbed_action_j* instead of the
+    policy's nominal action.  All other timesteps are unmodified.
+
+    Because env cloning is not supported, the full episode is re-rolled from
+    the start with the same seed.  This isolates the effect of the single-step
+    perturbation on cumulative reward.
+
+    Only agent i's episodic reward is returned, since the experiment measures
+    how perturbing agent j's action at one timestep affects agent i's outcome.
+    In HARL all agents share the same cooperative reward, so this equals the
+    total team reward regardless of which agent_i_idx is chosen.
+
+    Args:
+        actors             : list of HARL actor objects
+        env                : PettingZooMPEEnv
+        seed               : episode seed
+        device             : torch.device
+        target_timestep    : step index at which agent j is perturbed
+        agent_i_idx        : index of the observed agent (whose reward is tracked)
+        agent_j_idx        : index of the perturbed agent
+        perturbed_action_j : numpy array shape (1, action_dim_j)  from SVD coupling
+
+    Returns:
+        total_reward_i : float  agent i's cumulative reward over the full episode
+    """
+    _set_seeds(seed)
+    env.seed(seed)
+    obs, s_obs, _ = env.reset()
+
+    total_reward = 0.0
+    timestep = 0
+
+    while True:
+        actions = _get_actions(actors, obs, device)   # (n_agents, action_dim)
+
+        # Swap in the pre-computed perturbed action at the target step only
+        if timestep == target_timestep:
+            actions[agent_j_idx] = perturbed_action_j.squeeze(0)  # (action_dim_j,)
+
+        obs, s_obs, rewards, dones, _, _ = env.step(actions)
+        total_reward += float(rewards[agent_i_idx][0])
+        timestep += 1
+
+        if all(dones):
+            break
+
+    return total_reward
+
+
 # ---------------------------------------------------------------------------
 # SVD coupling CSV + plots  (identical logic to MADDPG version)
 # ---------------------------------------------------------------------------
@@ -618,15 +690,22 @@ def _save_svd_coupling_csv(df, logdir):
     df.to_csv(raw_path, index=False)
     print(f"  Raw data saved      : {raw_path}")
 
+    agg_spec = {
+        'mean_frob_norm':     ('frob_norm',    'mean'),
+        'std_frob_norm':      ('frob_norm',    'std'),
+        'mean_delta_g_norm':  ('delta_g_norm', 'mean'),
+        'std_delta_g_norm':   ('delta_g_norm', 'std'),
+        'n_samples':          ('frob_norm',    'count'),
+    }
+    if 'reward_drop_i' in df.columns:
+        agg_spec['mean_reward_drop_i']      = ('reward_drop_i',      'mean')
+        agg_spec['std_reward_drop_i']       = ('reward_drop_i',      'std')
+        agg_spec['mean_normal_reward_i']    = ('normal_reward_i',    'mean')
+        agg_spec['mean_perturbed_reward_i'] = ('perturbed_reward_i', 'mean')
+
     summary = (
         df.groupby(['agent_j', 'agent_i'])
-          .agg(
-              mean_frob_norm   = ('frob_norm',    'mean'),
-              std_frob_norm    = ('frob_norm',    'std'),
-              mean_delta_g_norm= ('delta_g_norm', 'mean'),
-              std_delta_g_norm = ('delta_g_norm', 'std'),
-              n_samples        = ('frob_norm',    'count'),
-          )
+          .agg(**agg_spec)
           .reset_index()
     )
     summary_path = os.path.join(csv_dir, 'mean_coupling_by_pair.csv')
@@ -828,9 +907,28 @@ def svd_coupling_experiment(config):
     print(f"  epsilon      : {config.epsilon}")
     print(f"  output       : {logdir}")
 
+    # Each seed spawns ≈ episode_length × N(N-1) extra rollouts (one per timestep/pair).
     all_records = []
     for seed in tqdm(range(config.total_experiments), desc="Seeds"):
-        records = _run_svd_coupling_episode(actors, get_Q, env, seed, device, config.epsilon)
+        records, perturbed_actions_by_ts, normal_rewards = _run_svd_coupling_episode(
+            actors, get_Q, env, seed, device, config.epsilon
+        )
+
+        # For every (timestep, pair) replay a perturbed episode to measure agent i's reward drop
+        for record in records:
+            t  = record['timestep']
+            ai = record['agent_i']
+            aj = record['agent_j']
+
+            perturbed_action_j = perturbed_actions_by_ts[t][(ai, aj)]
+            perturbed_reward_i = _run_perturbed_episode(
+                actors, env, seed, device, t, ai, aj, perturbed_action_j
+            )
+
+            record['normal_reward_i']    = float(normal_rewards[ai])
+            record['perturbed_reward_i'] = perturbed_reward_i
+            record['reward_drop_i']      = float(normal_rewards[ai]) - perturbed_reward_i
+
         all_records.extend(records)
 
     env.close()
