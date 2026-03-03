@@ -13,6 +13,8 @@ class PettingZooMPEEnv:
         self.args = copy.deepcopy(args)
         self.scenario = args["scenario"]
         del self.args["scenario"]
+        # HARL-only keys are consumed here and are intentionally not forwarded
+        # into PettingZoo's parallel_env constructor kwargs.
         self.enable_heterogeneous_agents = self.args.pop(
             "enable_heterogeneous_agents", False
         )
@@ -33,6 +35,7 @@ class PettingZooMPEEnv:
             self.args["max_cycles"] = 26
         self.cur_step = 0
         self.module = importlib.import_module("pettingzoo.mpe." + self.scenario)
+        # self.args now contains only PettingZoo-compatible kwargs.
         self.env = ss.pad_action_space_v0(
             ss.pad_observations_v0(self.module.parallel_env(**self.args))
         )
