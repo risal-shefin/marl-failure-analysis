@@ -104,9 +104,15 @@ class OnPolicyBaseRunner:
         print("action_space: ", self.envs.action_space)
 
         if self.enable_heterogeneous_agents:
-            assert self.agent_types is not None and self.type_to_agent_ids is not None and self.agent_id_to_type is not None, (
-                "Heterogeneous mode requires environment metadata: agent_types/type_to_agent_ids/agent_id_to_type"
-            )
+            if (
+                self.agent_types is None
+                or self.type_to_agent_ids is None
+                or self.agent_id_to_type is None
+            ):
+                raise ValueError(
+                    "Heterogeneous mode requires environment metadata: "
+                    "agent_types/type_to_agent_ids/agent_id_to_type"
+                )
             if self.share_param:
                 raise ValueError(
                     "share_param=True is not supported with enable_heterogeneous_agents=True; "
@@ -114,9 +120,18 @@ class OnPolicyBaseRunner:
                 )
             self.type_order = list(self.type_to_agent_ids.keys())
             self.type_to_critic_index = {t: i for i, t in enumerate(self.type_order)}
+            self.save_best_by_agent_type = self.algo_args["eval"].get(
+                "save_best_by_agent_type", None
+            )
+            if self.save_best_by_agent_type is not None and self.save_best_by_agent_type not in self.type_to_agent_ids:
+                raise ValueError(
+                    f"Unknown save_best_by_agent_type={self.save_best_by_agent_type}; "
+                    f"available types: {list(self.type_to_agent_ids.keys())}"
+                )
         else:
             self.type_order = None
             self.type_to_critic_index = None
+            self.save_best_by_agent_type = None
 
         # actor
         if self.share_param:
@@ -355,11 +370,28 @@ class OnPolicyBaseRunner:
 
             # log information
             if episode % self.algo_args["train"]["log_interval"] == 0:
+                if not self.enable_heterogeneous_agents:
+                    logging_critic_buffer = self.critic_buffer
+                else:
+                    mean_rewards = [
+                        self.critic_buffers_by_type[agent_type].get_mean_rewards()
+                        for agent_type in self.type_order
+                    ]
+
+                    class _MeanRewardProxy:
+                        def __init__(self, mean_reward):
+                            self._mean_reward = mean_reward
+
+                        def get_mean_rewards(self):
+                            return self._mean_reward
+
+                    logging_critic_buffer = _MeanRewardProxy(float(np.mean(mean_rewards)))
+
                 self.logger.episode_log(
                     actor_train_infos,
                     critic_train_info,
                     self.actor_buffer,
-                    self.critic_buffer if not self.enable_heterogeneous_agents else self.critic_buffers_by_type[self.type_order[0]],
+                    logging_critic_buffer,
                 )
 
             # eval
@@ -674,12 +706,18 @@ class OnPolicyBaseRunner:
             for agent_type in self.type_order:
                 type_agent_ids = self.type_to_agent_ids[agent_type]
                 if self.state_type == "EP":
+                    type_rnn_states_critic = np.mean(
+                        rnn_states_critic[:, type_agent_ids], axis=1
+                    )
+                    type_values = np.mean(values[:, type_agent_ids], axis=1)
+                    type_rewards = np.mean(rewards[:, type_agent_ids], axis=1)
+                    type_masks = np.min(masks[:, type_agent_ids], axis=1)
                     self.critic_buffers_by_type[agent_type].insert(
                         share_obs[:, 0],
-                        rnn_states_critic[:, type_agent_ids[0]],
-                        values[:, type_agent_ids[0]],
-                        rewards[:, type_agent_ids[0]],
-                        masks[:, type_agent_ids[0]],
+                        type_rnn_states_critic,
+                        type_values,
+                        type_rewards,
+                        type_masks,
                         bad_masks,
                     )
                 elif self.state_type == "FP":
@@ -913,6 +951,19 @@ class OnPolicyBaseRunner:
                 eval_avg_rew = self.logger.eval_log(
                     eval_episode
                 )  # logger callback at the end of evaluation
+                if (
+                    self.enable_heterogeneous_agents
+                    and self.save_best_by_agent_type is not None
+                ):
+                    type_agent_ids = self.type_to_agent_ids[self.save_best_by_agent_type]
+                    eval_rewards_array = np.array(self.logger.eval_episode_rewards)
+                    eval_type_metric = float(
+                        np.mean(eval_rewards_array[:, type_agent_ids, :])
+                    )
+                    print(
+                        f"Evaluation save-best metric for type '{self.save_best_by_agent_type}' is {eval_type_metric}."
+                    )
+                    return eval_type_metric
                 return eval_avg_rew
 
     @torch.no_grad()
