@@ -28,7 +28,7 @@ class PettingZooHeteroSupportTests(unittest.TestCase):
 
         missing = [
             name
-            for name in ("numpy", "supersuit", "torch", "absl")
+            for name in ("numpy", "supersuit", "torch")
             if importlib.util.find_spec(name) is None
         ]
         if missing:

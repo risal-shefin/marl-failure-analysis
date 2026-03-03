@@ -86,9 +86,11 @@ def make_train_env(env_name, seed, n_threads, env_args):
                         raise ValueError(
                             "only cooperative scenarios in MPE are supported in legacy mode"
                         )
-                    print("pettingzoo_mpe mode: legacy_cooperative_mode")
+                    if rank == 0:
+                        print("pettingzoo_mpe mode: legacy_cooperative_mode")
                 else:
-                    print("pettingzoo_mpe mode: heterogeneous_mode")
+                    if rank == 0:
+                        print("pettingzoo_mpe mode: heterogeneous_mode")
                 env = PettingZooMPEEnv(env_args)
             elif env_name == "gym":
                 from harl.envs.gym.gym_env import GYMEnv

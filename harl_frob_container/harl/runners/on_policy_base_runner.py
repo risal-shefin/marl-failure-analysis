@@ -128,6 +128,15 @@ class OnPolicyBaseRunner:
                     f"Unknown save_best_by_agent_type={self.save_best_by_agent_type}; "
                     f"available types: {list(self.type_to_agent_ids.keys())}"
                 )
+            if (
+                self.state_type == "EP"
+                and env_args.get("reward_mode", "global_sum_shared") == "individual"
+                and any(len(agent_ids) > 1 for agent_ids in self.type_to_agent_ids.values())
+            ):
+                raise ValueError(
+                    "state_type='EP' with reward_mode='individual' and multiple agents per type "
+                    "is unsupported in heterogeneous mode; use state_type='FP' or a shared/team reward mode."
+                )
         else:
             self.type_order = None
             self.type_to_critic_index = None
@@ -373,10 +382,13 @@ class OnPolicyBaseRunner:
                 if not self.enable_heterogeneous_agents:
                     logging_critic_buffer = self.critic_buffer
                 else:
-                    mean_rewards = [
-                        self.critic_buffers_by_type[agent_type].get_mean_rewards()
-                        for agent_type in self.type_order
-                    ]
+                    weighted_mean_rewards = []
+                    weights = []
+                    for agent_type in self.type_order:
+                        weighted_mean_rewards.append(
+                            self.critic_buffers_by_type[agent_type].get_mean_rewards()
+                        )
+                        weights.append(len(self.type_to_agent_ids[agent_type]))
 
                     class _MeanRewardProxy:
                         def __init__(self, mean_reward):
@@ -385,7 +397,9 @@ class OnPolicyBaseRunner:
                         def get_mean_rewards(self):
                             return self._mean_reward
 
-                    logging_critic_buffer = _MeanRewardProxy(float(np.mean(mean_rewards)))
+                    logging_critic_buffer = _MeanRewardProxy(
+                        float(np.average(weighted_mean_rewards, weights=weights))
+                    )
 
                 self.logger.episode_log(
                     actor_train_infos,
