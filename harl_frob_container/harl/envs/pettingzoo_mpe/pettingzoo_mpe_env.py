@@ -83,7 +83,7 @@ class PettingZooMPEEnv:
                 for agent_id in range(self.n_agents)
             ]
 
-        total_reward = sum([rew[agent] for agent in self.agents])
+        total_reward = sum(rew[agent] for agent in self.agents)
         return [[total_reward]] * self.n_agents
 
     def step(self, actions):

@@ -24,6 +24,15 @@ from harl.utils.models_tools import init_device, find_checkpoint
 from harl.utils.configs_tools import init_dir, save_config
 from harl.envs import LOGGER_REGISTRY
 
+class _MeanRewardProxy:
+    """Adapter exposing get_mean_rewards() for logger.episode_log()."""
+
+    def __init__(self, mean_reward):
+        self._mean_reward = mean_reward
+
+    def get_mean_rewards(self):
+        return self._mean_reward
+
 
 class OnPolicyBaseRunner:
     """Base runner for on-policy algorithms."""
@@ -389,13 +398,6 @@ class OnPolicyBaseRunner:
                             self.critic_buffers_by_type[agent_type].get_mean_rewards()
                         )
                         weights.append(len(self.type_to_agent_ids[agent_type]))
-
-                    class _MeanRewardProxy:
-                        def __init__(self, mean_reward):
-                            self._mean_reward = mean_reward
-
-                        def get_mean_rewards(self):
-                            return self._mean_reward
 
                     logging_critic_buffer = _MeanRewardProxy(
                         float(np.average(weighted_mean_rewards, weights=weights))

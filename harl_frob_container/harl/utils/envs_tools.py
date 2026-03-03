@@ -1,9 +1,13 @@
 """Tools for HARL."""
 import os
+import logging
 import random
 import numpy as np
 import torch
 from harl.envs.env_wrappers import ShareSubprocVecEnv, ShareDummyVecEnv
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def check(value):
@@ -87,10 +91,10 @@ def make_train_env(env_name, seed, n_threads, env_args):
                             "only cooperative scenarios in MPE are supported in legacy mode"
                         )
                     if rank == 0:
-                        print("pettingzoo_mpe mode: legacy_cooperative_mode")
+                        _LOGGER.info("pettingzoo_mpe mode: legacy_cooperative_mode")
                 else:
                     if rank == 0:
-                        print("pettingzoo_mpe mode: heterogeneous_mode")
+                        _LOGGER.info("pettingzoo_mpe mode: heterogeneous_mode")
                 env = PettingZooMPEEnv(env_args)
             elif env_name == "gym":
                 from harl.envs.gym.gym_env import GYMEnv
