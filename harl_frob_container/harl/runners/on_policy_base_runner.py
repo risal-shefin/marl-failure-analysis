@@ -1175,27 +1175,28 @@ class OnPolicyBaseRunner:
         model_dir = self.algo_args["train"]["model_dir"]
         for agent_id in range(self.num_agents):
             path = find_checkpoint(model_dir, f"actor_agent{agent_id}")
-            self.actor[agent_id].actor.load_state_dict(torch.load(path))
+            self.actor[agent_id].actor.load_state_dict(torch.load(path, map_location=self.device))
         if not self.algo_args["render"]["use_render"]:
             if not self.enable_heterogeneous_agents:
                 self.critic.critic.load_state_dict(
-                    torch.load(find_checkpoint(model_dir, "critic_agent"))
+                    torch.load(find_checkpoint(model_dir, "critic_agent"), map_location=self.device)
                 )
                 if self.value_normalizer is not None:
                     self.value_normalizer.load_state_dict(
-                        torch.load(find_checkpoint(model_dir, "value_normalizer"))
+                        torch.load(find_checkpoint(model_dir, "value_normalizer"), map_location=self.device)
                     )
             else:
                 for agent_type in self.type_order:
                     self.critics_by_type[agent_type].critic.load_state_dict(
-                        torch.load(find_checkpoint(model_dir, f"critic_type_{agent_type}"))
+                        torch.load(find_checkpoint(model_dir, f"critic_type_{agent_type}"), map_location=self.device)
                     )
                     if self.value_normalizers_by_type[agent_type] is not None:
                         self.value_normalizers_by_type[agent_type].load_state_dict(
                             torch.load(
                                 find_checkpoint(
                                     model_dir, f"value_normalizer_type_{agent_type}"
-                                )
+                                ),
+                                map_location=self.device,
                             )
                         )
             if self.enable_central_q:
@@ -1204,7 +1205,8 @@ class OnPolicyBaseRunner:
                         torch.load(
                             find_checkpoint(
                                 model_dir, f"central_q_critic_agent{agent_id}"
-                            )
+                            ),
+                            map_location=self.device,
                         )
                     )
                     if self.centralized_value_normalizers[agent_id] is not None:
@@ -1213,7 +1215,8 @@ class OnPolicyBaseRunner:
                                 find_checkpoint(
                                     model_dir,
                                     f"central_q_value_normalizer_agent{agent_id}",
-                                )
+                                ),
+                                map_location=self.device,
                             )
                         )
 
