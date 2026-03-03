@@ -1,3 +1,5 @@
 scenario: simple_spread_v3 # choose from simple_spread_v2, simple_reference_v2, simple_speaker_listener_v3
 continuous_actions: True
 render_mode: rgb_array
+enable_heterogeneous_agents: false # legacy behavior by default; set true for mixed agent types (e.g., simple_adversary_v3)
+reward_mode: global_sum_shared # legacy default; when heterogeneous mode is enabled, can be team_by_type or individual

@@ -74,13 +74,18 @@ def make_train_env(env_name, seed, n_threads, env_args):
                     PettingZooMPEEnv,
                 )
 
-                assert env_args["scenario"] in [
-                    "simple_v2",
-                    "simple_spread_v2",
-                    "simple_reference_v2",
-                    "simple_speaker_listener_v3",
-                    "simple_spread_v3",
-                ], "only cooperative scenarios in MPE are supported"
+                hetero_enabled = env_args.get("enable_heterogeneous_agents", False)
+                if not hetero_enabled:
+                    assert env_args["scenario"] in [
+                        "simple_v2",
+                        "simple_spread_v2",
+                        "simple_reference_v2",
+                        "simple_speaker_listener_v3",
+                        "simple_spread_v3",
+                    ], "only cooperative scenarios in MPE are supported in legacy mode"
+                    print("pettingzoo_mpe mode: legacy_cooperative_mode")
+                else:
+                    print("pettingzoo_mpe mode: heterogeneous_mode")
                 env = PettingZooMPEEnv(env_args)
             elif env_name == "gym":
                 from harl.envs.gym.gym_env import GYMEnv

@@ -213,6 +213,13 @@ def shareworker(remote, parent_remote, env_fn_wrapper):
             remote.send((fr))
         elif cmd == "get_num_agents":
             remote.send((env.n_agents))
+        elif cmd == "get_env_metadata":
+            metadata = {
+                "agent_types": getattr(env, "agent_types", None),
+                "type_to_agent_ids": getattr(env, "type_to_agent_ids", None),
+                "agent_id_to_type": getattr(env, "agent_id_to_type", None),
+            }
+            remote.send(metadata)
         else:
             raise NotImplementedError
 
@@ -248,6 +255,11 @@ class ShareSubprocVecEnv(ShareVecEnv):
         observation_space, share_observation_space, action_space = self.remotes[
             0
         ].recv()
+        self.remotes[0].send(("get_env_metadata", None))
+        metadata = self.remotes[0].recv()
+        self.agent_types = metadata.get("agent_types")
+        self.type_to_agent_ids = metadata.get("type_to_agent_ids")
+        self.agent_id_to_type = metadata.get("agent_id_to_type")
         ShareVecEnv.__init__(
             self, len(env_fns), observation_space, share_observation_space, action_space
         )
@@ -312,6 +324,9 @@ class ShareDummyVecEnv(ShareVecEnv):
             self.n_agents = env.n_agents
         except:
             pass
+        self.agent_types = getattr(env, "agent_types", None)
+        self.type_to_agent_ids = getattr(env, "type_to_agent_ids", None)
+        self.agent_id_to_type = getattr(env, "agent_id_to_type", None)
 
     def step_async(self, actions):
         self.actions = actions

@@ -13,6 +13,12 @@ class PettingZooMPEEnv:
         self.args = copy.deepcopy(args)
         self.scenario = args["scenario"]
         del self.args["scenario"]
+        self.enable_heterogeneous_agents = self.args.pop(
+            "enable_heterogeneous_agents", False
+        )
+        self.reward_mode = self.args.pop("reward_mode", "global_sum_shared")
+        self._validate_reward_mode()
+
         self.discrete = True
         if (
             "continuous_actions" in self.args
@@ -33,10 +39,52 @@ class PettingZooMPEEnv:
         self.env.reset()
         self.n_agents = self.env.num_agents
         self.agents = self.env.agents
+        self.agent_types = [self._agent_type_from_name(agent) for agent in self.agents]
+        self.agent_id_to_type = {
+            agent_id: self.agent_types[agent_id] for agent_id in range(self.n_agents)
+        }
+        self.type_to_agent_ids = {}
+        for agent_id, agent_type in enumerate(self.agent_types):
+            self.type_to_agent_ids.setdefault(agent_type, []).append(agent_id)
         self.share_observation_space = self.repeat(self.env.state_space)
         self.observation_space = self.unwrap(self.env.observation_spaces)
         self.action_space = self.unwrap(self.env.action_spaces)
         self._seed = 0
+
+    def _validate_reward_mode(self):
+        allowed_modes = {"global_sum_shared", "team_by_type", "individual"}
+        if self.reward_mode not in allowed_modes:
+            raise ValueError(
+                f"Unsupported reward_mode={self.reward_mode}. "
+                f"Expected one of {sorted(allowed_modes)}"
+            )
+        if (not self.enable_heterogeneous_agents) and self.reward_mode != "global_sum_shared":
+            raise ValueError(
+                "Non-legacy reward_mode is only allowed when "
+                "enable_heterogeneous_agents=True"
+            )
+
+    @staticmethod
+    def _agent_type_from_name(agent_name):
+        return agent_name.split("_", 1)[0]
+
+    def _aggregate_rewards(self, rew):
+        if self.reward_mode == "individual":
+            return [[rew[agent]] for agent in self.agents]
+
+        if self.reward_mode == "team_by_type":
+            team_rewards = {}
+            for agent_id, agent in enumerate(self.agents):
+                agent_type = self.agent_id_to_type[agent_id]
+                team_rewards.setdefault(agent_type, 0.0)
+                team_rewards[agent_type] += rew[agent]
+            return [
+                [team_rewards[self.agent_id_to_type[agent_id]]]
+                for agent_id in range(self.n_agents)
+            ]
+
+        total_reward = sum([rew[agent] for agent in self.agents])
+        return [[total_reward]] * self.n_agents
 
     def step(self, actions):
         """
@@ -53,8 +101,7 @@ class PettingZooMPEEnv:
                 info[agent]["bad_transition"] = True
         dones = {agent: term[agent] or trunc[agent] for agent in self.agents}
         s_obs = self.repeat(self.env.state())
-        total_reward = sum([rew[agent] for agent in self.agents])
-        rewards = [[total_reward]] * self.n_agents
+        rewards = self._aggregate_rewards(rew)
         return (
             self.unwrap(obs),
             s_obs,
