@@ -69,8 +69,13 @@ class OnPolicyMARunner(OnPolicyBaseRunner):
         else:
             for agent_id in range(self.num_agents):
                 if self.state_type == "EP":
+                    ep_advantages = (
+                        advantages.copy()
+                        if not self.enable_heterogeneous_agents
+                        else advantages[:, :, agent_id].copy()
+                    )
                     actor_train_info = self.actor[agent_id].train(
-                        self.actor_buffer[agent_id], advantages.copy(), "EP"
+                        self.actor_buffer[agent_id], ep_advantages, "EP"
                     )
                 elif self.state_type == "FP":
                     actor_train_info = self.actor[agent_id].train(

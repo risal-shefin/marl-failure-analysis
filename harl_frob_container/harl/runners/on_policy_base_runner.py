@@ -706,8 +706,8 @@ class OnPolicyBaseRunner:
             if self.state_type == "EP":
                 self.critic_buffer.insert(
                     share_obs[:, 0],
-                    rnn_states_critic if self.state_type == "EP" else rnn_states_critic[:, 0],
-                    values if self.state_type == "EP" else values[:, 0],
+                    rnn_states_critic,
+                    values,
                     rewards[:, 0],
                     masks[:, 0],
                     bad_masks,
