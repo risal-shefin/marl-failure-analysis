@@ -104,24 +104,28 @@ class OnPolicyBaseRunner:
             args["env"] == "pettingzoo_mpe"
             and env_args.get("enable_heterogeneous_agents", False)
         )
-        self.agent_types = getattr(self.envs, "agent_types", None)
-        self.type_to_agent_ids = getattr(self.envs, "type_to_agent_ids", None)
-        self.agent_id_to_type = getattr(self.envs, "agent_id_to_type", None)
+        self.agents = getattr(self.envs, "agents", None)
+        self.agent_types = None
+        self.type_to_agent_ids = None
+        self.agent_id_to_type = None
+        if self.enable_heterogeneous_agents:
+            if self.agents is None:
+                raise ValueError(
+                    "Heterogeneous mode requires env to expose ordered agent names via env.agents"
+                )
+            self.agent_types = [agent.split("_", 1)[0] for agent in self.agents]
+            self.agent_id_to_type = {
+                agent_id: self.agent_types[agent_id] for agent_id in range(self.num_agents)
+            }
+            self.type_to_agent_ids = {}
+            for agent_id, agent_type in enumerate(self.agent_types):
+                self.type_to_agent_ids.setdefault(agent_type, []).append(agent_id)
 
         print("share_observation_space: ", self.envs.share_observation_space)
         print("observation_space: ", self.envs.observation_space)
         print("action_space: ", self.envs.action_space)
 
         if self.enable_heterogeneous_agents:
-            if (
-                self.agent_types is None
-                or self.type_to_agent_ids is None
-                or self.agent_id_to_type is None
-            ):
-                raise ValueError(
-                    "Heterogeneous mode requires environment metadata: "
-                    "agent_types/type_to_agent_ids/agent_id_to_type"
-                )
             if self.share_param:
                 raise ValueError(
                     "share_param=True is not supported with enable_heterogeneous_agents=True; "
