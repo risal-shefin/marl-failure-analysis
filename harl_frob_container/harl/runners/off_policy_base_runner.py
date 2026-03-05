@@ -96,19 +96,14 @@ class OffPolicyBaseRunner:
             args["env"] == "pettingzoo_mpe"
             and env_args.get("enable_heterogeneous_agents", False)
         )
-        self.agents = getattr(self.envs, "agents", None)
-        self.agent_types = None
-        self.type_to_agent_ids = None
+        self.agent_types = getattr(self.envs, "agent_types", None)
+        self.type_to_agent_ids = getattr(self.envs, "type_to_agent_ids", None)
 
         if self.enable_heterogeneous_agents:
-            if self.agents is None:
+            if self.type_to_agent_ids is None:
                 raise ValueError(
-                    "Heterogeneous mode requires env to expose ordered agent names via env.agents"
+                    "Heterogeneous mode requires environment metadata: type_to_agent_ids"
                 )
-            self.agent_types = [agent.split("_", 1)[0] for agent in self.agents]
-            self.type_to_agent_ids = {}
-            for agent_id, agent_type in enumerate(self.agent_types):
-                self.type_to_agent_ids.setdefault(agent_type, []).append(agent_id)
             self.type_order = list(self.type_to_agent_ids.keys())
         else:
             self.type_order = None
