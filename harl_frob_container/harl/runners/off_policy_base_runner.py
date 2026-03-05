@@ -92,6 +92,22 @@ class OffPolicyBaseRunner:
                 else None
             )
         self.num_agents = get_num_agents(args["env"], env_args, self.envs)
+        self.enable_heterogeneous_agents = (
+            args["env"] == "pettingzoo_mpe"
+            and env_args.get("enable_heterogeneous_agents", False)
+        )
+        self.agent_types = getattr(self.envs, "agent_types", None)
+        self.type_to_agent_ids = getattr(self.envs, "type_to_agent_ids", None)
+
+        if self.enable_heterogeneous_agents:
+            if self.type_to_agent_ids is None:
+                raise ValueError(
+                    "Heterogeneous mode requires environment metadata: type_to_agent_ids"
+                )
+            self.type_order = list(self.type_to_agent_ids.keys())
+        else:
+            self.type_order = None
+
         self.agent_deaths = np.zeros(
             (self.algo_args["train"]["n_rollout_threads"], self.num_agents, 1)
         )
@@ -174,6 +190,11 @@ class OffPolicyBaseRunner:
 
         self.total_it = 0  # total iteration
         self.best_eval_reward = -np.inf
+        self.best_eval_reward_by_type = (
+            {agent_type: -np.inf for agent_type in self.type_order}
+            if self.enable_heterogeneous_agents
+            else None
+        )
 
         if (
             "auto_alpha" in self.algo_args["algo"].keys()
@@ -287,9 +308,15 @@ class OffPolicyBaseRunner:
                         f"Env {self.args['env']} Task {self.task_name} Algo {self.args['algo']} Exp {self.args['exp_name']} Evaluation at step {cur_step} / {self.algo_args['train']['num_env_steps']}:"
                     )
                     eval_reward = self.eval(cur_step)
-                    if eval_reward >= self.best_eval_reward:
-                        self.best_eval_reward = eval_reward
-                        self.save(eval_reward)
+                    if self.enable_heterogeneous_agents:
+                        for agent_type, type_eval_reward in eval_reward["by_type"].items():
+                            if type_eval_reward >= self.best_eval_reward_by_type[agent_type]:
+                                self.best_eval_reward_by_type[agent_type] = type_eval_reward
+                                self.save_by_agent_type(agent_type, type_eval_reward)
+                    else:
+                        if eval_reward >= self.best_eval_reward:
+                            self.best_eval_reward = eval_reward
+                            self.save(eval_reward)
                 else:
                     print(
                         f"Env {self.args['env']} Task {self.task_name} Algo {self.args['algo']} Exp {self.args['exp_name']} Step {cur_step} / {self.algo_args['train']['num_env_steps']}, average step reward in buffer: {self.buffer.get_mean_rewards()}.\n"
@@ -640,6 +667,12 @@ class OffPolicyBaseRunner:
                 self.writter.add_scalar(
                     "eval_average_episode_length", eval_avg_len, step
                 )
+                if self.enable_heterogeneous_agents:
+                    type_metrics = {
+                        agent_type: float(np.mean(eval_episode_rewards[:, agent_ids, :]))
+                        for agent_type, agent_ids in self.type_to_agent_ids.items()
+                    }
+                    return {"overall": float(eval_avg_rew), "by_type": type_metrics}
                 return eval_avg_rew
 
     @torch.no_grad()
@@ -734,6 +767,19 @@ class OffPolicyBaseRunner:
                 self.value_normalizer.state_dict(),
                 str(self.save_dir) + f"/value_normalizer{suffix}.pt",
             )
+
+    def save_by_agent_type(self, agent_type, mean_reward):
+        """Save checkpoints for agents of one type based on that type's eval reward."""
+        suffix = f"_type_{agent_type}_rew{mean_reward:.4f}"
+        for agent_id in self.type_to_agent_ids[agent_type]:
+            self.actor[agent_id].save(self.save_dir, agent_id, suffix)
+        self.critic.save(self.save_dir, suffix)
+        if self.value_normalizer is not None:
+            torch.save(
+                self.value_normalizer.state_dict(),
+                str(self.save_dir) + f"/value_normalizer{suffix}.pt",
+            )
+
 
     def close(self):
         """Close environment, writter, and log file."""

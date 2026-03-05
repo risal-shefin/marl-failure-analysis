@@ -129,14 +129,6 @@ class OnPolicyBaseRunner:
                 )
             self.type_order = list(self.type_to_agent_ids.keys())
             self.type_to_critic_index = {t: i for i, t in enumerate(self.type_order)}
-            self.save_best_by_agent_type = self.algo_args["eval"].get(
-                "save_best_by_agent_type", None
-            )
-            if self.save_best_by_agent_type is not None and self.save_best_by_agent_type not in self.type_to_agent_ids:
-                raise ValueError(
-                    f"Unknown save_best_by_agent_type={self.save_best_by_agent_type}; "
-                    f"available types: {list(self.type_to_agent_ids.keys())}"
-                )
             if (
                 self.state_type == "EP"
                 and env_args.get("reward_mode", "global_sum_shared") == "individual"
@@ -149,7 +141,6 @@ class OnPolicyBaseRunner:
         else:
             self.type_order = None
             self.type_to_critic_index = None
-            self.save_best_by_agent_type = None
 
         # actor
         if self.share_param:
@@ -296,6 +287,11 @@ class OnPolicyBaseRunner:
                 args, algo_args, env_args, self.num_agents, self.writter, self.run_dir
             )
             self.best_eval_reward = -np.inf
+            self.best_eval_reward_by_type = (
+                {agent_type: -np.inf for agent_type in self.type_order}
+                if self.enable_heterogeneous_agents
+                else None
+            )
         if self.algo_args["train"]["model_dir"] is not None:  # restore model
             self.restore()
 
@@ -415,9 +411,15 @@ class OnPolicyBaseRunner:
                 if self.algo_args["eval"]["use_eval"]:
                     self.prep_rollout()
                     eval_reward = self.eval()
-                    if eval_reward >= self.best_eval_reward:
-                        self.best_eval_reward = eval_reward
-                        self.save(eval_reward)
+                    if self.enable_heterogeneous_agents:
+                        for agent_type, type_eval_reward in eval_reward["by_type"].items():
+                            if type_eval_reward >= self.best_eval_reward_by_type[agent_type]:
+                                self.best_eval_reward_by_type[agent_type] = type_eval_reward
+                                self.save_by_agent_type(agent_type, type_eval_reward)
+                    else:
+                        if eval_reward >= self.best_eval_reward:
+                            self.best_eval_reward = eval_reward
+                            self.save(eval_reward)
                 else:
                     self.save()
 
@@ -967,19 +969,13 @@ class OnPolicyBaseRunner:
                 eval_avg_rew = self.logger.eval_log(
                     eval_episode
                 )  # logger callback at the end of evaluation
-                if (
-                    self.enable_heterogeneous_agents
-                    and self.save_best_by_agent_type is not None
-                ):
-                    type_agent_ids = self.type_to_agent_ids[self.save_best_by_agent_type]
+                if self.enable_heterogeneous_agents:
                     eval_rewards_array = np.array(self.logger.eval_episode_rewards)
-                    eval_type_metric = float(
-                        np.mean(eval_rewards_array[:, type_agent_ids, :])
-                    )
-                    print(
-                        f"Evaluation save-best metric for type '{self.save_best_by_agent_type}' is {eval_type_metric}."
-                    )
-                    return eval_type_metric
+                    type_metrics = {
+                        agent_type: float(np.mean(eval_rewards_array[:, agent_ids, :]))
+                        for agent_type, agent_ids in self.type_to_agent_ids.items()
+                    }
+                    return {"overall": float(eval_avg_rew), "by_type": type_metrics}
                 return eval_avg_rew
 
     @torch.no_grad()
@@ -1171,6 +1167,43 @@ class OnPolicyBaseRunner:
                         str(self.save_dir)
                         + f"/central_q_value_normalizer_agent{agent_id}{suffix}.pt",
                     )
+
+    def save_by_agent_type(self, agent_type, mean_reward):
+        """Save checkpoints for a specific agent type based on its own eval metric."""
+        suffix = f"_type_{agent_type}_rew{mean_reward:.4f}"
+        for agent_id in self.type_to_agent_ids[agent_type]:
+            policy_actor = self.actor[agent_id].actor
+            torch.save(
+                policy_actor.state_dict(),
+                str(self.save_dir) + f"/actor_agent{agent_id}{suffix}.pt",
+            )
+
+        if self.enable_heterogeneous_agents:
+            torch.save(
+                self.critics_by_type[agent_type].critic.state_dict(),
+                str(self.save_dir) + f"/critic_type_{agent_type}{suffix}.pt",
+            )
+            if self.value_normalizers_by_type[agent_type] is not None:
+                torch.save(
+                    self.value_normalizers_by_type[agent_type].state_dict(),
+                    str(self.save_dir)
+                    + f"/value_normalizer_type_{agent_type}{suffix}.pt",
+                )
+
+        if self.enable_central_q:
+            for agent_id in self.type_to_agent_ids[agent_type]:
+                torch.save(
+                    self.centralized_critics[agent_id].critic.state_dict(),
+                    str(self.save_dir)
+                    + f"/central_q_critic_agent{agent_id}{suffix}.pt",
+                )
+                if self.centralized_value_normalizers[agent_id] is not None:
+                    torch.save(
+                        self.centralized_value_normalizers[agent_id].state_dict(),
+                        str(self.save_dir)
+                        + f"/central_q_value_normalizer_agent{agent_id}{suffix}.pt",
+                    )
+
 
     def restore(self):
         """Restore model parameters."""
