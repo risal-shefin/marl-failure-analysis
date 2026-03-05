@@ -17,7 +17,10 @@ from algorithms.maddpg import MADDPG
 from modules.constants import DEVICE, torch_device
 from modules.environment import create_environment
 from modules.metrics import compute_pairwise_frob_norms
-from modules.metrics.basic_metrics import compute_pairwise_svd_gradient_shift
+from modules.metrics.basic_metrics import (
+    compute_pairwise_svd_gradient_shift,
+    compute_pairwise_svd_q_drop,
+)
 from modules.visualization.utils import save_frames_as_gif
 
 
@@ -37,7 +40,7 @@ def _make_logdir(base_name, env_id, env_type, nagents, seed):
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     logdir = os.path.join(
         os.getcwd(), 'runs', 'frob_norm_experiments', base_name,
-        f"{env_id}_{env_type}_nagents{nagents}_seed{seed}_{timestamp}"
+        f"{env_id}_{env_type}_nagents{nagents}", f"seed{seed}_{timestamp}"
     )
     os.makedirs(logdir, exist_ok=True)
     return logdir
@@ -47,7 +50,7 @@ def _make_multiseed_logdir(base_name, env_id, env_type, nagents, n_seeds):
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     logdir = os.path.join(
         os.getcwd(), 'runs', 'frob_norm_experiments', base_name,
-        f"{env_id}_{env_type}_nagents{nagents}_seeds{n_seeds}_{timestamp}"
+        f"{env_id}_{env_type}_nagents{nagents}", f"multiseeds{n_seeds}_{timestamp}"
     )
     os.makedirs(logdir, exist_ok=True)
     return logdir
@@ -345,11 +348,11 @@ def _save_svd_coupling_csv(df, logdir):
         'std_delta_g_norm':  ('delta_g_norm', 'std'),
         'n_samples':         ('frob_norm',    'count'),
     }
-    if 'reward_drop_i' in df.columns:
-        agg_spec['mean_reward_drop_i']       = ('reward_drop_i',      'mean')
-        agg_spec['std_reward_drop_i']        = ('reward_drop_i',      'std')
-        agg_spec['mean_normal_reward_i']     = ('normal_reward_i',    'mean')
-        agg_spec['mean_perturbed_reward_i']  = ('perturbed_reward_i', 'mean')
+    if 'delta_r_i' in df.columns:
+        agg_spec['mean_delta_r_i']       = ('delta_r_i',      'mean')
+        agg_spec['std_delta_r_i']        = ('delta_r_i',      'std')
+        agg_spec['mean_r_nominal_i']     = ('r_nominal_i',    'mean')
+        agg_spec['mean_r_perturbed_i']   = ('r_perturbed_i',  'mean')
 
     summary = (
         df.groupby(['agent_j', 'agent_i'])
@@ -606,8 +609,7 @@ def svd_coupling_experiment(config):
 
     For every (i, j) pair at every timestep of every seed episode:
       - Computes H = ∇_{a_j} ∇_{a_i} Q_i  and its Frobenius norm ||H||_F
-      - Perturbs a_j along d_orthogonal = H^T g projected out of ∇_{a_j} Q_i
-        so that the perturbation has zero first-order effect on Q_i
+      - Perturbs a_j along first right singular vector of H
       - Measures gradient shift ||Δg||_2 = ||∇_{a_i} Q_i(a_j') - g||_2
 
     Saves:
@@ -664,6 +666,410 @@ def svd_coupling_experiment(config):
                 maddpg, env, seed, t, ai, aj, perturbed_action_j
             )
 
+            record['r_nominal_i']   = float(normal_rewards[ai])
+            record['r_perturbed_i'] = perturbed_reward_i
+            record['delta_r_i']     = float(normal_rewards[ai]) - perturbed_reward_i
+
+        all_records.extend(records)
+
+    env.close()
+
+    n_points = len(all_records)
+    print(f"\n  Collected {n_points} data points across {config.total_experiments} seeds")
+
+    df = pd.DataFrame(all_records)
+    _save_svd_coupling_csv(df, logdir)
+    _save_svd_coupling_plots(df, logdir)
+
+    print("Done.")
+
+
+# ---------------------------------------------------------------------------
+# Experiment 3: multi-seed SVD QR-drop — joint perturbation to minimise Q
+# ---------------------------------------------------------------------------
+
+def _run_svd_qr_drop_episode(maddpg, env, seed, epsilon):
+    """
+    Run one episode and collect SVD QR-drop data at each timestep.
+
+    For every off-diagonal pair (i, j) at every timestep:
+      - Computes H_ij and its SVD to get u_1 (first left SV) and v_1 (first right SV)
+      - Sets δ_ai = +ε·u_1 and δ_aj = -ε·v_1 so that δ_ai^T H_ij δ_aj = -σ_max
+      - Records the immediate Q drop measured through agent i's critic
+
+    Returns:
+        records                 : list of dicts with keys:
+                                    seed, timestep, agent_i, agent_j,
+                                    frob_norm, sigma_max,
+                                    q_nominal, q_perturbed, delta_q
+        perturbed_actions_by_ts : {t: {(i, j): {'perturbed_action_i': np.ndarray,
+                                                  'perturbed_action_j': np.ndarray}}}
+        normal_rewards          : np.ndarray [nagents] — cumulative per-agent reward
+    """
+    _set_seeds(seed)
+    with torch.no_grad():
+        maddpg.prep_rollouts(device=DEVICE)
+
+    obs = env.reset(seed=seed)
+    records = []
+    perturbed_actions_by_ts = {}
+    normal_rewards = np.zeros(maddpg.nagents)
+    timestep = 0
+
+    while True:
+        torch_obs = [
+            Variable(torch.tensor([obs[i]], dtype=torch.float32).to(torch_device),
+                     requires_grad=False)
+            for i in range(maddpg.nagents)
+        ]
+        with torch.no_grad():
+            torch_agent_actions = maddpg.step(torch_obs, explore=False)
+            agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
+
+        actions = {name: agent_actions[i].squeeze()
+                   for i, name in enumerate(env.possible_agents)}
+
+        qr_data = compute_pairwise_svd_q_drop(
+            maddpg, obs, list(actions.values()), epsilon
+        )
+
+        perturbed_at_t = {}
+        for (agent_i, agent_j), m in qr_data.items():
+            records.append({
+                'seed':        seed,
+                'timestep':    timestep,
+                'agent_i':     agent_i,
+                'agent_j':     agent_j,
+                'frob_norm':   m['frob_norm'],
+                'sigma_max':   m['sigma_max'],
+                'q_nominal':   m['q_nominal'],
+                'q_perturbed': m['q_perturbed'],
+                'delta_q':     m['delta_q'],
+            })
+            perturbed_at_t[(agent_i, agent_j)] = {
+                'perturbed_action_i': m['perturbed_action_i'],
+                'perturbed_action_j': m['perturbed_action_j'],
+            }
+        perturbed_actions_by_ts[timestep] = perturbed_at_t
+
+        next_obs, rewards, dones, _ = env.step(actions)
+        normal_rewards += rewards[0]
+        obs = next_obs
+        timestep += 1
+
+        if dones.all():
+            break
+
+    return records, perturbed_actions_by_ts, normal_rewards
+
+
+def _run_dual_perturbed_episode(maddpg, env, seed, target_timestep,
+                                 agent_i_idx, agent_j_idx,
+                                 perturbed_action_i, perturbed_action_j):
+    """
+    Replay an episode with the same seed but at *target_timestep* both agent_i
+    and agent_j use their SVD-derived perturbed actions.  All other timesteps
+    are unmodified.
+
+    Because env cloning is not supported the episode must be re-rolled from
+    the start with the same seed.  Only agent_i's total reward is returned, as
+    the experiment measures how the joint perturbation affects agent_i's outcome.
+
+    Args:
+        maddpg             : MADDPG agent
+        env                : wrapped PettingZoo environment
+        seed               : episode seed (must reproduce the same trajectory)
+        target_timestep    : the single step at which both agents are perturbed
+        agent_i_idx        : integer index of the observed agent (reward tracked)
+        agent_j_idx        : integer index of the perturbing agent
+        perturbed_action_i : numpy array shape [1, dim_i]  (a_i + ε·u_1)
+        perturbed_action_j : numpy array shape [1, dim_j]  (a_j - ε·v_1)
+
+    Returns:
+        total_reward_i : float  agent i's cumulative reward over the full episode
+    """
+    _set_seeds(seed)
+    with torch.no_grad():
+        maddpg.prep_rollouts(device=DEVICE)
+
+    obs = env.reset(seed=seed)
+    total_reward = 0.0
+    timestep = 0
+
+    while True:
+        torch_obs = [
+            Variable(torch.tensor([obs[i]], dtype=torch.float32).to(torch_device),
+                     requires_grad=False)
+            for i in range(maddpg.nagents)
+        ]
+        with torch.no_grad():
+            torch_agent_actions = maddpg.step(torch_obs, explore=False)
+            agent_actions = [ac.data.cpu().numpy() for ac in torch_agent_actions]
+
+        # Swap in both perturbed actions at the target step only
+        if timestep == target_timestep:
+            agent_actions[agent_i_idx] = perturbed_action_i  # shape [1, dim_i]
+            agent_actions[agent_j_idx] = perturbed_action_j  # shape [1, dim_j]
+
+        actions = {name: agent_actions[i].squeeze()
+                   for i, name in enumerate(env.possible_agents)}
+
+        next_obs, rewards, dones, _ = env.step(actions)
+        total_reward += float(rewards[0][agent_i_idx])
+        obs = next_obs
+        timestep += 1
+
+        if dones.all():
+            break
+
+    return total_reward
+
+
+def _save_qr_drop_csv(df, logdir):
+    """
+    Save raw per-timestep QR-drop data and a per-pair summary CSV.
+
+    Summary columns: agent_j, agent_i, mean/std frob_norm, sigma_max, delta_q,
+                     and (when available) delta_r columns.
+    delta_q = q_nominal - q_perturbed  (positive = Q decreased)
+    delta_r = r_nominal - r_perturbed  (positive = reward decreased)
+    """
+    csv_dir = os.path.join(logdir, 'csv_data')
+    os.makedirs(csv_dir, exist_ok=True)
+
+    raw_path = os.path.join(csv_dir, 'raw_qr_drop_data.csv')
+    df.to_csv(raw_path, index=False)
+    print(f"  Raw data saved      : {raw_path}")
+
+    agg_spec = {
+        'mean_frob_norm':  ('frob_norm',  'mean'),
+        'std_frob_norm':   ('frob_norm',  'std'),
+        'mean_sigma_max':  ('sigma_max',  'mean'),
+        'std_sigma_max':   ('sigma_max',  'std'),
+        'mean_delta_q':    ('delta_q',    'mean'),
+        'std_delta_q':     ('delta_q',    'std'),
+        'n_samples':       ('frob_norm',  'count'),
+    }
+    if 'delta_r_i' in df.columns:
+        agg_spec['mean_delta_r_i']      = ('delta_r_i',      'mean')
+        agg_spec['std_delta_r_i']       = ('delta_r_i',      'std')
+        agg_spec['mean_r_nominal_i']    = ('r_nominal_i',    'mean')
+        agg_spec['mean_r_perturbed_i']  = ('r_perturbed_i', 'mean')
+
+    summary = (
+        df.groupby(['agent_j', 'agent_i'])
+          .agg(**agg_spec)
+          .reset_index()
+    )
+    summary_path = os.path.join(csv_dir, 'mean_qr_drop_by_pair.csv')
+    summary.to_csv(summary_path, index=False)
+    print(f"  Summary CSV saved   : {summary_path}")
+    print(f"\n  Per-pair summary:")
+    print(summary.to_string(index=False))
+    return summary_path
+
+
+def _save_qr_drop_plots(df, logdir):
+    """
+    Scatter plots for the QR-drop experiment:
+      - ||H||_F vs Δq  (per pair, combined + individual)
+      - σ_max   vs Δq  (per pair, combined + individual)
+      - Δq      vs Δr  (per pair, combined; only when env data is available)
+      - ||H||_F vs Δr  (per pair, combined; only when env data is available)
+
+    All drop quantities defined as normal - perturbed (positive = decreased).
+    Each subplot includes a linear regression line and Pearson correlation.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from scipy import stats
+
+    plots_dir = os.path.join(logdir, 'plots')
+    os.makedirs(plots_dir, exist_ok=True)
+
+    pairs = df[['agent_i', 'agent_j']].drop_duplicates().values
+    n_pairs = len(pairs)
+    n_cols = min(3, int(np.ceil(np.sqrt(n_pairs))))
+    n_rows = int(np.ceil(n_pairs / n_cols))
+
+    def _scatter_panel(ax, x, y, xlabel, ylabel, title):
+        """Draw scatter + regression line + Pearson r on a single Axes."""
+        ax.scatter(x, y, alpha=0.3, s=10, c='steelblue')
+        if len(x) > 1:
+            try:
+                z = np.polyfit(x, y, 1)
+                p = np.poly1d(z)
+                x_fit = np.linspace(x.min(), x.max(), 100)
+                ax.plot(x_fit, p(x_fit), 'r--', linewidth=2,
+                        label=f'y={z[0]:.3f}x+{z[1]:.3f}')
+                r, pval = stats.pearsonr(x, y)
+                ax.text(0.05, 0.95, f'r = {r:.3f}\np = {pval:.3e}',
+                        transform=ax.transAxes, verticalalignment='top',
+                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+                ax.legend(fontsize=9)
+            except Exception:
+                pass
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3)
+
+    def _combined_figure(x_col, y_col, xlabel, ylabel, filename):
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows))
+        if n_pairs == 1:
+            axes = np.array([axes])
+        axes = axes.flatten()
+        for idx, (agent_i, agent_j) in enumerate(pairs):
+            pair_data = df[
+                (df['agent_i'] == agent_i) & (df['agent_j'] == agent_j)
+            ].dropna(subset=[x_col, y_col])
+            if len(pair_data) == 0:
+                axes[idx].axis('off')
+                continue
+            _scatter_panel(axes[idx],
+                           pair_data[x_col].values, pair_data[y_col].values,
+                           xlabel, ylabel,
+                           f'agent_{agent_j} \u2192 agent_{agent_i}')
+        for idx in range(n_pairs, len(axes)):
+            axes[idx].axis('off')
+        plt.tight_layout()
+        path = os.path.join(plots_dir, filename)
+        plt.savefig(path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  Saved: {path}")
+
+    # --- Combined figures ---
+    _combined_figure('frob_norm', 'delta_q',
+                     '||H||_F (Frobenius Norm)', '\u0394q (nominal \u2212 perturbed)',
+                     'qr_drop_frob_vs_delta_q_all_pairs.png')
+    _combined_figure('sigma_max', 'delta_q',
+                     '\u03c3_max (Top Singular Value)', '\u0394q (nominal \u2212 perturbed)',
+                     'qr_drop_sigma_vs_delta_q_all_pairs.png')
+
+    if 'delta_r_i' in df.columns:
+        _combined_figure('delta_q', 'delta_r_i',
+                         '\u0394q (critic)', '\u0394r (env, nominal \u2212 perturbed)',
+                         'qr_drop_delta_q_vs_delta_r_all_pairs.png')
+        _combined_figure('frob_norm', 'delta_r_i',
+                         '||H||_F (Frobenius Norm)', '\u0394r (nominal \u2212 perturbed)',
+                         'qr_drop_frob_vs_delta_r_all_pairs.png')
+
+    # --- Individual plots per pair: ||H||_F vs Δq  AND  σ_max vs Δq ---
+    for agent_i, agent_j in pairs:
+        pair_data = df[
+            (df['agent_i'] == agent_i) & (df['agent_j'] == agent_j)
+        ].dropna(subset=['frob_norm', 'sigma_max', 'delta_q'])
+        if len(pair_data) == 0:
+            continue
+
+        for x_col, x_label, fname_prefix in [
+            ('frob_norm', '||H||_F (Frobenius Norm)',         'frob'),
+            ('sigma_max', '\u03c3_max (Top Singular Value)', 'sigma'),
+        ]:
+            fig, ax = plt.subplots(figsize=(8, 6))
+            x = pair_data[x_col].values
+            y = pair_data['delta_q'].values
+            ax.scatter(x, y, alpha=0.3, s=20, c='steelblue')
+            if len(x) > 1:
+                try:
+                    z = np.polyfit(x, y, 1)
+                    p = np.poly1d(z)
+                    x_fit = np.linspace(x.min(), x.max(), 100)
+                    ax.plot(x_fit, p(x_fit), 'r--', linewidth=2,
+                            label=f'y={z[0]:.3f}x+{z[1]:.3f}')
+                    r, pval = stats.pearsonr(x, y)
+                    ax.text(0.05, 0.95,
+                            f'Pearson r = {r:.3f}\np-value = {pval:.3e}',
+                            transform=ax.transAxes, verticalalignment='top',
+                            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+                            fontsize=12)
+                    ax.legend(fontsize=11)
+                except Exception:
+                    pass
+            ax.set_xlabel(x_label, fontsize=12)
+            ax.set_ylabel('\u0394q (nominal \u2212 perturbed)', fontsize=12)
+            ax.set_title(f'\u0394q: agent_{agent_j} \u2192 agent_{agent_i}', fontsize=14)
+            ax.grid(True, alpha=0.3)
+            plt.tight_layout()
+            ind_path = os.path.join(plots_dir,
+                                    f'delta_q_{fname_prefix}_pair_{agent_j}_to_{agent_i}.png')
+            plt.savefig(ind_path, dpi=150, bbox_inches='tight')
+            plt.close()
+
+    print(f"  All plots saved to   : {plots_dir}")
+    return plots_dir
+
+
+def qr_drop_svd_experiment(config):
+    """
+    Multi-seed SVD QR-drop experiment.
+
+    For every off-diagonal pair (i, j) at every timestep of every seed episode:
+      - Computes H_ij = ∇_{a_j} ∇_{a_i} Q_i and its SVD
+      - Builds perturbation vectors δ_ai = +ε·u_1, δ_aj = -ε·v_1 so that
+            δ_ai^T H_ij δ_aj = -σ_max  (maximally negative cross-term)
+      - Measures Δq = Q_i(a) - Q_i(a_i+δ_ai, a_j+δ_aj)  (positive = Q decreased)
+      - Replays a separate episode with only that timestep perturbed (both i and j)
+        to measure Δr = r_nominal - r_perturbed for agent i  (positive = reward decreased)
+
+    Saves:
+      csv_data/raw_qr_drop_data.csv         — every (seed, timestep, pair) row
+      csv_data/mean_qr_drop_by_pair.csv     — mean frob norm, sigma_max, delta_q,
+                                              delta_r per (agent_j, agent_i) pair
+      plots/qr_drop_frob_vs_delta_q_all_pairs.png
+      plots/qr_drop_sigma_vs_delta_q_all_pairs.png
+      plots/qr_drop_delta_q_vs_delta_r_all_pairs.png
+      plots/qr_drop_frob_vs_delta_r_all_pairs.png
+      plots/delta_q_frob_pair_<j>_to_<i>.png   — individual ||H||_F vs Δq scatter
+      plots/delta_q_sigma_pair_<j>_to_<i>.png  — individual σ_max vs Δq scatter
+
+    Args:
+        config: Namespace with fields:
+                  env_id, model_path, epsilon, total_experiments
+    """
+    maddpg = MADDPG.init_from_save(config.model_path)
+
+    if maddpg.discrete_action:
+        print("ERROR: qr_drop_svd_experiment requires continuous action spaces.")
+        print("SVD perturbation on one-hot vectors is not supported.")
+        return
+
+    env_type = 'continuous'
+    device_str = 'gpu' if DEVICE == 'gpu' else 'cpu'
+    maddpg.prep_training(device=device_str)
+
+    env = create_environment(config, maddpg)
+    logdir = _make_multiseed_logdir(
+        'qr_drop_svd', config.env_id, env_type,
+        maddpg.nagents, config.total_experiments
+    )
+
+    print(f"[qr_drop_svd_experiment]")
+    print(f"  env          : {config.env_id}  ({env_type})")
+    print(f"  agents       : {maddpg.nagents}")
+    print(f"  seeds        : {config.total_experiments}")
+    print(f"  epsilon      : {config.epsilon}")
+    print(f"  output       : {logdir}")
+
+    all_records = []
+    for seed in tqdm(range(config.total_experiments), desc="Seeds"):
+        records, perturbed_actions_by_ts, normal_rewards = _run_svd_qr_drop_episode(
+            maddpg, env, seed, config.epsilon
+        )
+
+        # For each (timestep, pair) replay a dual-perturbed episode to measure agent i's reward drop
+        for record in records:
+            t  = record['timestep']
+            ai = record['agent_i']
+            aj = record['agent_j']
+
+            pa = perturbed_actions_by_ts[t][(ai, aj)]
+            perturbed_reward_i = _run_dual_perturbed_episode(
+                maddpg, env, seed, t, ai, aj,
+                pa['perturbed_action_i'], pa['perturbed_action_j']
+            )
+
             record['normal_reward_i']    = float(normal_rewards[ai])
             record['perturbed_reward_i'] = perturbed_reward_i
             record['reward_drop_i']      = float(normal_rewards[ai]) - perturbed_reward_i
@@ -676,8 +1082,8 @@ def svd_coupling_experiment(config):
     print(f"\n  Collected {n_points} data points across {config.total_experiments} seeds")
 
     df = pd.DataFrame(all_records)
-    _save_svd_coupling_csv(df, logdir)
-    _save_svd_coupling_plots(df, logdir)
+    _save_qr_drop_csv(df, logdir)
+    _save_qr_drop_plots(df, logdir)
 
     print("Done.")
 
@@ -709,6 +1115,17 @@ def _build_parser():
     sc.add_argument('--total_experiments', type=int, default=100,
                     help="Number of seed episodes to run (default: 100)")
 
+    # --- qr_drop_svd ---
+    qr = sub.add_parser('qr_drop_svd',
+                        help='Multi-seed SVD QR-drop: joint perturbation to minimise Q '
+                             'via cross-Hessian coupling')
+    qr.add_argument('env_id', help="PettingZoo environment name (e.g. simple_spread)")
+    qr.add_argument('model_path', help="Path to saved MADDPG model")
+    qr.add_argument('--epsilon', type=float, default=0.01,
+                    help="Perturbation magnitude for SVD directions (default: 0.01)")
+    qr.add_argument('--total_experiments', type=int, default=100,
+                    help="Number of seed episodes to run (default: 100)")
+
     return parser
 
 
@@ -719,6 +1136,8 @@ def main():
         frob_norm_episode_experiment(config)
     elif config.experiment == 'grad_shift_svd_coupling':
         svd_coupling_experiment(config)
+    elif config.experiment == 'qr_drop_svd':
+        qr_drop_svd_experiment(config)
 
 
 if __name__ == '__main__':
