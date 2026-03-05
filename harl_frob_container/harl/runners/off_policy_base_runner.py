@@ -98,11 +98,31 @@ class OffPolicyBaseRunner:
         )
         self.agent_types = getattr(self.envs, "agent_types", None)
         self.type_to_agent_ids = getattr(self.envs, "type_to_agent_ids", None)
+        self.agent_id_to_type = getattr(self.envs, "agent_id_to_type", None)
 
         if self.enable_heterogeneous_agents:
-            if self.type_to_agent_ids is None:
+            if (
+                self.agent_types is None
+                or self.type_to_agent_ids is None
+                or self.agent_id_to_type is None
+            ):
                 raise ValueError(
-                    "Heterogeneous mode requires environment metadata: type_to_agent_ids"
+                    "Heterogeneous mode requires environment metadata: "
+                    "agent_types/type_to_agent_ids/agent_id_to_type"
+                )
+            if self.share_param:
+                raise ValueError(
+                    "share_param=True is not supported with enable_heterogeneous_agents=True; "
+                    "set share_param=False to avoid cross-type parameter sharing."
+                )
+            if (
+                self.state_type == "EP"
+                and env_args.get("reward_mode", "global_sum_shared") == "individual"
+                and any(len(agent_ids) > 1 for agent_ids in self.type_to_agent_ids.values())
+            ):
+                raise ValueError(
+                    "state_type='EP' with reward_mode='individual' and multiple agents per type "
+                    "is unsupported in heterogeneous mode; use state_type='FP' or a shared/team reward mode."
                 )
             self.type_order = list(self.type_to_agent_ids.keys())
         else:
@@ -753,7 +773,7 @@ class OffPolicyBaseRunner:
             self.critic.restore(model_dir)
             if self.value_normalizer is not None:
                 self.value_normalizer.load_state_dict(
-                    torch.load(find_checkpoint(model_dir, "value_normalizer"))
+                    torch.load(find_checkpoint(model_dir, "value_normalizer"), map_location=self.device)
                 )
 
     def save(self, mean_reward=None):
