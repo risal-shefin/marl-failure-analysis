@@ -96,6 +96,7 @@ class OffPolicyBaseRunner:
             args["env"] == "pettingzoo_mpe"
             and env_args.get("enable_heterogeneous_agents", False)
         )
+        self.eval_reward_mode = self.algo_args["eval"].get("eval_reward_mode", "team")
         self.agent_types = getattr(self.envs, "agent_types", None)
         self.type_to_agent_ids = getattr(self.envs, "type_to_agent_ids", None)
         self.agent_id_to_type = getattr(self.envs, "agent_id_to_type", None)
@@ -125,6 +126,10 @@ class OffPolicyBaseRunner:
                     "is unsupported in heterogeneous mode; use state_type='FP' or a shared/team reward mode."
                 )
             self.type_order = list(self.type_to_agent_ids.keys())
+            if self.eval_reward_mode not in ["team", "competitive"]:
+                raise ValueError(
+                    f"Unknown eval_reward_mode={self.eval_reward_mode}; expected 'team' or 'competitive'."
+                )
         else:
             self.type_order = None
 
@@ -247,6 +252,25 @@ class OffPolicyBaseRunner:
                 self.alpha.append(torch.exp(_log_alpha.detach()))
         elif "alpha" in self.algo_args["algo"].keys():
             self.alpha = [self.algo_args["algo"]["alpha"]] * self.num_agents
+
+    def _compute_type_eval_metrics(self, eval_rewards_array):
+        """Compute per-type eval metrics according to eval_reward_mode."""
+        team_metrics = {
+            agent_type: float(np.mean(eval_rewards_array[:, agent_ids, :]))
+            for agent_type, agent_ids in self.type_to_agent_ids.items()
+        }
+        if self.eval_reward_mode == "team":
+            return team_metrics
+
+        competitive_metrics = {}
+        for agent_type in self.type_order:
+            other_types = [t for t in self.type_order if t != agent_type]
+            if len(other_types) == 0:
+                competitive_metrics[agent_type] = team_metrics[agent_type]
+            else:
+                other_mean = float(np.mean([team_metrics[t] for t in other_types]))
+                competitive_metrics[agent_type] = team_metrics[agent_type] - other_mean
+        return competitive_metrics
 
     def run(self):
         """Run the training (or rendering) pipeline."""
@@ -688,10 +712,7 @@ class OffPolicyBaseRunner:
                     "eval_average_episode_length", eval_avg_len, step
                 )
                 if self.enable_heterogeneous_agents:
-                    type_metrics = {
-                        agent_type: float(np.mean(eval_episode_rewards[:, agent_ids, :]))
-                        for agent_type, agent_ids in self.type_to_agent_ids.items()
-                    }
+                    type_metrics = self._compute_type_eval_metrics(eval_episode_rewards)
                     return {"overall": float(eval_avg_rew), "by_type": type_metrics}
                 return eval_avg_rew
 
