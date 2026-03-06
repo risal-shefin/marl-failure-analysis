@@ -440,6 +440,7 @@ class OnPolicyBaseRunner:
                         for agent_type, type_eval_reward in eval_reward["by_type"].items():
                             if type_eval_reward >= self.best_eval_reward_by_type[agent_type]:
                                 self.best_eval_reward_by_type[agent_type] = type_eval_reward
+                                print(f"Saving model with best reward for agent type {agent_type}: {type_eval_reward}", flush=True)
                                 self.save_by_agent_type(agent_type, type_eval_reward)
                     else:
                         if eval_reward >= self.best_eval_reward:
