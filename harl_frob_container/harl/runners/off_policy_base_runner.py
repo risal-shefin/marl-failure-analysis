@@ -92,6 +92,47 @@ class OffPolicyBaseRunner:
                 else None
             )
         self.num_agents = get_num_agents(args["env"], env_args, self.envs)
+        self.enable_heterogeneous_agents = (
+            args["env"] == "pettingzoo_mpe"
+            and env_args.get("enable_heterogeneous_agents", False)
+        )
+        self.eval_reward_mode = self.algo_args["eval"].get("eval_reward_mode", "team")
+        self.agent_types = getattr(self.envs, "agent_types", None)
+        self.type_to_agent_ids = getattr(self.envs, "type_to_agent_ids", None)
+        self.agent_id_to_type = getattr(self.envs, "agent_id_to_type", None)
+
+        if self.enable_heterogeneous_agents:
+            if (
+                self.agent_types is None
+                or self.type_to_agent_ids is None
+                or self.agent_id_to_type is None
+            ):
+                raise ValueError(
+                    "Heterogeneous mode requires environment metadata: "
+                    "agent_types/type_to_agent_ids/agent_id_to_type"
+                )
+            if self.share_param:
+                raise ValueError(
+                    "share_param=True is not supported with enable_heterogeneous_agents=True; "
+                    "set share_param=False to avoid cross-type parameter sharing."
+                )
+            if (
+                self.state_type == "EP"
+                and env_args.get("reward_mode", "global_sum_shared") == "individual"
+                and any(len(agent_ids) > 1 for agent_ids in self.type_to_agent_ids.values())
+            ):
+                raise ValueError(
+                    "state_type='EP' with reward_mode='individual' and multiple agents per type "
+                    "is unsupported in heterogeneous mode; use state_type='FP' or a shared/team reward mode."
+                )
+            self.type_order = list(self.type_to_agent_ids.keys())
+            if self.eval_reward_mode not in ["team", "competitive"]:
+                raise ValueError(
+                    f"Unknown eval_reward_mode={self.eval_reward_mode}; expected 'team' or 'competitive'."
+                )
+        else:
+            self.type_order = None
+
         self.agent_deaths = np.zeros(
             (self.algo_args["train"]["n_rollout_threads"], self.num_agents, 1)
         )
@@ -174,6 +215,12 @@ class OffPolicyBaseRunner:
 
         self.total_it = 0  # total iteration
         self.best_eval_reward = -np.inf
+        self.eval_start_step = self.algo_args["eval"].get("eval_start_step", 0)
+        self.best_eval_reward_by_type = (
+            {agent_type: -np.inf for agent_type in self.type_order}
+            if self.enable_heterogeneous_agents
+            else None
+        )
 
         if (
             "auto_alpha" in self.algo_args["algo"].keys()
@@ -206,6 +253,25 @@ class OffPolicyBaseRunner:
                 self.alpha.append(torch.exp(_log_alpha.detach()))
         elif "alpha" in self.algo_args["algo"].keys():
             self.alpha = [self.algo_args["algo"]["alpha"]] * self.num_agents
+
+    def _compute_type_eval_metrics(self, eval_rewards_array):
+        """Compute per-type eval metrics according to eval_reward_mode."""
+        team_metrics = {
+            agent_type: float(np.mean(eval_rewards_array[:, agent_ids, :]))
+            for agent_type, agent_ids in self.type_to_agent_ids.items()
+        }
+        if self.eval_reward_mode == "team":
+            return team_metrics
+
+        competitive_metrics = {}
+        for agent_type in self.type_order:
+            other_types = [t for t in self.type_order if t != agent_type]
+            if len(other_types) == 0:
+                competitive_metrics[agent_type] = team_metrics[agent_type]
+            else:
+                other_mean = float(np.mean([team_metrics[t] for t in other_types]))
+                competitive_metrics[agent_type] = team_metrics[agent_type] - other_mean
+        return competitive_metrics
 
     def run(self):
         """Run the training (or rendering) pipeline."""
@@ -282,14 +348,22 @@ class OffPolicyBaseRunner:
                     self.algo_args["train"]["warmup_steps"]
                     + step * self.algo_args["train"]["n_rollout_threads"]
                 )
+                if cur_step < self.eval_start_step:
+                    continue
                 if self.algo_args["eval"]["use_eval"]:
                     print(
                         f"Env {self.args['env']} Task {self.task_name} Algo {self.args['algo']} Exp {self.args['exp_name']} Evaluation at step {cur_step} / {self.algo_args['train']['num_env_steps']}:"
                     )
                     eval_reward = self.eval(cur_step)
-                    if eval_reward >= self.best_eval_reward:
-                        self.best_eval_reward = eval_reward
-                        self.save(eval_reward)
+                    if self.enable_heterogeneous_agents:
+                        for agent_type, type_eval_reward in eval_reward["by_type"].items():
+                            if type_eval_reward >= self.best_eval_reward_by_type[agent_type]:
+                                self.best_eval_reward_by_type[agent_type] = type_eval_reward
+                                self.save_by_agent_type(agent_type, type_eval_reward)
+                    else:
+                        if eval_reward >= self.best_eval_reward:
+                            self.best_eval_reward = eval_reward
+                            self.save(eval_reward)
                 else:
                     print(
                         f"Env {self.args['env']} Task {self.task_name} Algo {self.args['algo']} Exp {self.args['exp_name']} Step {cur_step} / {self.algo_args['train']['num_env_steps']}, average step reward in buffer: {self.buffer.get_mean_rewards()}.\n"
@@ -640,6 +714,9 @@ class OffPolicyBaseRunner:
                 self.writter.add_scalar(
                     "eval_average_episode_length", eval_avg_len, step
                 )
+                if self.enable_heterogeneous_agents:
+                    type_metrics = self._compute_type_eval_metrics(eval_episode_rewards)
+                    return {"overall": float(eval_avg_rew), "by_type": type_metrics}
                 return eval_avg_rew
 
     @torch.no_grad()
@@ -720,7 +797,7 @@ class OffPolicyBaseRunner:
             self.critic.restore(model_dir)
             if self.value_normalizer is not None:
                 self.value_normalizer.load_state_dict(
-                    torch.load(find_checkpoint(model_dir, "value_normalizer"))
+                    torch.load(find_checkpoint(model_dir, "value_normalizer"), map_location=self.device)
                 )
 
     def save(self, mean_reward=None):
@@ -734,6 +811,19 @@ class OffPolicyBaseRunner:
                 self.value_normalizer.state_dict(),
                 str(self.save_dir) + f"/value_normalizer{suffix}.pt",
             )
+
+    def save_by_agent_type(self, agent_type, mean_reward):
+        """Save checkpoints for agents of one type based on that type's eval reward."""
+        suffix = f"_type_{agent_type}_rew{mean_reward:.4f}"
+        for agent_id in self.type_to_agent_ids[agent_type]:
+            self.actor[agent_id].save(self.save_dir, agent_id, suffix)
+        self.critic.save(self.save_dir, suffix)
+        if self.value_normalizer is not None:
+            torch.save(
+                self.value_normalizer.state_dict(),
+                str(self.save_dir) + f"/value_normalizer{suffix}.pt",
+            )
+
 
     def close(self):
         """Close environment, writter, and log file."""

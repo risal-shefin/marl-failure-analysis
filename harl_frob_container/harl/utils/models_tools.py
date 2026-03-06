@@ -8,10 +8,14 @@ import torch.nn as nn
 
 
 def find_checkpoint(model_dir, stem):
-    """Resolve a checkpoint path, supporting reward-suffixed filenames.
+    """Resolve a checkpoint path, supporting reward/type-suffixed filenames.
 
     Looks for ``{model_dir}/{stem}.pt`` first. If not found, searches for
-    ``{model_dir}/{stem}_rew*.pt`` and returns the one with the highest reward.
+    ``{model_dir}/{stem}*.pt`` and returns the one with the highest parsed reward
+    from the trailing ``_rew<value>`` segment (if present).
+
+    This supports both legacy names (e.g. ``actor_agent0_rew1.23.pt``) and
+    type-specific names (e.g. ``actor_agent0_type_agent_rew1.23.pt``).
 
     Args:
         model_dir: directory containing checkpoint files.
@@ -24,22 +28,29 @@ def find_checkpoint(model_dir, stem):
     plain = os.path.join(str(model_dir), f"{stem}.pt")
     if os.path.isfile(plain):
         return plain
-    matches = glob.glob(os.path.join(str(model_dir), f"{stem}_rew*.pt"))
+
+    matches = glob.glob(os.path.join(str(model_dir), f"{stem}*.pt"))
     if not matches:
         raise FileNotFoundError(
             f"No checkpoint found for '{stem}' in '{model_dir}'. "
-            f"Expected '{plain}' or a reward-suffixed variant."
+            f"Expected '{plain}' or a suffixed variant."
         )
 
     def _extract_reward(path):
-        name = os.path.basename(path)  # e.g. actor_agent0_rew12.3456.pt
+        name = os.path.basename(path)  # e.g. actor_agent0_type_agent_rew12.3456.pt
+        core = name[: -len('.pt')] if name.endswith('.pt') else name
+        rew_marker = '_rew'
+        idx = core.rfind(rew_marker)
+        if idx == -1:
+            return float('-inf')
         try:
-            return float(name[len(stem) + len("_rew") : -len(".pt")])
+            return float(core[idx + len(rew_marker) :])
         except ValueError:
-            return float("-inf")
+            return float('-inf')
 
-    print("Loading from:", max(matches, key=_extract_reward))
-    return max(matches, key=_extract_reward)
+    best_path = max(matches, key=_extract_reward)
+    print("Loading from:", best_path)
+    return best_path
 
 
 def init_device(args):

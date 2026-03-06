@@ -23,14 +23,40 @@ class OnPolicyHARunner(OnPolicyBaseRunner):
         )
 
         # compute advantages
-        if self.value_normalizer is not None:
-            advantages = self.critic_buffer.returns[
-                :-1
-            ] - self.value_normalizer.denormalize(self.critic_buffer.value_preds[:-1])
+        if not self.enable_heterogeneous_agents:
+            if self.value_normalizer is not None:
+                advantages = self.critic_buffer.returns[
+                    :-1
+                ] - self.value_normalizer.denormalize(self.critic_buffer.value_preds[:-1])
+            else:
+                advantages = (
+                    self.critic_buffer.returns[:-1] - self.critic_buffer.value_preds[:-1]
+                )
         else:
-            advantages = (
-                self.critic_buffer.returns[:-1] - self.critic_buffer.value_preds[:-1]
+            advantages = np.zeros(
+                (
+                    self.algo_args["train"]["episode_length"],
+                    self.algo_args["train"]["n_rollout_threads"],
+                    self.num_agents,
+                    1,
+                ),
+                dtype=np.float32,
             )
+            for agent_type in self.type_order:
+                critic_buffer = self.critic_buffers_by_type[agent_type]
+                value_normalizer = self.value_normalizers_by_type[agent_type]
+                if value_normalizer is not None:
+                    type_adv = critic_buffer.returns[:-1] - value_normalizer.denormalize(
+                        critic_buffer.value_preds[:-1]
+                    )
+                else:
+                    type_adv = critic_buffer.returns[:-1] - critic_buffer.value_preds[:-1]
+                type_agent_ids = self.type_to_agent_ids[agent_type]
+                if self.state_type == "EP":
+                    for aid in type_agent_ids:
+                        advantages[:, :, aid, :] = type_adv
+                elif self.state_type == "FP":
+                    advantages[:, :, type_agent_ids, :] = type_adv
 
         # normalize advantages for FP
         if self.state_type == "FP":
@@ -84,8 +110,13 @@ class OnPolicyHARunner(OnPolicyBaseRunner):
 
             # update actor
             if self.state_type == "EP":
+                ep_advantages = (
+                    advantages.copy()
+                    if not self.enable_heterogeneous_agents
+                    else advantages[:, :, agent_id].copy()
+                )
                 actor_train_info = self.actor[agent_id].train(
-                    self.actor_buffer[agent_id], advantages.copy(), "EP"
+                    self.actor_buffer[agent_id], ep_advantages, "EP"
                 )
             elif self.state_type == "FP":
                 actor_train_info = self.actor[agent_id].train(
@@ -125,7 +156,17 @@ class OnPolicyHARunner(OnPolicyBaseRunner):
             actor_train_infos.append(actor_train_info)
 
         # update critic
-        critic_train_info = self.critic.train(self.critic_buffer, self.value_normalizer)
+        if not self.enable_heterogeneous_agents:
+            critic_train_info = self.critic.train(self.critic_buffer, self.value_normalizer)
+        else:
+            critic_train_info = {}
+            for agent_type in self.type_order:
+                type_info = self.critics_by_type[agent_type].train(
+                    self.critic_buffers_by_type[agent_type],
+                    self.value_normalizers_by_type[agent_type],
+                )
+                for k, v in type_info.items():
+                    critic_train_info[f"type_{agent_type}/{k}"] = v
 
         if self.enable_central_q:
             for agent_id in range(self.num_agents):

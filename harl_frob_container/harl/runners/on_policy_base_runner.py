@@ -24,6 +24,15 @@ from harl.utils.models_tools import init_device, find_checkpoint
 from harl.utils.configs_tools import init_dir, save_config
 from harl.envs import LOGGER_REGISTRY
 
+class _MeanRewardProxy:
+    """Adapter exposing get_mean_rewards() for logger.episode_log()."""
+
+    def __init__(self, mean_reward):
+        self._mean_reward = mean_reward
+
+    def get_mean_rewards(self):
+        return self._mean_reward
+
 
 class OnPolicyBaseRunner:
     """Base runner for on-policy algorithms."""
@@ -91,9 +100,52 @@ class OnPolicyBaseRunner:
             )
         self.num_agents = get_num_agents(args["env"], env_args, self.envs)
 
+        self.enable_heterogeneous_agents = (
+            args["env"] == "pettingzoo_mpe"
+            and env_args.get("enable_heterogeneous_agents", False)
+        )
+        self.eval_reward_mode = self.algo_args["eval"].get("eval_reward_mode", "team")
+        self.agent_types = getattr(self.envs, "agent_types", None)
+        self.type_to_agent_ids = getattr(self.envs, "type_to_agent_ids", None)
+        self.agent_id_to_type = getattr(self.envs, "agent_id_to_type", None)
+
         print("share_observation_space: ", self.envs.share_observation_space)
         print("observation_space: ", self.envs.observation_space)
         print("action_space: ", self.envs.action_space)
+
+        if self.enable_heterogeneous_agents:
+            if (
+                self.agent_types is None
+                or self.type_to_agent_ids is None
+                or self.agent_id_to_type is None
+            ):
+                raise ValueError(
+                    "Heterogeneous mode requires environment metadata: "
+                    "agent_types/type_to_agent_ids/agent_id_to_type"
+                )
+            if self.share_param:
+                raise ValueError(
+                    "share_param=True is not supported with enable_heterogeneous_agents=True; "
+                    "set share_param=False to avoid cross-type parameter sharing."
+                )
+            self.type_order = list(self.type_to_agent_ids.keys())
+            if self.eval_reward_mode not in ["team", "competitive"]:
+                raise ValueError(
+                    f"Unknown eval_reward_mode={self.eval_reward_mode}; expected 'team' or 'competitive'."
+                )
+            self.type_to_critic_index = {t: i for i, t in enumerate(self.type_order)}
+            if (
+                self.state_type == "EP"
+                and env_args.get("reward_mode", "global_sum_shared") == "individual"
+                and any(len(agent_ids) > 1 for agent_ids in self.type_to_agent_ids.values())
+            ):
+                raise ValueError(
+                    "state_type='EP' with reward_mode='individual' and multiple agents per type "
+                    "is unsupported in heterogeneous mode; use state_type='FP' or a shared/team reward mode."
+                )
+        else:
+            self.type_order = None
+            self.type_to_critic_index = None
 
         # actor
         if self.share_param:
@@ -126,6 +178,7 @@ class OnPolicyBaseRunner:
                 self.actor.append(agent)
 
         self.enable_central_q = algo_args["algo"].get("enable_central_q", False)
+        self.eval_start_episode = self.algo_args["eval"].get("eval_start_episode", 1)
 
         if self.algo_args["render"]["use_render"] is False:  # train, not render
             self.actor_buffer = []
@@ -138,33 +191,67 @@ class OnPolicyBaseRunner:
                 self.actor_buffer.append(ac_bu)
 
             share_observation_space = self.envs.share_observation_space[0]
-            self.critic = VCritic(
-                {**algo_args["model"], **algo_args["algo"]},
-                share_observation_space,
-                device=self.device,
-            )
-            if self.state_type == "EP":
-                # EP stands for Environment Provided, as phrased by MAPPO paper.
-                # In EP, the global states for all agents are the same.
-                self.critic_buffer = OnPolicyCriticBufferEP(
-                    {**algo_args["train"], **algo_args["model"], **algo_args["algo"]},
+            if not self.enable_heterogeneous_agents:
+                self.critic = VCritic(
+                    {**algo_args["model"], **algo_args["algo"]},
                     share_observation_space,
+                    device=self.device,
                 )
-            elif self.state_type == "FP":
-                # FP stands for Feature Pruned, as phrased by MAPPO paper.
-                # In FP, the global states for all agents are different, and thus needs the dimension of the number of agents.
-                self.critic_buffer = OnPolicyCriticBufferFP(
-                    {**algo_args["train"], **algo_args["model"], **algo_args["algo"]},
-                    share_observation_space,
-                    self.num_agents,
-                )
-            else:
-                raise NotImplementedError
+                if self.state_type == "EP":
+                    # EP stands for Environment Provided, as phrased by MAPPO paper.
+                    # In EP, the global states for all agents are the same.
+                    self.critic_buffer = OnPolicyCriticBufferEP(
+                        {**algo_args["train"], **algo_args["model"], **algo_args["algo"]},
+                        share_observation_space,
+                    )
+                elif self.state_type == "FP":
+                    # FP stands for Feature Pruned, as phrased by MAPPO paper.
+                    # In FP, the global states for all agents are different, and thus needs the dimension of the number of agents.
+                    self.critic_buffer = OnPolicyCriticBufferFP(
+                        {**algo_args["train"], **algo_args["model"], **algo_args["algo"]},
+                        share_observation_space,
+                        self.num_agents,
+                    )
+                else:
+                    raise NotImplementedError
 
-            if self.algo_args["train"]["use_valuenorm"] is True:
-                self.value_normalizer = ValueNorm(1, device=self.device)
+                if self.algo_args["train"]["use_valuenorm"] is True:
+                    self.value_normalizer = ValueNorm(1, device=self.device)
+                else:
+                    self.value_normalizer = None
             else:
-                self.value_normalizer = None
+                self.critics_by_type = {}
+                self.critic_buffers_by_type = {}
+                self.value_normalizers_by_type = {}
+                for agent_type in self.type_order:
+                    n_type_agents = len(self.type_to_agent_ids[agent_type])
+                    self.critics_by_type[agent_type] = VCritic(
+                        {**algo_args["model"], **algo_args["algo"]},
+                        share_observation_space,
+                        device=self.device,
+                    )
+                    if self.state_type == "EP":
+                        self.critic_buffers_by_type[agent_type] = OnPolicyCriticBufferEP(
+                            {**algo_args["train"], **algo_args["model"], **algo_args["algo"]},
+                            share_observation_space,
+                        )
+                    elif self.state_type == "FP":
+                        self.critic_buffers_by_type[agent_type] = OnPolicyCriticBufferFP(
+                            {**algo_args["train"], **algo_args["model"], **algo_args["algo"]},
+                            share_observation_space,
+                            n_type_agents,
+                        )
+                    else:
+                        raise NotImplementedError
+
+                    if self.algo_args["train"]["use_valuenorm"] is True:
+                        self.value_normalizers_by_type[agent_type] = ValueNorm(1, device=self.device)
+                    else:
+                        self.value_normalizers_by_type[agent_type] = None
+                # legacy attributes retained for logger compatibility
+                self.critic = self.critics_by_type[self.type_order[0]]
+                self.critic_buffer = self.critic_buffers_by_type[self.type_order[0]]
+                self.value_normalizer = self.value_normalizers_by_type[self.type_order[0]]
 
             # per-agent centralized Q critics (optional)
             if self.enable_central_q:
@@ -206,8 +293,32 @@ class OnPolicyBaseRunner:
                 args, algo_args, env_args, self.num_agents, self.writter, self.run_dir
             )
             self.best_eval_reward = -np.inf
+            self.best_eval_reward_by_type = (
+                {agent_type: -np.inf for agent_type in self.type_order}
+                if self.enable_heterogeneous_agents
+                else None
+            )
         if self.algo_args["train"]["model_dir"] is not None:  # restore model
             self.restore()
+
+    def _compute_type_eval_metrics(self, eval_rewards_array):
+        """Compute per-type eval metrics according to eval_reward_mode."""
+        team_metrics = {
+            agent_type: float(np.mean(eval_rewards_array[:, agent_ids, :]))
+            for agent_type, agent_ids in self.type_to_agent_ids.items()
+        }
+        if self.eval_reward_mode == "team":
+            return team_metrics
+
+        competitive_metrics = {}
+        for agent_type in self.type_order:
+            other_types = [t for t in self.type_order if t != agent_type]
+            if len(other_types) == 0:
+                competitive_metrics[agent_type] = team_metrics[agent_type]
+            else:
+                other_mean = float(np.mean([team_metrics[t] for t in other_types]))
+                competitive_metrics[agent_type] = team_metrics[agent_type] - other_mean
+        return competitive_metrics
 
     def run(self):
         """Run the training (or rendering) pipeline."""
@@ -234,7 +345,11 @@ class OnPolicyBaseRunner:
                 else:
                     for agent_id in range(self.num_agents):
                         self.actor[agent_id].lr_decay(episode, episodes)
-                self.critic.lr_decay(episode, episodes)
+                if self.enable_heterogeneous_agents:
+                    for agent_type in self.type_order:
+                        self.critics_by_type[agent_type].lr_decay(episode, episodes)
+                else:
+                    self.critic.lr_decay(episode, episodes)
                 if self.enable_central_q:
                     for agent_id in range(self.num_agents):
                         self.centralized_critics[agent_id].lr_decay(episode, episodes)
@@ -294,21 +409,43 @@ class OnPolicyBaseRunner:
 
             # log information
             if episode % self.algo_args["train"]["log_interval"] == 0:
+                if not self.enable_heterogeneous_agents:
+                    logging_critic_buffer = self.critic_buffer
+                else:
+                    weighted_mean_rewards = []
+                    weights = []
+                    for agent_type in self.type_order:
+                        weighted_mean_rewards.append(
+                            self.critic_buffers_by_type[agent_type].get_mean_rewards()
+                        )
+                        weights.append(len(self.type_to_agent_ids[agent_type]))
+
+                    logging_critic_buffer = _MeanRewardProxy(
+                        float(np.average(weighted_mean_rewards, weights=weights))
+                    )
+
                 self.logger.episode_log(
                     actor_train_infos,
                     critic_train_info,
                     self.actor_buffer,
-                    self.critic_buffer,
+                    logging_critic_buffer,
                 )
 
             # eval
-            if episode % self.algo_args["train"]["eval_interval"] == 0:
+            if episode >= self.eval_start_episode and episode % self.algo_args["train"]["eval_interval"] == 0:
                 if self.algo_args["eval"]["use_eval"]:
                     self.prep_rollout()
                     eval_reward = self.eval()
-                    if eval_reward >= self.best_eval_reward:
-                        self.best_eval_reward = eval_reward
-                        self.save(eval_reward)
+                    if self.enable_heterogeneous_agents:
+                        for agent_type, type_eval_reward in eval_reward["by_type"].items():
+                            if type_eval_reward >= self.best_eval_reward_by_type[agent_type]:
+                                self.best_eval_reward_by_type[agent_type] = type_eval_reward
+                                print(f"Saving model with best reward for agent type {agent_type}: {type_eval_reward}", flush=True)
+                                self.save_by_agent_type(agent_type, type_eval_reward)
+                    else:
+                        if eval_reward >= self.best_eval_reward:
+                            self.best_eval_reward = eval_reward
+                            self.save(eval_reward)
                 else:
                     self.save()
 
@@ -325,10 +462,19 @@ class OnPolicyBaseRunner:
                 self.actor_buffer[agent_id].available_actions[0] = available_actions[
                     :, agent_id
                 ].copy()
-        if self.state_type == "EP":
-            self.critic_buffer.share_obs[0] = share_obs[:, 0].copy()
-        elif self.state_type == "FP":
-            self.critic_buffer.share_obs[0] = share_obs.copy()
+        if not self.enable_heterogeneous_agents:
+            if self.state_type == "EP":
+                self.critic_buffer.share_obs[0] = share_obs[:, 0].copy()
+            elif self.state_type == "FP":
+                self.critic_buffer.share_obs[0] = share_obs.copy()
+        else:
+            if self.state_type == "EP":
+                for agent_type in self.type_order:
+                    self.critic_buffers_by_type[agent_type].share_obs[0] = share_obs[:, 0].copy()
+            elif self.state_type == "FP":
+                for agent_type in self.type_order:
+                    type_agent_ids = self.type_to_agent_ids[agent_type]
+                    self.critic_buffers_by_type[agent_type].share_obs[0] = share_obs[:, type_agent_ids].copy()
         if self.enable_central_q:
             for agent_id in range(self.num_agents):
                 if self.state_type == "EP":
@@ -369,31 +515,77 @@ class OnPolicyBaseRunner:
         action_log_probs = np.array(action_log_prob_collector).transpose(1, 0, 2)
         rnn_states = np.array(rnn_state_collector).transpose(1, 0, 2, 3)
 
-        # collect values, rnn_states_critic from 1 critic
-        if self.state_type == "EP":
-            value, rnn_state_critic = self.critic.get_values(
-                self.critic_buffer.share_obs[step],
-                self.critic_buffer.rnn_states_critic[step],
-                self.critic_buffer.masks[step],
-            )
-            # (n_threads, dim)
-            values = _t2n(value)
-            rnn_states_critic = _t2n(rnn_state_critic)
-        elif self.state_type == "FP":
-            value, rnn_state_critic = self.critic.get_values(
-                np.concatenate(self.critic_buffer.share_obs[step]),
-                np.concatenate(self.critic_buffer.rnn_states_critic[step]),
-                np.concatenate(self.critic_buffer.masks[step]),
-            )  # concatenate (n_threads, n_agents, dim) into (n_threads * n_agents, dim)
-            # split (n_threads * n_agents, dim) into (n_threads, n_agents, dim)
-            values = np.array(
-                np.split(_t2n(value), self.algo_args["train"]["n_rollout_threads"])
-            )
-            rnn_states_critic = np.array(
-                np.split(
-                    _t2n(rnn_state_critic), self.algo_args["train"]["n_rollout_threads"]
+        # collect values, rnn_states_critic from critic(s)
+        if not self.enable_heterogeneous_agents:
+            if self.state_type == "EP":
+                value, rnn_state_critic = self.critic.get_values(
+                    self.critic_buffer.share_obs[step],
+                    self.critic_buffer.rnn_states_critic[step],
+                    self.critic_buffer.masks[step],
                 )
+                # (n_threads, dim)
+                values = _t2n(value)
+                rnn_states_critic = _t2n(rnn_state_critic)
+            elif self.state_type == "FP":
+                value, rnn_state_critic = self.critic.get_values(
+                    np.concatenate(self.critic_buffer.share_obs[step]),
+                    np.concatenate(self.critic_buffer.rnn_states_critic[step]),
+                    np.concatenate(self.critic_buffer.masks[step]),
+                )  # concatenate (n_threads, n_agents, dim) into (n_threads * n_agents, dim)
+                # split (n_threads * n_agents, dim) into (n_threads, n_agents, dim)
+                values = np.array(
+                    np.split(_t2n(value), self.algo_args["train"]["n_rollout_threads"])
+                )
+                rnn_states_critic = np.array(
+                    np.split(
+                        _t2n(rnn_state_critic), self.algo_args["train"]["n_rollout_threads"]
+                    )
+                )
+        else:
+            values = np.zeros(
+                (self.algo_args["train"]["n_rollout_threads"], self.num_agents, 1),
+                dtype=np.float32,
             )
+            rnn_states_critic = np.zeros(
+                (
+                    self.algo_args["train"]["n_rollout_threads"],
+                    self.num_agents,
+                    self.recurrent_n,
+                    self.rnn_hidden_size,
+                ),
+                dtype=np.float32,
+            )
+            for agent_type in self.type_order:
+                type_agent_ids = self.type_to_agent_ids[agent_type]
+                critic_buffer = self.critic_buffers_by_type[agent_type]
+                critic = self.critics_by_type[agent_type]
+                if self.state_type == "EP":
+                    value, rnn_state_critic = critic.get_values(
+                        critic_buffer.share_obs[step],
+                        critic_buffer.rnn_states_critic[step],
+                        critic_buffer.masks[step],
+                    )
+                    value_np = _t2n(value)
+                    rnn_np = _t2n(rnn_state_critic)
+                    values[:, type_agent_ids, :] = value_np[:, None, :]
+                    rnn_states_critic[:, type_agent_ids, :, :] = rnn_np[:, None, :, :]
+                elif self.state_type == "FP":
+                    value, rnn_state_critic = critic.get_values(
+                        np.concatenate(critic_buffer.share_obs[step]),
+                        np.concatenate(critic_buffer.rnn_states_critic[step]),
+                        np.concatenate(critic_buffer.masks[step]),
+                    )
+                    value_np = np.array(
+                        np.split(_t2n(value), self.algo_args["train"]["n_rollout_threads"])
+                    )
+                    rnn_np = np.array(
+                        np.split(
+                            _t2n(rnn_state_critic),
+                            self.algo_args["train"]["n_rollout_threads"],
+                        )
+                    )
+                    values[:, type_agent_ids, :] = value_np
+                    rnn_states_critic[:, type_agent_ids, :, :] = rnn_np
 
         if self.enable_central_q:
             self._collect_central_q_values(step, actions)
@@ -453,12 +645,23 @@ class OnPolicyBaseRunner:
         )
 
         # If env is done, then reset rnn_state_critic to all zero
-        if self.state_type == "EP":
-            rnn_states_critic[dones_env == True] = np.zeros(
-                ((dones_env == True).sum(), self.recurrent_n, self.rnn_hidden_size),
-                dtype=np.float32,
-            )
-        elif self.state_type == "FP":
+        if not self.enable_heterogeneous_agents:
+            if self.state_type == "EP":
+                rnn_states_critic[dones_env == True] = np.zeros(
+                    ((dones_env == True).sum(), self.recurrent_n, self.rnn_hidden_size),
+                    dtype=np.float32,
+                )
+            elif self.state_type == "FP":
+                rnn_states_critic[dones_env == True] = np.zeros(
+                    (
+                        (dones_env == True).sum(),
+                        self.num_agents,
+                        self.recurrent_n,
+                        self.rnn_hidden_size,
+                    ),
+                    dtype=np.float32,
+                )
+        else:
             rnn_states_critic[dones_env == True] = np.zeros(
                 (
                     (dones_env == True).sum(),
@@ -529,19 +732,47 @@ class OnPolicyBaseRunner:
                 else None,
             )
 
-        if self.state_type == "EP":
-            self.critic_buffer.insert(
-                share_obs[:, 0],
-                rnn_states_critic,
-                values,
-                rewards[:, 0],
-                masks[:, 0],
-                bad_masks,
-            )
-        elif self.state_type == "FP":
-            self.critic_buffer.insert(
-                share_obs, rnn_states_critic, values, rewards, masks, bad_masks
-            )
+        if not self.enable_heterogeneous_agents:
+            if self.state_type == "EP":
+                self.critic_buffer.insert(
+                    share_obs[:, 0],
+                    rnn_states_critic,
+                    values,
+                    rewards[:, 0],
+                    masks[:, 0],
+                    bad_masks,
+                )
+            elif self.state_type == "FP":
+                self.critic_buffer.insert(
+                    share_obs, rnn_states_critic, values, rewards, masks, bad_masks
+                )
+        else:
+            for agent_type in self.type_order:
+                type_agent_ids = self.type_to_agent_ids[agent_type]
+                if self.state_type == "EP":
+                    type_rnn_states_critic = np.mean(
+                        rnn_states_critic[:, type_agent_ids], axis=1
+                    )
+                    type_values = np.mean(values[:, type_agent_ids], axis=1)
+                    type_rewards = np.mean(rewards[:, type_agent_ids], axis=1)
+                    type_masks = np.min(masks[:, type_agent_ids], axis=1)
+                    self.critic_buffers_by_type[agent_type].insert(
+                        share_obs[:, 0],
+                        type_rnn_states_critic,
+                        type_values,
+                        type_rewards,
+                        type_masks,
+                        bad_masks,
+                    )
+                elif self.state_type == "FP":
+                    self.critic_buffers_by_type[agent_type].insert(
+                        share_obs[:, type_agent_ids],
+                        rnn_states_critic[:, type_agent_ids],
+                        values[:, type_agent_ids],
+                        rewards[:, type_agent_ids],
+                        masks[:, type_agent_ids],
+                        bad_masks[:, type_agent_ids],
+                    )
 
         if self.enable_central_q:
             all_actions = actions.reshape(actions.shape[0], -1)
@@ -582,23 +813,46 @@ class OnPolicyBaseRunner:
         Compute critic evaluation of the last state,
         and then let buffer compute returns, which will be used during training.
         """
-        if self.state_type == "EP":
-            next_value, _ = self.critic.get_values(
-                self.critic_buffer.share_obs[-1],
-                self.critic_buffer.rnn_states_critic[-1],
-                self.critic_buffer.masks[-1],
-            )
-            next_value = _t2n(next_value)
-        elif self.state_type == "FP":
-            next_value, _ = self.critic.get_values(
-                np.concatenate(self.critic_buffer.share_obs[-1]),
-                np.concatenate(self.critic_buffer.rnn_states_critic[-1]),
-                np.concatenate(self.critic_buffer.masks[-1]),
-            )
-            next_value = np.array(
-                np.split(_t2n(next_value), self.algo_args["train"]["n_rollout_threads"])
-            )
-        self.critic_buffer.compute_returns(next_value, self.value_normalizer)
+        if not self.enable_heterogeneous_agents:
+            if self.state_type == "EP":
+                next_value, _ = self.critic.get_values(
+                    self.critic_buffer.share_obs[-1],
+                    self.critic_buffer.rnn_states_critic[-1],
+                    self.critic_buffer.masks[-1],
+                )
+                next_value = _t2n(next_value)
+            elif self.state_type == "FP":
+                next_value, _ = self.critic.get_values(
+                    np.concatenate(self.critic_buffer.share_obs[-1]),
+                    np.concatenate(self.critic_buffer.rnn_states_critic[-1]),
+                    np.concatenate(self.critic_buffer.masks[-1]),
+                )
+                next_value = np.array(
+                    np.split(_t2n(next_value), self.algo_args["train"]["n_rollout_threads"])
+                )
+            self.critic_buffer.compute_returns(next_value, self.value_normalizer)
+        else:
+            for agent_type in self.type_order:
+                critic = self.critics_by_type[agent_type]
+                critic_buffer = self.critic_buffers_by_type[agent_type]
+                value_normalizer = self.value_normalizers_by_type[agent_type]
+                if self.state_type == "EP":
+                    next_value, _ = critic.get_values(
+                        critic_buffer.share_obs[-1],
+                        critic_buffer.rnn_states_critic[-1],
+                        critic_buffer.masks[-1],
+                    )
+                    next_value = _t2n(next_value)
+                elif self.state_type == "FP":
+                    next_value, _ = critic.get_values(
+                        np.concatenate(critic_buffer.share_obs[-1]),
+                        np.concatenate(critic_buffer.rnn_states_critic[-1]),
+                        np.concatenate(critic_buffer.masks[-1]),
+                    )
+                    next_value = np.array(
+                        np.split(_t2n(next_value), self.algo_args["train"]["n_rollout_threads"])
+                    )
+                critic_buffer.compute_returns(next_value, value_normalizer)
 
         if self.enable_central_q:
             # Run actors on the terminal observation to obtain next actions,
@@ -640,7 +894,11 @@ class OnPolicyBaseRunner:
         """
         for agent_id in range(self.num_agents):
             self.actor_buffer[agent_id].after_update()
-        self.critic_buffer.after_update()
+        if self.enable_heterogeneous_agents:
+            for agent_type in self.type_order:
+                self.critic_buffers_by_type[agent_type].after_update()
+        else:
+            self.critic_buffer.after_update()
         if self.enable_central_q:
             for agent_id in range(self.num_agents):
                 self.centralized_critic_buffers[agent_id].after_update()
@@ -737,6 +995,10 @@ class OnPolicyBaseRunner:
                 eval_avg_rew = self.logger.eval_log(
                     eval_episode
                 )  # logger callback at the end of evaluation
+                if self.enable_heterogeneous_agents:
+                    eval_rewards_array = np.array(self.logger.eval_episode_rewards)
+                    type_metrics = self._compute_type_eval_metrics(eval_rewards_array)
+                    return {"overall": float(eval_avg_rew), "by_type": type_metrics}
                 return eval_avg_rew
 
     @torch.no_grad()
@@ -862,7 +1124,11 @@ class OnPolicyBaseRunner:
         """Prepare for rollout."""
         for agent_id in range(self.num_agents):
             self.actor[agent_id].prep_rollout()
-        self.critic.prep_rollout()
+        if self.enable_heterogeneous_agents:
+            for agent_type in self.type_order:
+                self.critics_by_type[agent_type].prep_rollout()
+        else:
+            self.critic.prep_rollout()
         if self.enable_central_q:
             for agent_id in range(self.num_agents):
                 self.centralized_critics[agent_id].prep_rollout()
@@ -871,7 +1137,11 @@ class OnPolicyBaseRunner:
         """Prepare for training."""
         for agent_id in range(self.num_agents):
             self.actor[agent_id].prep_training()
-        self.critic.prep_training()
+        if self.enable_heterogeneous_agents:
+            for agent_type in self.type_order:
+                self.critics_by_type[agent_type].prep_training()
+        else:
+            self.critic.prep_training()
         if self.enable_central_q:
             for agent_id in range(self.num_agents):
                 self.centralized_critics[agent_id].prep_training()
@@ -885,16 +1155,28 @@ class OnPolicyBaseRunner:
                 policy_actor.state_dict(),
                 str(self.save_dir) + f"/actor_agent{agent_id}{suffix}.pt",
             )
-        policy_critic = self.critic.critic
-        torch.save(
-            policy_critic.state_dict(),
-            str(self.save_dir) + f"/critic_agent{suffix}.pt",
-        )
-        if self.value_normalizer is not None:
+        if not self.enable_heterogeneous_agents:
+            policy_critic = self.critic.critic
             torch.save(
-                self.value_normalizer.state_dict(),
-                str(self.save_dir) + f"/value_normalizer{suffix}.pt",
+                policy_critic.state_dict(),
+                str(self.save_dir) + f"/critic_agent{suffix}.pt",
             )
+            if self.value_normalizer is not None:
+                torch.save(
+                    self.value_normalizer.state_dict(),
+                    str(self.save_dir) + f"/value_normalizer{suffix}.pt",
+                )
+        else:
+            for agent_type in self.type_order:
+                torch.save(
+                    self.critics_by_type[agent_type].critic.state_dict(),
+                    str(self.save_dir) + f"/critic_type_{agent_type}{suffix}.pt",
+                )
+                if self.value_normalizers_by_type[agent_type] is not None:
+                    torch.save(
+                        self.value_normalizers_by_type[agent_type].state_dict(),
+                        str(self.save_dir) + f"/value_normalizer_type_{agent_type}{suffix}.pt",
+                    )
         if self.enable_central_q:
             for agent_id in range(self.num_agents):
                 torch.save(
@@ -909,27 +1191,80 @@ class OnPolicyBaseRunner:
                         + f"/central_q_value_normalizer_agent{agent_id}{suffix}.pt",
                     )
 
+    def save_by_agent_type(self, agent_type, mean_reward):
+        """Save checkpoints for a specific agent type based on its own eval metric."""
+        suffix = f"_type_{agent_type}_rew{mean_reward:.4f}"
+        for agent_id in self.type_to_agent_ids[agent_type]:
+            policy_actor = self.actor[agent_id].actor
+            torch.save(
+                policy_actor.state_dict(),
+                str(self.save_dir) + f"/actor_agent{agent_id}{suffix}.pt",
+            )
+
+        if self.enable_heterogeneous_agents:
+            torch.save(
+                self.critics_by_type[agent_type].critic.state_dict(),
+                str(self.save_dir) + f"/critic_type_{agent_type}{suffix}.pt",
+            )
+            if self.value_normalizers_by_type[agent_type] is not None:
+                torch.save(
+                    self.value_normalizers_by_type[agent_type].state_dict(),
+                    str(self.save_dir)
+                    + f"/value_normalizer_type_{agent_type}{suffix}.pt",
+                )
+
+        if self.enable_central_q:
+            for agent_id in self.type_to_agent_ids[agent_type]:
+                torch.save(
+                    self.centralized_critics[agent_id].critic.state_dict(),
+                    str(self.save_dir)
+                    + f"/central_q_critic_agent{agent_id}{suffix}.pt",
+                )
+                if self.centralized_value_normalizers[agent_id] is not None:
+                    torch.save(
+                        self.centralized_value_normalizers[agent_id].state_dict(),
+                        str(self.save_dir)
+                        + f"/central_q_value_normalizer_agent{agent_id}{suffix}.pt",
+                    )
+
+
     def restore(self):
         """Restore model parameters."""
         model_dir = self.algo_args["train"]["model_dir"]
         for agent_id in range(self.num_agents):
             path = find_checkpoint(model_dir, f"actor_agent{agent_id}")
-            self.actor[agent_id].actor.load_state_dict(torch.load(path))
+            self.actor[agent_id].actor.load_state_dict(torch.load(path, map_location=self.device))
         if not self.algo_args["render"]["use_render"]:
-            self.critic.critic.load_state_dict(
-                torch.load(find_checkpoint(model_dir, "critic_agent"))
-            )
-            if self.value_normalizer is not None:
-                self.value_normalizer.load_state_dict(
-                    torch.load(find_checkpoint(model_dir, "value_normalizer"))
+            if not self.enable_heterogeneous_agents:
+                self.critic.critic.load_state_dict(
+                    torch.load(find_checkpoint(model_dir, "critic_agent"), map_location=self.device)
                 )
+                if self.value_normalizer is not None:
+                    self.value_normalizer.load_state_dict(
+                        torch.load(find_checkpoint(model_dir, "value_normalizer"), map_location=self.device)
+                    )
+            else:
+                for agent_type in self.type_order:
+                    self.critics_by_type[agent_type].critic.load_state_dict(
+                        torch.load(find_checkpoint(model_dir, f"critic_type_{agent_type}"), map_location=self.device)
+                    )
+                    if self.value_normalizers_by_type[agent_type] is not None:
+                        self.value_normalizers_by_type[agent_type].load_state_dict(
+                            torch.load(
+                                find_checkpoint(
+                                    model_dir, f"value_normalizer_type_{agent_type}"
+                                ),
+                                map_location=self.device,
+                            )
+                        )
             if self.enable_central_q:
                 for agent_id in range(self.num_agents):
                     self.centralized_critics[agent_id].critic.load_state_dict(
                         torch.load(
                             find_checkpoint(
                                 model_dir, f"central_q_critic_agent{agent_id}"
-                            )
+                            ),
+                            map_location=self.device,
                         )
                     )
                     if self.centralized_value_normalizers[agent_id] is not None:
@@ -938,7 +1273,8 @@ class OnPolicyBaseRunner:
                                 find_checkpoint(
                                     model_dir,
                                     f"central_q_value_normalizer_agent{agent_id}",
-                                )
+                                ),
+                                map_location=self.device,
                             )
                         )
 

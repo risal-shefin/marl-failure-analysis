@@ -37,6 +37,10 @@ eval:
   n_eval_rollout_threads: 10
   # number of episodes per evaluation
   eval_episodes: 20
+  # for heterogeneous env mode. choose from "team" and "competitive"
+  eval_reward_mode: "team"
+  # eval start after how many episodes of training
+  eval_start_episode: 1
 render:
   # whether to use render
   use_render: False
