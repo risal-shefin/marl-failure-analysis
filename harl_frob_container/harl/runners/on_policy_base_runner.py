@@ -178,6 +178,7 @@ class OnPolicyBaseRunner:
                 self.actor.append(agent)
 
         self.enable_central_q = algo_args["algo"].get("enable_central_q", False)
+        self.eval_start_episode = self.algo_args["eval"].get("eval_start_episode", 1)
 
         if self.algo_args["render"]["use_render"] is False:  # train, not render
             self.actor_buffer = []
@@ -431,7 +432,7 @@ class OnPolicyBaseRunner:
                 )
 
             # eval
-            if episode % self.algo_args["train"]["eval_interval"] == 0:
+            if episode >= self.eval_start_episode and episode % self.algo_args["train"]["eval_interval"] == 0:
                 if self.algo_args["eval"]["use_eval"]:
                     self.prep_rollout()
                     eval_reward = self.eval()

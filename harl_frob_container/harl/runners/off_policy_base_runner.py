@@ -215,6 +215,7 @@ class OffPolicyBaseRunner:
 
         self.total_it = 0  # total iteration
         self.best_eval_reward = -np.inf
+        self.eval_start_step = self.algo_args["eval"].get("eval_start_step", 0)
         self.best_eval_reward_by_type = (
             {agent_type: -np.inf for agent_type in self.type_order}
             if self.enable_heterogeneous_agents
@@ -347,6 +348,8 @@ class OffPolicyBaseRunner:
                     self.algo_args["train"]["warmup_steps"]
                     + step * self.algo_args["train"]["n_rollout_threads"]
                 )
+                if cur_step < self.eval_start_step:
+                    continue
                 if self.algo_args["eval"]["use_eval"]:
                     print(
                         f"Env {self.args['env']} Task {self.task_name} Algo {self.args['algo']} Exp {self.args['exp_name']} Evaluation at step {cur_step} / {self.algo_args['train']['num_env_steps']}:"
