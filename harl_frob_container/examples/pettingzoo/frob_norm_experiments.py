@@ -30,18 +30,17 @@ Usage examples
 --------------
     python frob_norm_experiments.py episode_gif_frob_norm \\
         --algo haddpg \\
-        --scenario simple_spread_v3 \\
         --model_dir /path/to/models \\
         --seed 0
 
     python frob_norm_experiments.py grad_shift_svd_coupling \\
         --algo haddpg \\
-        --scenario simple_spread_v3 \\
         --model_dir /path/to/models \\
         --epsilon 0.01 \\
         --total_experiments 100
 """
 import argparse
+import json
 import os
 import sys
 import random
@@ -75,11 +74,10 @@ ALL_ALGOS = OFF_POLICY_ALGOS | ON_POLICY_ALGOS
 # Model loading
 # ---------------------------------------------------------------------------
 
-def _load_harl_model(algo, model_dir, scenario):
+def _load_harl_model(model_dir):
     """
     Instantiate and restore HARL actors and the appropriate Q-function(s) from
     model_dir, returning a unified ``get_Q`` callable.
-
     Supported algorithm families
     ----------------------------
     Off-policy (haddpg, maddpg, hatd3, matd3)
@@ -92,9 +90,8 @@ def _load_harl_model(algo, model_dir, scenario):
         Requires that the model_dir was saved with ``enable_central_q: True``.
 
     Args:
-        algo      : algorithm name
         model_dir : directory containing actor/critic .pt checkpoints
-        scenario  : PettingZoo MPE scenario (e.g. 'simple_spread_v3')
+                    (config.json expected in its parent directory)
 
     Returns:
         actors     : list[actor obj] — one per agent
@@ -102,16 +99,43 @@ def _load_harl_model(algo, model_dir, scenario):
         env        : PettingZooMPEEnv
         device     : torch.device
         num_agents : int
+        algo       : str  — algorithm name read from config.json
+        scenario   : str  — scenario name read from config.json
+        rnn_cfg    : dict — recurrent_n, rnn_hidden_size, use_rnn (from model config)
     """
+    # Load config.json from parent directory of model_dir
+    config_path = os.path.join(os.path.dirname(model_dir), 'config.json')
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(
+            f"config.json not found at {config_path}. "
+            "Expected in the parent directory of model_dir."
+        )
+    print(f"  Loading config from: {config_path}")
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    algo_args = config['algo_args']
+    env_args  = config['env_args']
+    algo      = config['main_args']['algo']
+    scenario  = env_args['scenario']
+
     assert algo in ALL_ALGOS, (
-        f"Algorithm '{algo}' is not supported. "
+        f"Algorithm '{algo}' (from config.json) is not supported. "
         f"Choose from: {sorted(ALL_ALGOS)}"
     )
 
-    algo_args, env_args = get_defaults_yaml_args(algo, 'pettingzoo_mpe')
-    update_args({'scenario': scenario}, algo_args, env_args)
-
     device = init_device(algo_args['device'])
+
+    # RNN config — read from model config, mirrors runner's rnn_hidden_size / recurrent_n.
+    # Valid for both recurrent and non-recurrent actors; never introspect model weights.
+    model_cfg = algo_args['model']
+    rnn_cfg = {
+        'recurrent_n':    model_cfg['recurrent_n'],
+        'rnn_hidden_size': model_cfg['hidden_sizes'][-1],
+        'use_rnn': (
+            model_cfg.get('use_recurrent_policy', False) or
+            model_cfg.get('use_naive_recurrent_policy', False)
+        ),
+    }
 
     env = PettingZooMPEEnv(dict(env_args))
     env.reset()
@@ -173,8 +197,10 @@ def _load_harl_model(algo, model_dir, scenario):
             cq.critic.eval()
             central_q_critics.append(cq)
 
-        # Dummy RNN inputs for non-recurrent VNet (not used in forward, just passed)
-        _rnn_zeros = np.zeros((1, 1, 1), dtype=np.float32)
+        # Dummy RNN inputs — shape from config (mirrors runner; works for non-recurrent too)
+        _rnn_zeros = np.zeros(
+            (1, rnn_cfg['recurrent_n'], rnn_cfg['rnn_hidden_size']), dtype=np.float32
+        )
         _mask_ones = np.ones((1, 1), dtype=np.float32)
 
         def get_Q(agent_i, share_obs_t, torch_actions):
@@ -184,7 +210,7 @@ def _load_harl_model(algo, model_dir, scenario):
             q_values, _ = central_q_critics[agent_i].critic(combined, _rnn_zeros, _mask_ones)
             return q_values.mean()
 
-    return actors, get_Q, env, device, num_agents
+    return actors, get_Q, env, device, num_agents, algo, scenario, rnn_cfg
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +229,7 @@ def _make_logdir(base_name, scenario, algo, nagents, seed):
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     logdir = os.path.join(
         os.getcwd(), 'runs', 'frob_norm_experiments', base_name,
-        f"{scenario}_{algo}_nagents{nagents}_seed{seed}_{timestamp}"
+        f"{scenario}_nagents{nagents}", f"{algo}_seed{seed}_{timestamp}"
     )
     os.makedirs(logdir, exist_ok=True)
     return logdir
@@ -213,55 +239,99 @@ def _make_multiseed_logdir(base_name, scenario, algo, nagents, n_seeds):
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     logdir = os.path.join(
         os.getcwd(), 'runs', 'frob_norm_experiments', base_name,
-        f"{scenario}_{algo}_nagents{nagents}_seeds{n_seeds}_{timestamp}"
+        f"{scenario}_nagents{nagents}", f"{algo}_seeds{n_seeds}_{timestamp}"
     )
     os.makedirs(logdir, exist_ok=True)
     return logdir
 
 
-def _actor_step(actor, obs_t):
+def _init_rnn_states(actors, rnn_cfg):
+    """
+    Initialize zero RNN hidden states for all actors.
+
+    Shape is taken from ``rnn_cfg`` (not from model introspection), so it works
+    for both ``use_recurrent_policy: True`` and ``use_recurrent_policy: False``.
+    Mirrors the runner's::
+
+        eval_rnn_states = np.zeros((n_threads, n_agents, recurrent_n, rnn_hidden_size))
+
+    Args:
+        actors  : list of HARL actor objects
+        rnn_cfg : dict — keys: recurrent_n, rnn_hidden_size, use_rnn
+
+    Returns:
+        list — None for off-policy actors, np.ndarray (1, recurrent_n, rnn_hidden_size) otherwise
+    """
+    return [
+        None if hasattr(actor, 'target_actor')
+        else np.zeros((1, rnn_cfg['recurrent_n'], rnn_cfg['rnn_hidden_size']), dtype=np.float32)
+        for actor in actors
+    ]
+
+
+def _actor_step(actor, obs_t, rnn_state_np):
     """
     Get a single deterministic action from an actor, handling both
     off-policy (DeterministicPolicy) and on-policy (StochasticPolicy) actors.
 
-    Off-policy actors expose ``get_actions(obs, add_noise)``.
-    On-policy actors expose ``act(obs, rnn_states, masks, deterministic)``.
-    """
-    if hasattr(actor, 'target_actor'):       # off-policy
-        return actor.get_actions(obs_t, add_noise=False)
-    else:                                    # on-policy stochastic
-        _rnn = np.zeros((1, 1, 1), dtype=np.float32)
-        _msk = np.ones((1, 1),     dtype=np.float32)
-        actions, _ = actor.act(obs_t, _rnn, _msk, deterministic=True)
-        return actions
+    Mirrors the runner pattern (eval loop)::
 
-
-def _get_actions(actors, obs_list, device):
-    """
-    Get deterministic actions from all actors.
+        eval_actions, temp_rnn_state = actor.act(obs, rnn_states, masks, deterministic=True)
+        eval_rnn_states[:, agent_id] = _t2n(temp_rnn_state)
 
     Args:
-        actors   : list of HARL actor objects
-        obs_list : np.ndarray (n_agents, obs_dim)
-        device   : torch.device
+        actor       : HARL actor object
+        obs_t       : torch.Tensor  (1, obs_dim)  on the correct device
+        rnn_state_np: np.ndarray (1, recurrent_n, hidden_size) or None for off-policy
 
     Returns:
-        np.ndarray (n_agents, action_dim)
+        action_t      : torch.Tensor — action (still on device, detached)
+        new_rnn_state : np.ndarray (1, recurrent_n, hidden_size) or None
+    """
+    if hasattr(actor, 'target_actor'):       # off-policy — no RNN
+        return actor.get_actions(obs_t, add_noise=False), None
+    else:                                    # on-policy stochastic with RNN
+        _msk = np.ones((1, 1), dtype=np.float32)
+        actions, new_rnn_state = actor.act(obs_t, rnn_state_np, _msk, deterministic=True)
+        new_rnn_np = new_rnn_state.detach().cpu().numpy()
+        return actions, new_rnn_np
+
+
+def _get_actions(actors, obs_list, device, rnn_states):
+    """
+    Get deterministic actions from all actors, carrying RNN state forward.
+
+    Mirrors the runner's eval loop::
+
+        eval_actions, temp_rnn_state = actor.act(obs, rnn_states[:, agent_id], masks, deterministic=True)
+        eval_rnn_states[:, agent_id] = _t2n(temp_rnn_state)
+
+    Args:
+        actors     : list of HARL actor objects
+        obs_list   : np.ndarray (n_agents, obs_dim)
+        device     : torch.device
+        rnn_states : list of np.ndarray or None — current hidden states, one per agent
+
+    Returns:
+        actions_np     : np.ndarray (n_agents, action_dim)
+        new_rnn_states : list of np.ndarray or None — updated hidden states
     """
     actions = []
+    new_rnn_states = []
     for i, actor in enumerate(actors):
         obs_t = torch.FloatTensor(obs_list[i]).unsqueeze(0).to(device)
         with torch.no_grad():
-            a = _actor_step(actor, obs_t)
+            a, new_rnn = _actor_step(actor, obs_t, rnn_states[i])
         actions.append(a.cpu().numpy().squeeze(0))
-    return np.array(actions)
+        new_rnn_states.append(new_rnn)
+    return np.array(actions), new_rnn_states
 
 
 # ---------------------------------------------------------------------------
 # Cross-Hessian computations
 # ---------------------------------------------------------------------------
 
-def _compute_pairwise_frob_norms(actors, get_Q, obs_list, s_obs, device):
+def _compute_pairwise_frob_norms(actors, get_Q, obs_list, s_obs, device, rnn_states):
     """
     Compute cross-Hessian Frobenius norms for all (i, j) agent pairs.
 
@@ -271,11 +341,12 @@ def _compute_pairwise_frob_norms(actors, get_Q, obs_list, s_obs, device):
     For on-policy algorithms Q_i is agent i's per-agent CentralizedQCritic.
 
     Args:
-        actors   : list of actor objects
-        get_Q    : callable(agent_i, share_obs_t, torch_actions_list) -> scalar
-        obs_list : np.ndarray (n_agents, obs_dim)
-        s_obs    : np.ndarray (state_dim,) — global/shared state
-        device   : torch.device
+        actors     : list of actor objects
+        get_Q      : callable(agent_i, share_obs_t, torch_actions_list) -> scalar
+        obs_list   : np.ndarray (n_agents, obs_dim)
+        s_obs      : np.ndarray (state_dim,) — global/shared state
+        device     : torch.device
+        rnn_states : list of np.ndarray or None — current RNN hidden states per agent
 
     Returns:
         N×N list of floats
@@ -286,7 +357,7 @@ def _compute_pairwise_frob_norms(actors, get_Q, obs_list, s_obs, device):
     for i, actor in enumerate(actors):
         obs_t = torch.FloatTensor(obs_list[i]).unsqueeze(0).to(device)
         with torch.no_grad():
-            a = _actor_step(actor, obs_t)
+            a, _ = _actor_step(actor, obs_t, rnn_states[i])
         raw_actions.append(a.detach())
 
     torch_actions = [Variable(raw_actions[i].clone(), requires_grad=True) for i in range(N)]
@@ -317,7 +388,7 @@ def _compute_pairwise_frob_norms(actors, get_Q, obs_list, s_obs, device):
     return results
 
 
-def _compute_pairwise_svd_gradient_shift(actors, get_Q, obs_list, s_obs, device, epsilon=0.01):
+def _compute_pairwise_svd_gradient_shift(actors, get_Q, obs_list, s_obs, device, rnn_states, epsilon=0.01):
     """
     Cross-Hessian Frobenius norm and SVD-directed gradient shift for every (i, j).
 
@@ -330,6 +401,7 @@ def _compute_pairwise_svd_gradient_shift(actors, get_Q, obs_list, s_obs, device,
 
     Args:
         actors, get_Q, obs_list, s_obs, device: same semantics as above
+        rnn_states : list of np.ndarray or None — current RNN hidden states per agent
         epsilon: perturbation magnitude along v_max
 
     Returns:
@@ -341,7 +413,7 @@ def _compute_pairwise_svd_gradient_shift(actors, get_Q, obs_list, s_obs, device,
     for i, actor in enumerate(actors):
         obs_t = torch.FloatTensor(obs_list[i]).unsqueeze(0).to(device)
         with torch.no_grad():
-            a = _actor_step(actor, obs_t)
+            a, _ = _actor_step(actor, obs_t, rnn_states[i])
         raw_actions.append(a.detach())
 
     torch_actions = [Variable(raw_actions[i].clone(), requires_grad=True) for i in range(N)]
@@ -420,10 +492,13 @@ def _save_gif(frames, filepath, fps=10):
 # Episode runners
 # ---------------------------------------------------------------------------
 
-def _run_episode_with_frob_norms(actors, get_Q, env, seed, device):
+def _run_episode_with_frob_norms(actors, get_Q, env, seed, device, rnn_cfg):
     """
     Run one episode and collect per-timestep cross-Hessian Frobenius norms
     and RGB frames for GIF rendering.
+
+    RNN hidden states are initialised to zeros at episode start and carried
+    forward at every step, mirroring the runner's eval loop.
 
     Returns:
         frob_norms_history : list of N×N float matrices, one per timestep
@@ -434,14 +509,19 @@ def _run_episode_with_frob_norms(actors, get_Q, env, seed, device):
     env.seed(seed)
     obs, s_obs, _ = env.reset()
 
+    rnn_states = _init_rnn_states(actors, rnn_cfg)   # zero hidden states at episode start
+
     frob_norms_history = []
     frames = [env.render()]  # initial frame
 
     while True:
-        frob_matrix = _compute_pairwise_frob_norms(actors, get_Q, obs, s_obs[0], device)
+        frob_matrix = _compute_pairwise_frob_norms(
+            actors, get_Q, obs, s_obs[0], device, rnn_states
+        )
         frob_norms_history.append(frob_matrix)
 
-        actions = _get_actions(actors, obs, device)
+        actions, rnn_states = _get_actions(actors, obs, device, rnn_states)
+        # actions[1] = np.zeros_like(actions[0])  # freeze agent to identify its id in GIF
         obs, s_obs, _, dones, _, _ = env.step(actions)
         frames.append(env.render())
 
@@ -451,7 +531,7 @@ def _run_episode_with_frob_norms(actors, get_Q, env, seed, device):
     return frob_norms_history, frames, len(frob_norms_history)
 
 
-def _run_svd_coupling_episode(actors, get_Q, env, seed, device, epsilon):
+def _run_svd_coupling_episode(actors, get_Q, env, seed, device, epsilon, rnn_cfg):
     """
     Run one episode collecting SVD-based coupling data at every timestep.
 
@@ -468,6 +548,8 @@ def _run_svd_coupling_episode(actors, get_Q, env, seed, device, epsilon):
     env.seed(seed)
     obs, s_obs, _ = env.reset()
 
+    rnn_states = _init_rnn_states(actors, rnn_cfg)   # zero hidden states at episode start
+
     n_agents = len(actors)
     records  = []
     perturbed_actions_by_ts = {}   # {t: {(i, j): perturbed_action_j_numpy}}
@@ -476,7 +558,7 @@ def _run_svd_coupling_episode(actors, get_Q, env, seed, device, epsilon):
 
     while True:
         coupling = _compute_pairwise_svd_gradient_shift(
-            actors, get_Q, obs, s_obs[0], device, epsilon
+            actors, get_Q, obs, s_obs[0], device, rnn_states, epsilon
         )
 
         perturbed_at_t = {}
@@ -492,7 +574,7 @@ def _run_svd_coupling_episode(actors, get_Q, env, seed, device, epsilon):
             perturbed_at_t[(agent_i, agent_j)] = m['perturbed_action_j']
         perturbed_actions_by_ts[timestep] = perturbed_at_t
 
-        actions = _get_actions(actors, obs, device)
+        actions, rnn_states = _get_actions(actors, obs, device, rnn_states)
         obs, s_obs, rewards, dones, _, _ = env.step(actions)
         # rewards[i] == [total_reward] for all i (shared cooperative reward)
         normal_rewards += np.array([r[0] for r in rewards])
@@ -625,7 +707,7 @@ def _save_frob_norm_heatmap(frob_norms_history, nagents, logdir, seed, max_cols=
     return heatmap_path
 
 
-def _run_perturbed_episode(actors, env, seed, device, target_timestep, agent_i_idx, agent_j_idx, perturbed_action_j):
+def _run_perturbed_episode(actors, env, seed, device, target_timestep, agent_i_idx, agent_j_idx, perturbed_action_j, rnn_cfg):
     """
     Replay an episode with the same seed and deterministic policy, but at
     *target_timestep* agent j uses *perturbed_action_j* instead of the
@@ -657,11 +739,13 @@ def _run_perturbed_episode(actors, env, seed, device, target_timestep, agent_i_i
     env.seed(seed)
     obs, s_obs, _ = env.reset()
 
+    rnn_states = _init_rnn_states(actors, rnn_cfg)   # zero hidden states at episode start
+
     total_reward = 0.0
     timestep = 0
 
     while True:
-        actions = _get_actions(actors, obs, device)   # (n_agents, action_dim)
+        actions, rnn_states = _get_actions(actors, obs, device, rnn_states)
 
         # Swap in the pre-computed perturbed action at the target step only
         if timestep == target_timestep:
@@ -840,20 +924,20 @@ def frob_norm_episode_experiment(config):
         config: Namespace with fields:
                   algo, scenario, model_dir, seed
     """
-    actors, get_Q, env, device, nagents = _load_harl_model(
-        config.algo, config.model_dir, config.scenario
+    actors, get_Q, env, device, nagents, algo, scenario, rnn_cfg = _load_harl_model(
+        config.model_dir
     )
-    logdir = _make_logdir('episode_frob_norm', config.scenario, config.algo, nagents, config.seed)
+    logdir = _make_logdir('episode_frob_norm', scenario, algo, nagents, config.seed)
 
     print(f"[frob_norm_episode_experiment]")
-    print(f"  algo     : {config.algo}")
-    print(f"  env      : {config.scenario}")
+    print(f"  algo     : {algo}")
+    print(f"  env      : {scenario}")
     print(f"  agents   : {nagents}")
     print(f"  seed     : {config.seed}")
     print(f"  output   : {logdir}")
 
     frob_norms_history, frames, episode_length = _run_episode_with_frob_norms(
-        actors, get_Q, env, config.seed, device
+        actors, get_Q, env, config.seed, device, rnn_cfg
     )
     print(f"  episode length: {episode_length} timesteps")
 
@@ -891,17 +975,17 @@ def svd_coupling_experiment(config):
         config: Namespace with fields:
                   algo, scenario, model_dir, epsilon, total_experiments
     """
-    actors, get_Q, env, device, nagents = _load_harl_model(
-        config.algo, config.model_dir, config.scenario
+    actors, get_Q, env, device, nagents, algo, scenario, rnn_cfg = _load_harl_model(
+        config.model_dir
     )
     logdir = _make_multiseed_logdir(
-        'grad_shift_svd_coupling', config.scenario, config.algo,
+        'grad_shift_svd_coupling', scenario, algo,
         nagents, config.total_experiments
     )
 
     print(f"[grad_shift_svd_coupling_experiment]")
-    print(f"  algo         : {config.algo}")
-    print(f"  env          : {config.scenario}")
+    print(f"  algo         : {algo}")
+    print(f"  env          : {scenario}")
     print(f"  agents       : {nagents}")
     print(f"  seeds        : {config.total_experiments}")
     print(f"  epsilon      : {config.epsilon}")
@@ -911,7 +995,7 @@ def svd_coupling_experiment(config):
     all_records = []
     for seed in tqdm(range(config.total_experiments), desc="Seeds"):
         records, perturbed_actions_by_ts, normal_rewards = _run_svd_coupling_episode(
-            actors, get_Q, env, seed, device, config.epsilon
+            actors, get_Q, env, seed, device, config.epsilon, rnn_cfg
         )
 
         # For every (timestep, pair) replay a perturbed episode to measure agent i's reward drop
@@ -922,7 +1006,7 @@ def svd_coupling_experiment(config):
 
             perturbed_action_j = perturbed_actions_by_ts[t][(ai, aj)]
             perturbed_reward_i = _run_perturbed_episode(
-                actors, env, seed, device, t, ai, aj, perturbed_action_j
+                actors, env, seed, device, t, ai, aj, perturbed_action_j, rnn_cfg
             )
 
             record['normal_reward_i']    = float(normal_rewards[ai])
@@ -955,11 +1039,6 @@ def _build_parser():
 
     # Shared arguments added to both subcommands
     def _add_common(p):
-        p.add_argument('--algo', type=str, default='haddpg',
-                       choices=sorted(ALL_ALGOS),
-                       help='HARL algorithm (default: haddpg)')
-        p.add_argument('--scenario', type=str, default='simple_spread_v3',
-                       help='PettingZoo MPE scenario (default: simple_spread_v3)')
         p.add_argument('--model_dir', type=str, required=True,
                        help='Path to directory containing actor/critic checkpoints')
 
