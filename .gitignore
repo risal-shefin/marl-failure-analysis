@@ -351,3 +351,6 @@ maddpg-pytorch/models/
 maddpg-pytorch/runs/
 MAPPO_MPE/runs/
 MAPPO_MPE/model/
+
+# HARL
+harl_frob_container/runs/

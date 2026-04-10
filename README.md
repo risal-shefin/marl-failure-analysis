@@ -38,6 +38,48 @@ SMAC: <br>
 $python -m scripts.smac.multi_seed_statistics 3s_vs_3z <model_path> --total_experiments 100
 ```
 
+### Cross-Hessian Frobenius Norm Analysis
+This module provides two PettingZoo experiments:
+
+1) **Single-Episode Visualization + Frobenius Logging** (`episode_gif_frob_norm`)
+
+Runs one seeded deterministic episode and records per-timestep cross-Hessian Frobenius norms for every ordered agent pair.
+
+```sh
+$python -m scripts.pettingzoo.frob_norm_experiments episode_gif_frob_norm simple_spread_v3 <model_path> --seed 0
+```
+
+What it does:
+- Computes pairwise cross-Hessian Frobenius norms at each timestep.
+- Saves an episode GIF for qualitative trajectory inspection.
+- Writes a detailed per-timestep text log with per-pair max/min and overall max/min.
+- Saves a heatmap over timesteps (agent-pair rows, timestep columns).
+
+**Outputs (under** `runs/frob_norm_experiments/episode_gif_frob_norm/...`**):**
+- `episode_seed<seed>.gif`
+- `frob_norms_seed<seed>.txt`
+- `frob_norm_heatmap_seed<seed>.png`
+
+2) **Multi-Seed SVD Coupling Analysis** (`grad_shift_svd_coupling`)
+
+Analyzes how cross-Hessian strength relates to policy-gradient sensitivity under SVD-directed perturbations (continuous-action models only).
+
+```sh
+$python -m scripts.pettingzoo.frob_norm_experiments grad_shift_svd_coupling simple_spread_v3 <model_path> --epsilon 0.01 --total_experiments 100
+```
+
+What it does:
+- Computes cross-Hessian $H = \nabla_{a_j} \nabla_{a_i} Q_i$ for all ordered agent pairs.
+- Uses SVD directions to perturb agent $j$ and measures $\|\Delta g\|_2$ for agent $i$.
+- Replays perturbed episodes to record reward impact for the affected agent.
+- Generates per-pair and combined scatter plots with linear fits and Pearson correlation.
+
+**Outputs (under** `runs/frob_norm_experiments/grad_shift_svd_coupling/...`**):**
+- `csv_data/raw_coupling_data.csv` (per seed/timestep/pair records)
+- `csv_data/mean_coupling_by_pair.csv` (aggregated pair statistics)
+- `plots/svd_coupling_frob_vs_deltag_all_pairs.png` (combined plot)
+- `plots/svd_coupling_pair_<agent_j>_to_<agent_i>.png` (individual pair plots)
+
 ## HARL
 ### Installation / Preparation
 1. Clone and install HARL (https://github.com/PKU-MARL/HARL) and confirm its example scripts run.
@@ -97,6 +139,59 @@ The evaluation scripts produce a folder (controlled by `--folder_name`) containi
 - Influence and derivative analyses: `cumulative_influences_all_seeds.csv`, `directional_derivatives_all_seeds.csv`, `taylor_deviations_all_seeds.csv`.
 - Patient-zero analysis and per-pair detailed files under `pair_specific_results/`.
 
+### Cross-Hessian Frobenius Norm Analysis
+Set directory: <br>
+```sh
+$cd harl_frob_container
+```
+
+1) **Single-Episode Visualization + Frobenius Logging** (`episode_gif_frob_norm`)
+
+Runs one seeded deterministic episode and records per-timestep cross-Hessian Frobenius norms for every ordered agent pair.
+
+```sh
+$python examples.pettingzoo.frob_norm_experiments episode_gif_frob_norm \
+    --algo hatrpo \
+    --scenario simple_spread_v3 \
+    --model_dir <path_to_model_checkpoint_dir> \
+    --seed 0
+```
+
+What it does:
+- Computes pairwise cross-Hessian Frobenius norms at each timestep: $H_{ij} = \left\| \frac{\partial^2 Q}{\partial a_i \partial a_j} \right\|_F$
+- Saves an episode GIF for qualitative trajectory inspection.
+- Writes a detailed per-timestep text log with per-pair max/min and overall max/min.
+- Saves a heatmap over timesteps (agent-pair rows, timestep columns).
+
+**Outputs (under** `runs/frob_norm_experiments/episode_gif_frob_norm/...`**):**
+- `episode_seed<seed>.gif`
+- `frob_norms_seed<seed>.txt`
+- `frob_norm_heatmap_seed<seed>.png`
+
+2) **Multi-Seed SVD Coupling Analysis** (`grad_shift_svd_coupling`)
+
+Analyzes how cross-Hessian strength relates to policy-gradient sensitivity under SVD-directed perturbations.
+
+```sh
+$python examples.pettingzoo.frob_norm_experiments grad_shift_svd_coupling \
+    --algo haddpg \
+    --scenario simple_spread_v3 \
+    --model_dir <path_to_model_checkpoint_dir> \
+    --epsilon 0.01 \
+    --total_experiments 100
+```
+
+What it does:
+- Computes cross-Hessian $H_{ij} = \frac{\partial^2 Q}{\partial a_i \partial a_j}$ for all ordered agent pairs.
+- Uses SVD top right singular vector to perturb agent $j$ and measures induced gradient shift $\|\Delta g\|_2$ for agent $i$.
+- Replays perturbed episodes to record reward impact for the affected agent.
+- Generates per-pair and combined scatter plots with linear fits and Pearson correlation.
+
+**Outputs (under** `runs/frob_norm_experiments/grad_shift_svd_coupling/...`**):**
+- `csv_data/raw_coupling_data.csv` (per seed/timestep/pair records)
+- `csv_data/mean_coupling_by_pair.csv` (aggregated pair statistics)
+- `plots/svd_coupling_frob_vs_deltag_all_pairs.png` (combined plot)
+- `plots/svd_coupling_pair_<agent_j>_to_<agent_i>.png` (individual pair plots)
 
 ## Acknowledgements
 - MADDPG: https://github.com/shariqiqbal2810/maddpg-pytorch
