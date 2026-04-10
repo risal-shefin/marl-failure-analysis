@@ -644,6 +644,16 @@ class SVDCouplingAnalysisRunner:
         df.to_csv(raw_csv_path, index=False)
         print(f"\nSaved raw coupling data to: {raw_csv_path}")
         
+        # Save top/bottom 5 Frobenius norm entries with their seed and timestep
+        frob_cols = ['seed', 'timestep', 'agent_i', 'agent_j', 'frob_norm',
+                     'delta_g_norm', 'delta_critic1', 'delta_critic2']
+        top5 = df.nlargest(5, 'frob_norm')[frob_cols]
+        bot5 = df.nsmallest(5, 'frob_norm')[frob_cols]
+        extremes = pd.concat([top5.assign(rank='top5'), bot5.assign(rank='bottom5')], ignore_index=True)
+        extremes_path = os.path.join(csv_dir, "frob_norm_extremes.csv")
+        extremes.to_csv(extremes_path, index=False)
+        print(f"Saved top/bottom 5 Frobenius norm entries to: {extremes_path}")
+        
         # Compute statistics grouped by agent pair
         grouped = df.groupby(['agent_i', 'agent_j']).agg({
             'frob_norm': ['mean', 'std', 'count'],

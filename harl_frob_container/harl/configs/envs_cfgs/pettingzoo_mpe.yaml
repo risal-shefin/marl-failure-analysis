@@ -3,3 +3,5 @@ continuous_actions: True
 render_mode: rgb_array
 enable_heterogeneous_agents: false # legacy behavior by default; set true for mixed agent types (e.g., simple_adversary_v3)
 reward_mode: global_sum_shared # legacy default; when heterogeneous mode is enabled, can be team_by_type or individual
+# episode length
+max_cycles: 25
