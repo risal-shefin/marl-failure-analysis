@@ -7,7 +7,8 @@ from .basic_metrics import (
     compute_pairwise_frob_norms,
     compute_2nd_ord_dir_derivatives,
     collect_agent_q_values,
-    collect_agent_q_value
+    collect_agent_q_value,
+    compute_pairwise_svd_q_drop
 )
 from .influence_metrics import (
     compute_pairwise_action_influences,
@@ -30,5 +31,6 @@ __all__ = [
     'collect_agent_q_values',
     'compute_pairwise_action_directional_second_derivatives',
     'AttackMetricsComputer',
-    'collect_agent_q_value'
+    'collect_agent_q_value',
+    'compute_pairwise_svd_q_drop'
 ]

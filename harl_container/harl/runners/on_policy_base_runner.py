@@ -293,7 +293,7 @@ class OnPolicyBaseRunner:
                     avg_reward = self.eval_avg_reward()
                     # save model if this is the best eval reward so far
                     print(f"Average reward in episode {episode}: {avg_reward}")
-                    if avg_reward is not None and avg_reward > self.best_reward:
+                    if avg_reward is not None and avg_reward >= self.best_reward:
                         self.best_reward = avg_reward
                         self.best_reward_episode = episode
                         # format reward for filename (limit decimals)
