@@ -1,3 +1,5 @@
+This is the code repository of the papers **"Interpretable Failure Analysis in Multi-Agent Reinforcement Learning Systems"** and **"When One Agent Reshapes Another: Cross-Hessian Interpretation of Local Coupling in MARL"**.
+
 ## Environment Setup
 ```sh
 $conda create --name xmarl python=3.10
